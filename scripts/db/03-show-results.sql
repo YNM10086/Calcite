@@ -2,15 +2,19 @@
 -- ============================================================================
 -- Calcite 一键查看示例轨迹（不会刷屏、不会进分页器）
 --
--- 第 1 行 \encoding UTF8 很关键：中文版 Windows 的 psql 默认按 GBK 读文件，
--- 而本文件是 UTF-8，不声明就会报「编码"GBK"的字符 0x.. 在编码"UTF8"没有相对应值」。
+-- 两个编码陷阱（中文版 Windows 特有）：
+--   ① 文件是 UTF-8，但 psql 默认按 GBK 读 → 报「编码 GBK 的字符 0x.. 没有相对应值」
+--      解决：本文件第一行的 \encoding UTF8
+--   ② psql 自己的提示信息（如 "(1 行记录)"）按系统语言 GBK 输出，和数据(UTF-8)混在一起 → 乱码
+--      解决：跑之前设 $env:LC_MESSAGES='C'，让 psql 说英文
 --
--- 用法 A（推荐，中文一定能正常显示）：输出到文件，用 VS Code 打开
+-- 用法（推荐，中文一定能正常显示）：输出到文件，用 VS Code 打开
 --   $env:PGPASSWORD='你的密码'
+--   $env:LC_MESSAGES='C'
 --   & "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -o "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\result.txt" -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\scripts\db\03-show-results.sql"
 --   code "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\result.txt"
 --
--- 用法 B（直接看，但中文可能在控制台里乱码）：把 -o 那一段去掉即可
+-- 用法 B（直接看，但中文数据可能在控制台里乱码）：把 -o 那一段去掉即可
 -- ============================================================================
 
 -- 关掉分页器：否则输出超过一屏时 psql 会打开 less/more，看起来就像"卡住了"
