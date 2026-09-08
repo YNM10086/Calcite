@@ -90,3 +90,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+### 本地临时产物（截图、DOM 转储、无头浏览器配置等）###
+.tmp/
