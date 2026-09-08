@@ -1,3 +1,4 @@
+\encoding UTF8
 -- ============================================================================
 -- Calcite 示例数据：一条北京城区骑行轨迹（天安门 → 奥林匹克公园）
 -- 用法：psql -U postgres -d calcite -f scripts/db/02-sample-track.sql

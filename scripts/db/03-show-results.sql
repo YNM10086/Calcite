@@ -1,7 +1,12 @@
+\encoding UTF8
 -- ============================================================================
 -- Calcite 一键查看示例轨迹（不会刷屏、不会进分页器）
+--
+-- 第 1 行 \encoding UTF8 很关键：中文版 Windows 的 psql 默认按 GBK 读文件，
+-- 而本文件是 UTF-8，不声明就会报「编码"GBK"的字符 0x.. 在编码"UTF8"没有相对应值」。
+--
 -- 用法（直接复制到 PowerShell，路径写全，在任何目录都能跑）：
---   $env:PGPASSWORD='557096138Cc'
+--   $env:PGPASSWORD='你的密码'
 --   & "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\scripts\db\03-show-results.sql"
 -- ============================================================================
 

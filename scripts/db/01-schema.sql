@@ -1,3 +1,4 @@
+\encoding UTF8
 -- ============================================================================
 -- Calcite 数据库结构 v1 —— 对应设计文档 3.2
 -- 用法：psql -U postgres -d calcite -f scripts/db/01-schema.sql
