@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: calcite
+  # 默认激活 local 配置；本地密码写在 application-local.yml（已被 .gitignore 排除，不会上传）
+  profiles:
+    active: local
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/calcite
+    username: postgres
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    # update：启动时按实体类自动建表/补字段（学习阶段很方便，生产环境不要这么用）
+    hibernate:
+      ddl-auto: update
+    # 关闭 open-in-view，避免 Web 请求期间一直占用数据库连接
+    open-in-view: false
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+server:
+  port: 8080

@@ -68,6 +68,8 @@ logs/
 
 ### ===== 构建产物 =====
 ### Java / Maven / Gradle ###
+# 本项目用的本地 Maven 依赖仓库（沙箱内构建用，非标准位置）
+.m2/
 target/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
@@ -78,6 +80,7 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 
 ### 前端 / Node（Vue3 阶段用）###
+.npm-cache/
 node_modules/
 dist/
 dist-ssr/

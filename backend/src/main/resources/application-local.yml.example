@@ -1,0 +1,5 @@
+# 这是模板文件，可以提交到 Git。
+# 用法：复制本文件为 application-local.yml，然后把下面的密码改成你自己的。
+spring:
+  datasource:
+    password: 在这里填你的本地 PostgreSQL 密码
