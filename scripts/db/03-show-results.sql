@@ -5,9 +5,12 @@
 -- 第 1 行 \encoding UTF8 很关键：中文版 Windows 的 psql 默认按 GBK 读文件，
 -- 而本文件是 UTF-8，不声明就会报「编码"GBK"的字符 0x.. 在编码"UTF8"没有相对应值」。
 --
--- 用法（直接复制到 PowerShell，路径写全，在任何目录都能跑）：
+-- 用法 A（推荐，中文一定能正常显示）：输出到文件，用 VS Code 打开
 --   $env:PGPASSWORD='你的密码'
---   & "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\scripts\db\03-show-results.sql"
+--   & "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -o "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\result.txt" -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\scripts\db\03-show-results.sql"
+--   code "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\result.txt"
+--
+-- 用法 B（直接看，但中文可能在控制台里乱码）：把 -o 那一段去掉即可
 -- ============================================================================
 
 -- 关掉分页器：否则输出超过一屏时 psql 会打开 less/more，看起来就像"卡住了"
