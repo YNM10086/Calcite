@@ -11,9 +11,11 @@ spring:
     driver-class-name: org.postgresql.Driver
 
   jpa:
-    # update：启动时按实体类自动建表/补字段（学习阶段很方便，生产环境不要这么用）
+    # none：表结构完全由 scripts/db/*.sql 管理，Hibernate 不碰数据库
+    # （之前是 update，会自动建表/改字段；但 PostGIS 的 geometry 列类型
+    #   是手写 DDL 声明的，让 Hibernate 去"补"容易把列改坏）
     hibernate:
-      ddl-auto: update
+      ddl-auto: none
     # 关闭 open-in-view，避免 Web 请求期间一直占用数据库连接
     open-in-view: false
     show-sql: true
