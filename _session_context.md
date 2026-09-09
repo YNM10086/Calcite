@@ -21,8 +21,20 @@
 - **三张核心表已建好 + 示例轨迹已入库**（`1811c05`）：`track`/`track_point`/`stay_point` + 5 个索引（含 `GIST(geom, recorded_at)` 时空联合）；示例轨迹 121 点 / 9444.2 m / 3000 s / 均速 11.33 km/h
 - **中文 Windows 下 psql 两个编码坑已修**（`2910130` / `447867d` / `542c9a0`）：① 文件是 UTF-8 但 psql 按 GBK 读 → 脚本首行 `\encoding UTF8`；② psql 自身提示行 `(1 行记录)` 按 GBK 输出、数据按 UTF-8 → 跑前 `$env:LC_MESSAGES='C'`；中文数据在控制台仍可能乱码，用 `-o 文件` + `code 文件` 兜底
 - **M1 后端接口已通并实测**（`ba47315`）：`Track`/`TrackPoint` 实体（JTS `LineString`/`Point` 映射 PostGIS geometry）、两个 Repository、`GET /api/tracks`（列表）+ `GET /api/tracks/{id}`（详情含 121 个点，坐标拆成 lon/lat）；`/api/tracks/999` 正确返回 404
+- **M1 前端收尾完成**（`8676744`）：`TrackList.vue`（纯展示 + 抛 select 事件）、`CesiumGlobe.vue`（`points` prop → Polyline `#7fd1ff` + 起/终点标记 + 相机 flyTo 到轨迹包围盒，实体用固定 id 重绘先删旧）、`App.vue`（统一管健康检查/列表/选中详情，支持 `?track=<id>` 深链接）
+- **安全清理**（`c726fa3`）：明文数据库密码从 `_session_context.md` 与学习笔记中移除，记忆文件改为可入库
 
-**下一步**：M1 收尾 —— 前端 `TrackList.vue` 拉 `/api/tracks` 并在 Cesium 地球上把轨迹画成线（Polyline），再考虑时间轴回放
+**下一步**：M1 时间轴回放（`CesiumGlobe.vue` 里 `timeline`/`animation` 目前是关的，做回放时打开），之后进 M2（停留点 / 热点 / 轨迹相似度）。
+
+**前端渲染验证方法（2026-09-09 定稿，必读）**：用 **Playwright + 真实时间**，不要用虚拟时钟截图。
+- ❌ `chrome --headless --virtual-time-budget=N --screenshot` **对本项目无效**：轨迹线由 `Primitive` 异步几何体
+  （worker 创建）渲染，虚拟时钟下 worker 不完成 → 线永远不出现；而点标记是同步的 `PointPrimitive`，
+  于是出现"只有两个端点、中间没有线"的假象，极易误判成代码 bug（本次就误判了一轮）。
+- ✅ 正确做法：`.tmp/pw-check.py`（Playwright，`launch(channel="chrome")`）→ 打开页面 → 点 `.track-list .item`
+  → `page.wait_for_timeout(10000)` 真实等待 → 截图 → `.tmp/analyze2.py` 数颜色。
+- 判定标准：精确色 `#7fd1ff` 命中 ≈3812 px，包围盒 `x[766,833] y[93,813]`（纵向 720px）。
+- 沙箱内 Playwright 必须提权 `danger-full-access`（浏览器子进程靠管道通信）。
+- 另：左上角 UI 面板会贡献 `#7fd1ff` 像素，统计时要排除 `x<400` 的区域。
 
 **⏸️ 用户已要求暂停（2026-09-08）**：用户表示"感觉想一步登天"，要求先消化第一阶段内容再继续。
 已产出学习笔记 `docs/learning/2026-09-08-phase1-notes.md`（14 节，含环境地图/PostGIS/表设计/编码坑/
@@ -49,8 +61,10 @@ PowerShell 只负责启动和查错，不显示图形。
   - `application.yml` 入库（通用配置，默认 profile=local）
   - `application-local.yml` **含数据库密码，已 gitignore**；`application-local.yml.example` 为可提交模板
 - `frontend/` —— Vue 3.5.42 + Vite 8.2.2
-  - `vite.config.js` 把 `/api` 代理到 `http://localhost:8080`（避免跨域）
-  - `src/App.vue` 调用健康检查展示前后端连通状态
+  - `vite.config.js` 把 `/api` 代理到 `http://localhost:8080`（避免跨域）；`define.CESIUM_BASE_URL` 指向 `/cesiumStatic`（由 vite-plugin-static-copy 从 node_modules 拷贝）
+  - `src/App.vue` 统一管数据：`/api/health` + 轨迹列表 + 选中详情，支持 `?track=<id>` 深链接
+  - `src/components/CesiumGlobe.vue` 三维地球：`points` prop → Polyline + 起终点标记 + 相机 flyTo；Viewer 用 `shallowRef`
+  - `src/components/TrackList.vue` 纯展示组件（props 进、`select` 事件出），不发请求
 - `.m2/`、`.npm-cache/` 为沙箱内构建用的本地缓存（已 gitignore，非标准位置）
 
 ### 数据库环境（已确认并修改）
@@ -70,8 +84,9 @@ PowerShell 只负责启动和查错，不显示图形。
 
 ### Git / GitHub
 - 仓库：`git@github.com:YNM10086/Calcite.git`（GitHub 账号 YNM10086），分支 main
-- **用户明确要求：暂时不推送到 GitHub，只本地提交保留回滚退路**（当前 `ahead 13`，origin/main = `1e342e6`）
-- 提交历史：`1e342e6` 初始化仓库 + .gitignore；`20da417` 前后端骨架；`349fe65` 删除模板 Main.java；`86dcdab` 设计文档 v1.0；`5f044d8` 小白导读；`da8eda9` PostGIS 初体验脚本；`38e91df` Cesium 三维地球接入；`1811c05` 三表 + 示例轨迹；`72eeda5` 示例轨迹查看脚本；`2910130` psql 编码修复；`447867d`/`542c9a0` 控制台乱码兜底；`ba47315` M1 后端接口；`040833c` 第一阶段学习笔记 + md2docx 转换脚本
+- **用户明确要求：暂时不推送到 GitHub，只本地提交保留回滚退路**（当前 `ahead 16`，origin/main = `1e342e6`）
+- 提交历史：`1e342e6` 初始化仓库 + .gitignore；`20da417` 前后端骨架；`349fe65` 删除模板 Main.java；`86dcdab` 设计文档 v1.0；`5f044d8` 小白导读；`da8eda9` PostGIS 初体验脚本；`38e91df` Cesium 三维地球接入；`1811c05` 三表 + 示例轨迹；`72eeda5` 示例轨迹查看脚本；`2910130` psql 编码修复；`447867d`/`542c9a0` 控制台乱码兜底；`ba47315` M1 后端接口；`040833c` 第一阶段学习笔记 + md2docx 转换脚本；`c726fa3` 去除明文数据库密码；`8676744` M1 前端收尾（轨迹列表 + 轨迹线）
+- ⚠️ **历史泄漏**：数据库密码仍存在于本地历史 `72eeda5`/`2910130`/`040833c` 中（从未推送）。若要公开仓库，需重写历史或先改数据库密码。
 - 本仓库 local core.sshCommand：`C:/Windows/System32/OpenSSH/ssh.exe -F C:/ProgramData/_ssh_config -i %USERPROFILE%/.ssh/id_ed25519 -o IdentitiesOnly=yes`
   - 必须带 `-F`：`github.com` 映射到 `ssh.github.com:443`（22 端口被拒/被墙）
   - 必须带 `-i` + `IdentitiesOnly=yes`：`D:\opencode_key` 权限过开放，OpenSSH 拒加载（它与 id_ed25519 是同一把 key，指纹 SHA256:34O4458D...）
