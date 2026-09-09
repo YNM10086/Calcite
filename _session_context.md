@@ -98,6 +98,7 @@ PowerShell 只负责启动和查错，不显示图形。
 - 改动：`CesiumGlobe.vue`（`SampledPositionProperty` 移动标记 + Cesium 时钟 + `defineExpose` play/pause/seekTo + `time-change` 100ms 节流）、`App.vue`（持有 playing / currentMs / loop）
 - 整条轨迹固定约 60 秒播完：`clock.multiplier = 轨迹总秒数 ÷ 60`（示例轨迹 = 50 倍）；循环用 `ClockRange.LOOP_STOP` / `CLAMPED` 切换
 - **回归命令**：`cd frontend && node scripts/check-playback.mjs`（17 项断言，零依赖，秒级出结果）
+- **生产构建已验证**：`cd frontend && npm run build` 通过（`✓ built in 1.57s`）；Vite 构建需提权 danger-full-access（它要 spawn 子进程探测路径，沙箱内报 `spawn EPERM`）
 - **验收证据（Playwright + Pillow）**：`.tmp/pw-playback.py` + `.tmp/analyze-playback.py`
   - 时刻推进 `07:30:00 → 07:33:20 → 07:36:43`；拖动到 80% 得 `08:10:00`（精确）
   - 白色移动点：播放中位移 50.5 px、暂停后 0.9 px；控制台零报错
