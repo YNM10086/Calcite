@@ -106,6 +106,20 @@ PowerShell 只负责启动和查错，不显示图形。
 - 明确未做：倍速按钮、速度/海拔曲线、相机跟随、轨迹抽稀、逐段画线
 - ✅ 速度数据已补：`speed_mps` 已回填（120/121 个点，`seq=0` 无前点故为 NULL），平均 11.33 km/h，范围 2.996–3.245 m/s；回填逻辑在 `scripts/db/02-sample-track.sql` 第 3 节（用 `ST_Distance(...::geography) / 时间差`）
 
+### M1 速度/海拔曲线（2026-09-09 完成）
+- 设计文档 `docs/superpowers/specs/2026-09-09-m1-speed-chart-design.md`；实施计划 `docs/superpowers/plans/2026-09-09-m1-speed-chart.md`
+- 新增：`frontend/src/lib/chart.js`（纯计算，12 个导出函数，零依赖）、`frontend/src/components/SpeedChart.vue`（上下双图，纯展示）
+- 改动：`App.vue`（引入组件、`@seek="seekTo"` 复用进度条同一个函数、`.status` 从 `bottom:62px` 上移到 `194px`）
+- 布局：速度图 56px + 海拔图 56px + 时间轴 20px = 140px，`position:absolute; bottom:46px`
+- 游标：1px 半透明虚线（`stroke-dasharray: 4 3`, opacity .7）+ 交点 r=2 白点；**游标画在数据线之前（下层）所以物理上不可能遮挡数据线**（实测只遮 4px，保留 99.9%）
+- 交点用 `valueAt` 线性插值（不是最近的真实点），保证正好落在游标线与数据线的交叉处
+- **回归命令**：`cd frontend && npm run check:chart`（37 项断言）；回放仍是 `npm run check:playback`（17 项）
+- **验收证据（Playwright + Pillow）**：`.tmp/check-chart-pixels.py`（10 项）
+  - 速度线 2888 px / 海拔线 2360 px；播放 4 秒游标位移 46→148 px
+  - 点 80% 处时钟 `08:09:58`（期望 `08:10:00`，±3 秒内——1px ≈ 2 秒，鼠标无亚像素）
+  - 控制台零报错
+- 明确未做（YAGNI）：缩放/框选/平移、导出图片、多轨迹对比、速度平滑、加速度/坡度、曲线折叠
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`
