@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import CesiumGlobe from './components/CesiumGlobe.vue'
+import SpeedChart from './components/SpeedChart.vue'
 import TrackList from './components/TrackList.vue'
 import TrackPlayer from './components/TrackPlayer.vue'
 import { canPlay, timeRange } from './lib/playback.js'
@@ -183,6 +184,16 @@ async function selectTrack(id) {
       <template v-else>未选择轨迹</template>
     </div>
 
+    <!-- 底部速度/海拔曲线：游标与回放同步，点曲线跳转到那一刻 -->
+    <SpeedChart
+      v-if="detail && canPlayback"
+      :points="trackPoints"
+      :current-ms="currentMs"
+      :start-ms="startMs"
+      :end-ms="endMs"
+      @seek="seekTo"
+    />
+
     <!-- 底部回放控制条：选中轨迹后才出现 -->
     <TrackPlayer
       v-if="detail"
@@ -281,7 +292,7 @@ async function selectTrack(id) {
 
 .status {
   position: absolute;
-  bottom: 62px;
+  bottom: 194px;
   left: 16px;
   z-index: 10;
   padding: 6px 12px;
