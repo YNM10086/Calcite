@@ -104,7 +104,7 @@ PowerShell 只负责启动和查错，不显示图形。
   - 白色移动点：播放中位移 50.5 px、暂停后 0.9 px；控制台零报错
   - 取消选中后播放条消失；121 个点全有时间戳
 - 明确未做：倍速按钮、速度/海拔曲线、相机跟随、轨迹抽稀、逐段画线
-- ⚠️ 数据缺口：`/api/tracks/1` 的 `speedMps` 全为 null（示例脚本没写 `speed_mps`），做速度曲线前必须先补
+- ✅ 速度数据已补：`speed_mps` 已回填（120/121 个点，`seq=0` 无前点故为 NULL），平均 11.33 km/h，范围 2.996–3.245 m/s；回填逻辑在 `scripts/db/02-sample-track.sql` 第 3 节（用 `ST_Distance(...::geography) / 时间差`）
 
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS

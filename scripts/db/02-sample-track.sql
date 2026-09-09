@@ -49,7 +49,7 @@ SELECT (SELECT id FROM track WHERE external_id = 'SAMPLE-001'),
 FROM pts;
 
 \echo ''
-\echo '########## 3) 回填派生字段（线、距离、时长、点数）##########'
+\echo '########## 3) 回填派生字段（线、距离、时长、点数、逐点速度）##########'
 UPDATE track t SET
   point_count = (SELECT count(*) FROM track_point WHERE track_id = t.id),
   -- 线由点生成，且必须按时间/顺序排好，否则线会乱连
@@ -59,6 +59,27 @@ UPDATE track t SET
                  FROM track_point WHERE track_id = t.id),
   duration_s  = EXTRACT(EPOCH FROM (t.end_time - t.start_time))::int
 WHERE t.external_id = 'SAMPLE-001';
+
+-- 逐点速度：到前一个点的球面距离 ÷ 两点时间差（单位 米/秒）。
+-- 第一个点没有「前一个点」，所以它的 speed_mps 保持 NULL —— 真实 GPS 数据也是这样，
+-- 前端画曲线时要能跳过空值。
+UPDATE track_point tp
+SET speed_mps = s.v
+FROM (
+  SELECT seq,
+         ST_Distance(geom::geography, prev_geom::geography)
+           / NULLIF(EXTRACT(EPOCH FROM (recorded_at - prev_at)), 0) AS v
+  FROM (
+    SELECT seq, recorded_at, geom,
+           LAG(geom) OVER (ORDER BY seq)        AS prev_geom,
+           LAG(recorded_at) OVER (ORDER BY seq) AS prev_at
+    FROM track_point
+    WHERE track_id = (SELECT id FROM track WHERE external_id = 'SAMPLE-001')
+  ) o
+  WHERE prev_geom IS NOT NULL
+) s
+WHERE tp.track_id = (SELECT id FROM track WHERE external_id = 'SAMPLE-001')
+  AND tp.seq = s.seq;
 
 \echo ''
 \echo '########## 4) 验收：轨迹概览 ##########'
@@ -81,23 +102,24 @@ ORDER BY seq
 LIMIT 5;
 
 \echo ''
-\echo '########## 6) 验收：用 PostGIS 算相邻点的即时速度 ##########'
+\echo '########## 6) 验收：回填的速度 vs 现算的速度（应当完全一致）##########'
 WITH ordered AS (
-  SELECT seq, recorded_at, geom,
+  SELECT seq, recorded_at, geom, speed_mps,
          LAG(geom) OVER (ORDER BY seq)        AS prev_geom,
          LAG(recorded_at) OVER (ORDER BY seq) AS prev_at
   FROM track_point
   WHERE track_id = (SELECT id FROM track WHERE external_id = 'SAMPLE-001')
+),
+calc AS (
+  SELECT seq, speed_mps,
+         ST_Distance(geom::geography, prev_geom::geography)
+           / NULLIF(EXTRACT(EPOCH FROM (recorded_at - prev_at)), 0) AS v
+  FROM ordered
+  WHERE prev_geom IS NOT NULL
 )
-SELECT seq,
-       round((ST_Distance(geom::geography, prev_geom::geography))::numeric, 2) AS 位移米,
-       EXTRACT(EPOCH FROM (recorded_at - prev_at))::int                        AS 间隔秒,
-       round((ST_Distance(geom::geography, prev_geom::geography)
-              / NULLIF(EXTRACT(EPOCH FROM (recorded_at - prev_at)), 0) * 3.6)::numeric, 2)
-         AS 即时速度公里每小时
-FROM ordered
-WHERE prev_geom IS NOT NULL
-ORDER BY seq
-LIMIT 8;
+SELECT count(*)                                          AS 参与比对点数,
+       count(*) FILTER (WHERE abs(speed_mps - v) < 1e-9) AS 完全一致,
+       round(max(abs(speed_mps - v))::numeric, 12)       AS 最大偏差
+FROM calc;
 
 \echo ''
