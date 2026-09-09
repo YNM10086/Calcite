@@ -134,7 +134,11 @@ App.vue：currentMs → 曲线游标位置
 | `niceTicks(min, max, count)` | 生成取整后的刻度（避免 `37.4213` 这种标签） |
 | `timeTicks(startMs, endMs, count)` | 生成时间轴刻度 |
 | `pathOf(series, xOf, yOf)` | 生成 SVG `path` 的 `d` 字符串 |
-| `nearestIndex(series, ms)` | 找离某时刻最近的点（悬停用） |
+| `scaleX(startMs, endMs, left, width)` | 时间 → 像素 x |
+| `scaleY(domain, top, height)` | 数值 → 像素 y |
+| `msAtX(x, startMs, endMs, left, width)` | 像素 x → 时间（点击/悬停反算） |
+| `valueAt(series, ms)` | 线性插值取某时刻的值（游标落点 + 悬停读数） |
+| `tickDigits(ticks)` | 推断刻度该保留几位小数 |
 | `formatTick(ms)` / `formatValue(v, digits)` | 标签格式化 |
 
 ---
@@ -191,7 +195,7 @@ App.vue：currentMs → 曲线游标位置
 | 交互 | 行为 | 实现要点 |
 |---|---|---|
 | 游标跟随 | 播放时竖直虚线随白点移动 | 复用已有的 `time-change` 事件（节流 100ms），不新增定时器 |
-| 悬停 | 显示「07:49:12 · 速度 3.15 m/s · 海拔 41.6 m」 | `mousemove` 取 `offsetX` → 换算成 ms → `nearestIndex` |
+| 悬停 | 显示「07:49:12 · 速度 3.15 m/s · 海拔 41.6 m」 | `mousemove` 取 `offsetX` → `msAtX` 换算成 ms → `valueAt` 插值 |
 | 点击 | 跳到该时刻 | 同一个 `offsetX` 换算 → `emit('seek', ms)` |
 | 拖出图表 | 隐藏悬停提示 | `mouseleave` |
 
@@ -222,7 +226,7 @@ App.vue：currentMs → 曲线游标位置
 
 - 零依赖、秒级、打印 `✓ / ✗`，失败时 `process.exitCode = 1`
 - 覆盖：`seriesOf` 跳空值、`domainOf` 退化保护、`niceTicks` 取整正确、
-  `pathOf` 生成的 `d` 合法、`nearestIndex` 边界、`formatTick` / `formatValue` 格式
+  `pathOf` 生成的 `d` 合法、`scaleX`/`scaleY` 端点、`msAtX` 夹紧、`valueAt` 插值与两端、`tickDigits` 位数、`formatTick` / `formatValue` 格式
 - 在 `package.json` 加脚本：`"check:chart": "node scripts/check-chart.mjs"`
 
 ### 8.2 真实浏览器层 —— Playwright + Pillow
