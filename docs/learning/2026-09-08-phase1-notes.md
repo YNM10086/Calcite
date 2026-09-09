@@ -850,7 +850,8 @@ WHERE external_id = 'SAMPLE-001';
 然后跑：
 
 ```powershell
-$env:PGPASSWORD='557096138Cc'
+# 数据库密码见 backend/src/main/resources/application-local.yml（该文件已 gitignore，不会进仓库）
+$env:PGPASSWORD='<你的数据库密码>'
 $env:LC_MESSAGES='C'
 & "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\test-degree.sql"
 ```
@@ -890,7 +891,8 @@ npm run dev
 ## 查数据库
 
 ```powershell
-$env:PGPASSWORD='557096138Cc'
+# 数据库密码见 backend/src/main/resources/application-local.yml（该文件已 gitignore，不会进仓库）
+$env:PGPASSWORD='<你的数据库密码>'
 $env:LC_MESSAGES='C'
 & "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -f "路径\脚本.sql"
 ```

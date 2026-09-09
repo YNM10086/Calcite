@@ -35,9 +35,10 @@ bin/
 Thumbs.db
 
 ### ===== 敏感信息：禁止上传 =====
-# 会话记忆（含本地环境、密码等隐私）
-_session_context.md
-_session_context*.md
+# 会话记忆的「私密覆盖」：只有需要写密码/密钥时才建这个文件。
+# 主文件 _session_context.md 已脱敏（密码只留指针），因此可以正常入库、享有版本历史。
+_session_context.local.md
+_session_context*.local.md
 
 # Spring Boot 本地配置（数据库密码通常写在这里）
 application-local.yml
