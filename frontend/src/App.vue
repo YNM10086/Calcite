@@ -1,7 +1,9 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import CesiumGlobe from './components/CesiumGlobe.vue'
 import TrackList from './components/TrackList.vue'
+import TrackPlayer from './components/TrackPlayer.vue'
+import { canPlay, timeRange } from './lib/playback.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -17,13 +19,63 @@ const selectedId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
 
+/* ============ 回放 ============ */
+// 地球组件的引用，用来调用它暴露的 play / pause / seekTo
+const globe = ref(null)
+const playing = ref(false)
+const loop = ref(true)
+// 每帧都在变的值用 shallowRef，避免 Vue 对它做深度代理
+const currentMs = shallowRef(0)
+
 /** 传给地球的轨迹点。detail 为空时给空数组，地球就什么都不画 */
 const trackPoints = computed(() => detail.value?.points ?? [])
+
+/** 这条轨迹的时间范围；缺时间信息时为 null */
+const range = computed(() => timeRange(trackPoints.value))
+const canPlayback = computed(() => canPlay(trackPoints.value))
+const startMs = computed(() => range.value?.startMs ?? 0)
+const endMs = computed(() => range.value?.endMs ?? 0)
 
 /** 用于底部状态条 */
 const selectedTrack = computed(() =>
   tracks.value.find((t) => t.id === selectedId.value) ?? null,
 )
+
+// 换轨迹 → 停止播放，进度回到起点
+watch(trackPoints, (points) => {
+  playing.value = false
+  const r = timeRange(points)
+  currentMs.value = r ? r.startMs : 0
+})
+
+/** 地球报来新时刻（已节流） */
+function onTimeChange(ms) {
+  currentMs.value = ms
+  // 关掉循环时，Cesium 播到终点会自己停住，这里把 UI 的播放状态同步回来
+  if (playing.value && !loop.value && ms >= endMs.value) {
+    playing.value = false
+    globe.value?.pause()
+  }
+}
+
+/** 播放 / 暂停 */
+function togglePlay() {
+  if (!canPlayback.value) return
+  playing.value = !playing.value
+  if (playing.value) globe.value?.play()
+  else globe.value?.pause()
+}
+
+/** 拖动进度条 */
+function seekTo(ms) {
+  currentMs.value = ms
+  globe.value?.seekTo(ms)
+}
+
+/** 循环开关 */
+function toggleLoop() {
+  loop.value = !loop.value
+}
 
 /** 页面加载时：拉健康检查 + 轨迹列表（两个请求互不依赖，可以并发） */
 onMounted(() => {
@@ -88,7 +140,12 @@ async function selectTrack(id) {
 <template>
   <div class="app">
     <!-- 三维地球占满整个视口 -->
-    <CesiumGlobe :points="trackPoints" />
+    <CesiumGlobe
+      ref="globe"
+      :points="trackPoints"
+      :loop="loop"
+      @time-change="onTimeChange"
+    />
 
     <!-- 左上角浮层：标题 + 后端连通性 + 轨迹列表 -->
     <aside class="panel">
@@ -125,6 +182,20 @@ async function selectTrack(id) {
       </template>
       <template v-else>未选择轨迹</template>
     </div>
+
+    <!-- 底部回放控制条：选中轨迹后才出现 -->
+    <TrackPlayer
+      v-if="detail"
+      :playing="playing"
+      :current-ms="currentMs"
+      :start-ms="startMs"
+      :end-ms="endMs"
+      :loop="loop"
+      :disabled="!canPlayback"
+      @toggle="togglePlay"
+      @seek="seekTo"
+      @toggle-loop="toggleLoop"
+    />
   </div>
 </template>
 
@@ -210,7 +281,7 @@ async function selectTrack(id) {
 
 .status {
   position: absolute;
-  bottom: 16px;
+  bottom: 62px;
   left: 16px;
   z-index: 10;
   padding: 6px 12px;
