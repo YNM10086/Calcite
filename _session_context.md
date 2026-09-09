@@ -84,13 +84,26 @@ PowerShell 只负责启动和查错，不显示图形。
 
 ### Git / GitHub
 - 仓库：`git@github.com:YNM10086/Calcite.git`（GitHub 账号 YNM10086），分支 main
-- **用户明确要求：暂时不推送到 GitHub，只本地提交保留回滚退路**（当前 `ahead 16`，origin/main = `1e342e6`）
+- **用户明确要求：暂时不推送到 GitHub，只本地提交保留回滚退路**（origin/main = `1e342e6`）
 - 提交历史：`1e342e6` 初始化仓库 + .gitignore；`20da417` 前后端骨架；`349fe65` 删除模板 Main.java；`86dcdab` 设计文档 v1.0；`5f044d8` 小白导读；`da8eda9` PostGIS 初体验脚本；`38e91df` Cesium 三维地球接入；`1811c05` 三表 + 示例轨迹；`72eeda5` 示例轨迹查看脚本；`2910130` psql 编码修复；`447867d`/`542c9a0` 控制台乱码兜底；`ba47315` M1 后端接口；`040833c` 第一阶段学习笔记 + md2docx 转换脚本；`c726fa3` 去除明文数据库密码；`8676744` M1 前端收尾（轨迹列表 + 轨迹线）
 - ⚠️ **历史泄漏**：数据库密码仍存在于本地历史 `72eeda5`/`2910130`/`040833c` 中（从未推送）。若要公开仓库，需重写历史或先改数据库密码。
 - 本仓库 local core.sshCommand：`C:/Windows/System32/OpenSSH/ssh.exe -F C:/ProgramData/_ssh_config -i %USERPROFILE%/.ssh/id_ed25519 -o IdentitiesOnly=yes`
   - 必须带 `-F`：`github.com` 映射到 `ssh.github.com:443`（22 端口被拒/被墙）
   - 必须带 `-i` + `IdentitiesOnly=yes`：`D:\opencode_key` 权限过开放，OpenSSH 拒加载（它与 id_ed25519 是同一把 key，指纹 SHA256:34O4458D...）
 - 沙箱限制：git 的 SSH 网络操作（push / ls-remote）在沙箱内必崩（`sh.exe: couldn't create signal pipe, Win32 error 5`），需提权 danger-full-access
+
+### M1 回放（2026-09-09 完成）
+- 设计文档 `docs/superpowers/specs/2026-09-09-m1-playback-design.md`；实施计划 `docs/superpowers/plans/2026-09-09-m1-playback.md`
+- 新增：`frontend/src/lib/playback.js`（纯计算、零依赖）、`frontend/src/components/TrackPlayer.vue`（纯展示播放条）
+- 改动：`CesiumGlobe.vue`（`SampledPositionProperty` 移动标记 + Cesium 时钟 + `defineExpose` play/pause/seekTo + `time-change` 100ms 节流）、`App.vue`（持有 playing / currentMs / loop）
+- 整条轨迹固定约 60 秒播完：`clock.multiplier = 轨迹总秒数 ÷ 60`（示例轨迹 = 50 倍）；循环用 `ClockRange.LOOP_STOP` / `CLAMPED` 切换
+- **回归命令**：`cd frontend && node scripts/check-playback.mjs`（17 项断言，零依赖，秒级出结果）
+- **验收证据（Playwright + Pillow）**：`.tmp/pw-playback.py` + `.tmp/analyze-playback.py`
+  - 时刻推进 `07:30:00 → 07:33:20 → 07:36:43`；拖动到 80% 得 `08:10:00`（精确）
+  - 白色移动点：播放中位移 50.5 px、暂停后 0.9 px；控制台零报错
+  - 取消选中后播放条消失；121 个点全有时间戳
+- 明确未做：倍速按钮、速度/海拔曲线、相机跟随、轨迹抽稀、逐段画线
+- ⚠️ 数据缺口：`/api/tracks/1` 的 `speedMps` 全为 null（示例脚本没写 `speed_mps`），做速度曲线前必须先补
 
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
