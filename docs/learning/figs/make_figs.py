@@ -5,10 +5,11 @@
 （见 global-knowledge：officecli 在 DSH 沙箱写不进 docx）。
 Pillow 直接画成图片再用 python-docx 插进去最稳。
 
-输出：.tmp/figs/fig*.png
+输出：docs/learning/figs/fig*.png
 """
 import math
 import os
+import re
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -58,7 +59,7 @@ class Fig:
         if isinstance(subs, str):
             subs = (subs,)
         if dash:
-            self._dashed_round_rect(x, y, w, h, radius, border)
+            # 先填底色再画虚线边，否则填充会把先画的虚线盖掉
             self.d.rounded_rectangle([x, y, x + w, y + h], radius=radius, fill=fill)
             self._dashed_round_rect(x, y, w, h, radius, border)
         else:
@@ -81,6 +82,9 @@ class Fig:
         return (x, y, w, h)
 
     def text(self, x, y, s, size=18, bold=False, color=INK, anchor="la", mono=False):
+        # Consolas 没有中文字形，混了中文还强行用等宽字体会画成豆腐块（□□）
+        if mono and re.search(r"[\u4e00-\u9fff]", s):
+            mono = False
         self.d.text((x, y), s, font=f(size, bold, mono), fill=color, anchor=anchor)
 
     def _dashed_round_rect(self, x, y, w, h, r, color, width=3, seg=12, gap=8):
@@ -343,38 +347,55 @@ def fig5():
 
 # --------------------------------------------------------- 图 6 数据库表
 def fig6():
-    g = Fig(880)
+    g = Fig(980)
     g.title("图 6 · 数据库三张表的关系",
             "一对多：一条轨迹有很多点、很多次停留。删掉轨迹，它的点和停留会自动跟着删。")
 
-    g.box(60, 160, 380, 300, "track（一条轨迹 = 一次出行）", (), border=ORANGE, fill=ORANGE_F, ts=21, align="left")
-    for i, s in enumerate(["id 主键", "name 名字", "source 来源（geolife/gpx/csv/sample）",
-                            "external_id 原始编号（判重用）", "start_time / end_time 起止时刻",
-                            "distance_m 总距离（派生）", "duration_s 总时长（派生）",
-                            "point_count 点数（派生）", "geom 轨迹线 LineString"]):
-        g.text(80, 218 + i * 26, s, size=16, color=(0x4E, 0x59, 0x69), mono=True)
+    # 左列：track   右列：track_point / stay_point
+    g.box(60, 160, 420, 340, "track（一条轨迹 = 一次出行）", (),
+          border=ORANGE, fill=ORANGE_F, ts=21, align="left")
+    for i, s in enumerate(["id            主键",
+                            "name          轨迹名字",
+                            "source        来源 geolife/gpx/csv/sample",
+                            "external_id   原始数据集里的编号（判重用）",
+                            "start_time / end_time  起止时刻",
+                            "distance_m    总距离（派生）",
+                            "duration_s    总时长（派生）",
+                            "point_count   点数（派生）",
+                            "geom          轨迹线 LineString"]):
+        g.text(82, 220 + i * 29, s, size=16, color=(0x4E, 0x59, 0x69))
 
-    g.box(540, 160, 400, 300, "track_point（一个 GPS 点 = 原始真相）", (), border=ORANGE, fill=ORANGE_F, ts=21, align="left")
-    for i, s in enumerate(["id 主键", "track_id → track.id（外键）", "seq 在轨迹里的顺序",
-                            "recorded_at 这一点的时刻", "elevation_m 海拔",
-                            "speed_mps 速度（由坐标算出来再回填）",
-                            "geom 一个点 Point"]):
-        g.text(560, 218 + i * 26, s, size=16, color=(0x4E, 0x59, 0x69), mono=True)
+    g.box(600, 160, 740, 340, "track_point（一个 GPS 点 = 原始真相）", (),
+          border=ORANGE, fill=ORANGE_F, ts=21, align="left")
+    for i, s in enumerate(["id            主键",
+                            "track_id      → track.id（外键）",
+                            "seq           这个点在轨迹里的顺序",
+                            "recorded_at   这一点的时刻",
+                            "elevation_m   海拔（米）",
+                            "speed_mps     速度（由坐标算出来再回填）",
+                            "geom          一个点 Point"]):
+        g.text(622, 220 + i * 29, s, size=16, color=(0x4E, 0x59, 0x69))
 
-    g.box(540, 540, 400, 200, "stay_point（一次停留 · M2 才用）", (), border=GRAY, fill=(0xF7, 0xF8, 0xFA), ts=21, align="left", dash=True)
-    for i, s in enumerate(["track_id → track.id（外键）", "start_time / end_time",
-                            "duration_s 停了多久", "radius_m 活动半径", "geom 停留中心点"]):
-        g.text(560, 598 + i * 26, s, size=16, color=(0x4E, 0x59, 0x69), mono=True)
+    g.box(600, 580, 740, 200, "stay_point（一次停留 · M2 才用）", (),
+          border=GRAY, fill=(0xF7, 0xF8, 0xFA), ts=21, align="left", dash=True)
+    for i, s in enumerate(["track_id      → track.id（外键）",
+                            "start_time / end_time   停留的起止",
+                            "duration_s    停了多久",
+                            "radius_m      活动半径",
+                            "geom          停留中心点"]):
+        g.text(622, 638 + i * 29, s, size=16, color=(0x4E, 0x59, 0x69))
 
-    g.arrow(444, 310, 536, 310, "1 条轨迹 → 121 个点", color=ORANGE, label_dy=-18)
-    g.arrow(444, 640, 536, 640, "1 条轨迹 → 多次停留", color=GRAY, label_dy=-18, dashed=True)
+    g.arrow(484, 300, 596, 300, "1 条轨迹 → 121 个点", color=ORANGE, label_dy=-18)
+    # 用折线连到 stay_point；左侧 y=504~680 这段是空的，走这里不压任何文字
+    g.d.line([270, 504, 270, 680], fill=GRAY, width=2)
+    g.arrow(270, 680, 596, 680, "1 条轨迹 → 多次停留", color=GRAY, label_dy=-18, dashed=True)
 
-    g.text(60, 500, "派生数据是什么意思：", size=20, bold=True, color=INK)
-    for i, s in enumerate(["distance_m / duration_s / point_count / geom（线）",
-                            "这些都能由 track_point 算出来，存一份只是为了让列表页不用现算。" ]):
-        g.text(60, 540 + i * 30, s, size=17, color=(0x4E, 0x59, 0x69))
-    g.text(60, 620, "真相只有一个：track_point 表。别的都是它的推论。",
-           size=19, bold=True, color=RED)
+    g.text(60, 830, "派生数据是什么意思：", size=20, bold=True, color=INK)
+    for i, s in enumerate(["distance_m / duration_s / point_count / geom（线）这些都能由 track_point 算出来，",
+                            "存一份只是为了让列表页不用现算。"]):
+        g.text(60, 872 + i * 30, s, size=17, color=(0x4E, 0x59, 0x69))
+    g.text(1000, 838, "真相只有一个：track_point 表。", size=19, bold=True, color=RED)
+    g.text(1000, 872, "别的都是它的推论。", size=19, bold=True, color=RED)
     g.save("fig6-db.png")
 
 
