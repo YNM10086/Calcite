@@ -18,6 +18,7 @@
   python md2docx.py 输入.md 输出.docx
 """
 
+import os
 import re
 import sys
 
@@ -26,7 +27,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 
 ASCII_FONT = "Calibri"
 EA_FONT = "微软雅黑"          # 中文字体
@@ -35,6 +36,39 @@ MONO_EA = "微软雅黑"
 CODE_BG = "F2F3F5"            # 代码块底色
 QUOTE_BG = "FFF8E1"           # 引用底色
 HEADER_BG = "E8EEF7"          # 表头底色
+
+# --------------------------------------------------------------------------
+# OOXML 子元素顺序：pPr / rPr / tcPr 里的元素不是随便排的，
+# 顺序错了 Word 能容忍，但严格校验器（officecli validate 等）会报
+# "unexpected child element"。所以统一用 insert_element_before 而不是 append。
+# --------------------------------------------------------------------------
+_AFTER_SHD_IN_PPR = (
+    "w:tabs", "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap",
+    "w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN",
+    "w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind",
+    "w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap", "w:jc",
+    "w:textDirection", "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
+    "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange",
+)
+_AFTER_PBDR_IN_PPR = ("w:shd",) + _AFTER_SHD_IN_PPR
+_AFTER_SHD_IN_TCPR = (
+    "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign",
+    "w:hideMark", "w:headers", "w:cellIns", "w:cellDel", "w:cellMerge",
+    "w:tcPrChange",
+)
+_AFTER_RFONTS_IN_RPR = (
+    "w:b", "w:bCs", "w:i", "w:iCs", "w:caps", "w:smallCaps", "w:strike",
+    "w:dstrike", "w:outline", "w:shadow", "w:emboss", "w:imprint", "w:noProof",
+    "w:snapToGrid", "w:vanish", "w:webHidden", "w:color", "w:spacing", "w:w",
+    "w:kern", "w:position", "w:sz", "w:szCs", "w:highlight", "w:u", "w:effect",
+    "w:bdr", "w:shd", "w:fitText", "w:vertAlign", "w:rtl", "w:cs", "w:em",
+    "w:lang", "w:eastAsianLayout", "w:specVanish", "w:oMath",
+)
+
+
+def insert_ordered(parent, element, successors):
+    """把 element 插到 parent 里第一个「应当排在它后面」的兄弟之前。"""
+    parent.insert_element_before(element, *successors)
 
 
 # --------------------------------------------------------------------------
@@ -54,7 +88,7 @@ def set_style_font(style, ascii_name, ea_name, size=None, bold=None, color=None)
     rfonts = rpr.find(qn("w:rFonts"))
     if rfonts is None:
         rfonts = OxmlElement("w:rFonts")
-        rpr.append(rfonts)
+        insert_ordered(rpr, rfonts, _AFTER_RFONTS_IN_RPR)
     rfonts.set(qn("w:ascii"), ascii_name)
     rfonts.set(qn("w:hAnsi"), ascii_name)
     rfonts.set(qn("w:eastAsia"), ea_name)
@@ -75,7 +109,7 @@ def set_run_font(run, ascii_name=None, ea_name=None, size=None, bold=None,
         rfonts = rpr.find(qn("w:rFonts"))
         if rfonts is None:
             rfonts = OxmlElement("w:rFonts")
-            rpr.append(rfonts)
+            insert_ordered(rpr, rfonts, _AFTER_RFONTS_IN_RPR)
         if ascii_name:
             rfonts.set(qn("w:ascii"), ascii_name)
             rfonts.set(qn("w:hAnsi"), ascii_name)
@@ -85,13 +119,14 @@ def set_run_font(run, ascii_name=None, ea_name=None, size=None, bold=None,
 
 def shade(element, fill):
     """给段落或单元格加底色。"""
-    pr = element._element.get_or_add_pPr() if hasattr(element, "paragraph_format") \
+    is_par = hasattr(element, "paragraph_format")
+    pr = element._element.get_or_add_pPr() if is_par \
         else element._element.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
     shd.set(qn("w:val"), "clear")
     shd.set(qn("w:color"), "auto")
     shd.set(qn("w:fill"), fill)
-    pr.append(shd)
+    insert_ordered(pr, shd, _AFTER_SHD_IN_PPR if is_par else _AFTER_SHD_IN_TCPR)
 
 
 def bottom_border(paragraph):
@@ -104,7 +139,7 @@ def bottom_border(paragraph):
     bottom.set(qn("w:space"), "1")
     bottom.set(qn("w:color"), "CCCCCC")
     borders.append(bottom)
-    ppr.append(borders)
+    insert_ordered(ppr, borders, _AFTER_PBDR_IN_PPR)
 
 
 INLINE_RE = re.compile(r"(\*\*.+?\*\*|`[^`]+`|\*[^*]+\*)")
@@ -231,6 +266,28 @@ def add_table(doc, rows):
     doc.add_paragraph().paragraph_format.space_after = Pt(4)
 
 
+def add_figure(doc, caption, src, max_width_in=6.3):
+    """插入一张居中图片 + 图注（图注用灰色小字）。
+
+    max_width_in 是正文可用宽度；图片按此宽度等比缩放。
+    """
+    if not os.path.exists(src):
+        para = doc.add_paragraph()
+        add_inline(para, f"[缺图: {src}]", base_size=10)
+        return
+    para = doc.add_paragraph()
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    para.paragraph_format.space_before = Pt(10)
+    para.paragraph_format.space_after = Pt(2)
+    para.add_run().add_picture(src, width=Inches(max_width_in))
+    if caption:
+        cap = doc.add_paragraph()
+        cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        cap.paragraph_format.space_after = Pt(14)
+        run = cap.add_run(caption)
+        set_run_font(run, size=9, color=RGBColor(0x70, 0x70, 0x70))
+
+
 def split_table_row(line):
     line = line.strip()
     if line.startswith("|"):
@@ -263,6 +320,13 @@ def render(md_text, doc):
                 i += 1
             i += 1
             add_code_block(doc, buf, lang)
+            continue
+
+        # 插图：![图 1 说明](相对路径)
+        m_img = re.match(r"^!\[(.*?)\]\((.+?)\)\s*$", stripped)
+        if m_img:
+            add_figure(doc, m_img.group(1), m_img.group(2))
+            i += 1
             continue
 
         # 表格
