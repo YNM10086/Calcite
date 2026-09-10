@@ -7,7 +7,7 @@
  */
 
 /** 一条轨迹默认用多少秒播完。真实时长可能是几十分钟，所以不会等于真实时间 */
-export const PLAY_SECONDS = 60
+export const PLAY_SECONDS = 20
 
 /**
  * ISO 时间字符串 → 毫秒时间戳

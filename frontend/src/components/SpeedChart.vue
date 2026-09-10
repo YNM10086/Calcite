@@ -304,11 +304,11 @@ function onClick(ev) {
 }
 
 .speed {
-  stroke: #7ee0a6;
+  stroke: #722ED1;
 }
 
 .elev {
-  stroke: #ffb95e;
+  stroke: #165DFF;
 }
 
 .dot {
@@ -327,7 +327,7 @@ function onClick(ev) {
 }
 
 .elev-unit {
-  color: #ffb95e;
+  color: #7ee0a6;
 }
 
 .empty {
