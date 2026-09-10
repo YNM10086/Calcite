@@ -120,6 +120,21 @@ PowerShell 只负责启动和查错，不显示图形。
   - 控制台零报错
 - 明确未做（YAGNI）：缩放/框选/平移、导出图片、多轨迹对比、速度平滑、加速度/坡度、曲线折叠
 
+### 学习笔记与结构地图（2026-09-10 完成）
+- 笔记存放目录：`D:\Calcite-note\`（**仓库外**，写入需提权 danger-full-access）
+  - `Calcite-第一阶段学习笔记.docx` —— 基础知识点
+  - `Calcite-第二天学习笔记.docx` —— 回放 + 速度/海拔曲线
+  - `Calcite-项目结构地图.docx` —— **只讲结构/流程/加东西放哪里**，14 章 + 7 张手画流程图
+- 笔记源文件（在仓库内，可重新生成）：
+  - `docs/learning/2026-09-08-phase1-notes.md`、`docs/learning/2026-09-10-calcite-structure-map.md`
+  - `docs/learning/figs/make_figs.py`（Pillow 画 7 张流程图）+ 对应 PNG
+  - 生成 Word：`python scripts/tools/md2docx.py <md> <docx>`（**必须在仓库根目录跑**，图路径是相对的）
+- ✅ **修好了 `scripts/tools/md2docx.py` 的老 bug**：三处 XML 元素用 `append` 而非按 OOXML 规定顺序插入，生成的 docx 有 285 个 schema 错误（Word 能开、严格校验器报错），现在 0 错误；并新增 `![图注](路径)` 插图语法
+- ✅ **officecli 在本机写不进 docx**（`add`/`save` 报成功但文件是空的，`validate` 对空文档还假报通过）——生成 Word 一律走 python-docx
+- 练习改动已提交（`8548f50`）：曲线配色 + `PLAY_SECONDS` 20；想恢复原样用
+  `git checkout 38f42c2 -- frontend/src/components/SpeedChart.vue frontend/src/lib/playback.js`
+- **用户反馈（重要）**：笔记里「底层算法/命名规范」写太多会造成压力甚至挫败感；他真正需要的是**地图型内容**——完整结构、流程图、每层职责、以后往哪加。后续笔记优先这个方向，不要堆知识点
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`
