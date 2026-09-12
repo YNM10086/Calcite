@@ -18,7 +18,8 @@ public record TrackPointDto(
         double lon,
         double lat,
         Double elevationM,
-        Double speedMps
+        Double speedMps,
+        boolean outlier
 ) {
 
     public static TrackPointDto from(TrackPoint point) {
@@ -30,7 +31,8 @@ public record TrackPointDto(
                 geom == null ? 0d : geom.getX(),
                 geom == null ? 0d : geom.getY(),
                 point.getElevationM(),
-                point.getSpeedMps()
+                point.getSpeedMps(),
+                point.isOutlier()
         );
     }
 }

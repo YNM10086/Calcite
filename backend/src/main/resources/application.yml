@@ -6,7 +6,9 @@ spring:
     active: local
 
   datasource:
-    url: jdbc:postgresql://localhost:5432/calcite
+    # reWriteBatchedInserts=true 让 JDBC 驱动把多条 INSERT 合并成一条多值 INSERT，
+    # 百万点级导入靠它提速（配合下面的 hibernate.jdbc.batch_size）
+    url: jdbc:postgresql://localhost:5432/calcite?reWriteBatchedInserts=true
     username: postgres
     driver-class-name: org.postgresql.Driver
 
@@ -22,6 +24,27 @@ spring:
     properties:
       hibernate:
         format_sql: true
+        # 批量插入：不配的话 JPA 会逐条 insert，百万点级导入会慢到无法接受
+        jdbc:
+          batch_size: 500
+        order_inserts: true
+        order_updates: true
 
 server:
   port: 8080
+
+# 轨迹导入
+calcite:
+  import:
+    # 允许批量导入的根目录白名单。接口收到的 path 必须落在其中之一，否则拒绝。
+    # 本地项目不需要登录，但路径必须收敛，避免任意目录读取。
+    allowed-roots:
+      - D:\GeoLife
+    # 单次批量导入最多处理多少条轨迹。
+    # 配合"内容哈希幂等"，脚本循环调用即可自动跳过已导入的、继续往后取。
+    max-tracks-per-call: 50
+    # 异常速度判定的绝对下限（米/秒）
+    max-speed-mps: 8.0
+    # 相对倍数：阈值 = max(max-speed-mps, 倍数 × 该轨迹速度中位数)
+    # 用中位数是为了自适应 —— GeoLife 里有汽车（20 m/s）甚至火车（80 m/s）轨迹
+    speed-median-factor: 3
