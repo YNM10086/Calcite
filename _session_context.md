@@ -88,9 +88,17 @@ PowerShell 只负责启动和查错，不显示图形。
 
 ### Git / GitHub
 - 仓库：`git@github.com:YNM10086/Calcite.git`（GitHub 账号 YNM10086），分支 main
-- **用户明确要求：暂时不推送到 GitHub，只本地提交保留回滚退路**（origin/main = `1e342e6`）
-- 提交历史：`1e342e6` 初始化仓库 + .gitignore；`20da417` 前后端骨架；`349fe65` 删除模板 Main.java；`86dcdab` 设计文档 v1.0；`5f044d8` 小白导读；`da8eda9` PostGIS 初体验脚本；`38e91df` Cesium 三维地球接入；`1811c05` 三表 + 示例轨迹；`72eeda5` 示例轨迹查看脚本；`2910130` psql 编码修复；`447867d`/`542c9a0` 控制台乱码兜底；`ba47315` M1 后端接口；`040833c` 第一阶段学习笔记 + md2docx 转换脚本；`c726fa3` 去除明文数据库密码；`8676744` M1 前端收尾（轨迹列表 + 轨迹线）
-- ⚠️ **历史泄漏**：数据库密码仍存在于本地历史 `72eeda5`/`2910130`/`040833c` 中（从未推送）。若要公开仓库，需重写历史或先改数据库密码。
+- ✅ **2026-09-12：M1 已推送，仓库是 PUBLIC**
+  - **旧的"暂时不推送、只本地提交"规矩就此作废**
+  - 推送时本地与远端同步在 `10d746b`（59 个提交一次性推上去）
+  - 之后的规矩改为：**继续每完成一块就本地提交；稳定节点再推送**
+- ⚠️ **历史里仍有旧的数据库密码（但已是死密码）**
+  - 位置：`72eeda5` / `2910130` / `040833c`（`c726fa3` 是清理它的那个）
+  - 处置：**2026-09-12 已把数据库密码从 `557096138Cc` 换成强密码**
+    （改法：`ALTER USER postgres WITH PASSWORD '...'` + 同步 `application-local.yml`）
+  - 已实测：**旧密码连接被拒绝** → GitHub 上那串是死钥匙，不构成风险
+  - 教训：**写脚本时不要把密码写进注释里**——`03-show-results.sql` 就是这么泄漏的
+- 提交历史（早期）：`1e342e6` 初始化仓库 + .gitignore；`20da417` 前后端骨架；`349fe65` 删除模板 Main.java；`86dcdab` 设计文档 v1.0；`5f044d8` 小白导读；`da8eda9` PostGIS 初体验脚本；`38e91df` Cesium 三维地球接入；`1811c05` 三表 + 示例轨迹；`72eeda5` 示例轨迹查看脚本；`2910130` psql 编码修复；`447867d`/`542c9a0` 控制台乱码兜底；`ba47315` M1 后端接口；`040833c` 第一阶段学习笔记 + md2docx 转换脚本；`c726fa3` 去除明文数据库密码；`8676744` M1 前端收尾（轨迹列表 + 轨迹线）
 - 本仓库 local core.sshCommand：`C:/Windows/System32/OpenSSH/ssh.exe -F C:/ProgramData/_ssh_config -i %USERPROFILE%/.ssh/id_ed25519 -o IdentitiesOnly=yes`
   - 必须带 `-F`：`github.com` 映射到 `ssh.github.com:443`（22 端口被拒/被墙）
   - 必须带 `-i` + `IdentitiesOnly=yes`：`D:\opencode_key` 权限过开放，OpenSSH 拒加载（它与 id_ed25519 是同一把 key，指纹 SHA256:34O4458D...）
@@ -162,6 +170,8 @@ PowerShell 只负责启动和查错，不显示图形。
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`
 - 敏感文件策略：`application-local.yml`、`_session_context.local.md`、`.env`、`*.key/*.pem/*.jks`、`logs/` 等已在 `.gitignore` 排除；
   `_session_context.md` 已脱敏（只留密码指针），因此**可以正常入库、享有版本历史**
-- 每次改动后本地提交留回滚点（不推送）
+- 每次改动后本地提交留回滚点；**仓库已公开（2026-09-12 起），稳定节点推送**
+- ⚠️ **绝不要把密码/密钥写进任何会入库的文件**（连 SQL 注释里也不行）——
+  2026-09-12 就是靠"改数据库密码"才补上了早期 `03-show-results.sql` 注释里的泄漏
 - 项目目标与范围以设计文档为准；要改范围，先改文档再改代码
 - 用户是小白：每步要解释「做什么/为什么」，命令给可直接复制粘贴的形式
