@@ -139,6 +139,24 @@ PowerShell 只负责启动和查错，不显示图形。
   `git checkout 38f42c2 -- frontend/src/components/SpeedChart.vue frontend/src/lib/playback.js`
 - **用户反馈（重要）**：笔记里「底层算法/命名规范」写太多会造成压力甚至挫败感；他真正需要的是**地图型内容**——完整结构、流程图、每层职责、以后往哪加。后续笔记优先这个方向，不要堆知识点
 
+### M1 轨迹导入（2026-09-12 完成）—— **M1 至此全部完成**
+- 设计文档 `docs/superpowers/specs/2026-09-12-m1-import-design.md`；实施计划 `docs/superpowers/plans/2026-09-12-m1-import.md`（12 任务 / 69 步）
+- 新增：`service/`（`GeoUtils` 球面距离、`TrackCleaner` 清洗器、`ImportService` 编排、`CleanedTrack`）、`service/importer/`（`Importer` 接口 + `RawPoint` 统一中间结构 + `ParsedTrack` + `FormatDetector` + `GpxImporter` + `GeoLifeImporter`）、`config/ImportProperties`、`web/ImportController`、`web/dto/ImportResult`
+- 改动：`track_point` 加 `is_outlier` 列（脚本**两处写法**：CREATE TABLE 内 + 末尾 `ALTER ... IF NOT EXISTS`，保持"重跑即对齐"）、`Track`/`TrackPoint` 补**公开构造器**（原来只有 protected，因为数据一直是 SQL 插的）、`TrackPointDto` 暴露 `outlier`、`application.yml` 加批量插入参数与导入配置
+- 两个入口：`POST /api/tracks/import`（网页上传 GPX）、`POST /api/import/geolife`（本地目录批量，配合幂等循环调用自动推进）
+- **格式识别按文件内容**，不看扩展名（用户那份文件的扩展名是 `.gpx.bin_tmp`）
+- 清洗规则集中在 `TrackCleaner`：排序 / 速度 / **自适应阈值 `max(8, 3×中位数)`** 标记异常（**两端都标**）/ **海拔整条全同 → 全部 NULL**
+- 幂等键：文件内容 **SHA-256 前 32 位**（改名也认得）
+- **后端首次引入 JUnit 单元测试**：`mvn test` 一条命令，41 项
+- **坐标系已实测确认 WGS84**：轨迹中心与 OSM「东区操场」相差 **10 米**（若是 GCJ-02 会偏 400–600 米）
+- 实测证据（真实 2342 点 GPX）：`pointCount=2342`、`distanceM=3933.46`、`durationS=2348`、`outlierCount=**8**`（seq 精确为 1128/1129/1135/1136/1144/1145/1585/1586）、点与线 SRID 均 = 4326、重复上传返回 `skippedDuplicate=true`、海拔全为 NULL
+- **回归总览（全绿）**：后端 `mvn test` 41 项 + `check:playback` 17 项 + `check:chart` 37 项 + `.tmp/check-import-pixels.py` 5 项 = **100 项**
+- ⚠️ **两个环境坑（已解决，记录备查）**：
+  1. Mockito 在沙箱内 `self-attach` 失败（要 fork 外部进程 attach JVM）→ `pom.xml` 的 surefire 预挂 `-javaagent:byte-buddy-agent`
+  2. `@Value` **绑不了 YAML 列表** → 必须用 `@ConfigurationProperties`
+- 明确未做：CSV 上传、上传进度条、拖拽、异步任务、坐标系自动转换
+- **待办**：GeoLife 数据集下载（挂机，官方 ID 52367 / Kaggle 镜像），到位后用 `POST /api/import/geolife` 灌 5-10 个用户
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`

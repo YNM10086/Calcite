@@ -112,9 +112,10 @@ Calcite 是一个**轨迹时空分析平台**。它做三件事：
 
 ### M1 看得见（第 1-3 周）
 
-- 轨迹导入：
-  - `POST /api/tracks/import` 支持 GPX / CSV 文件上传
-  - GeoLife 数据集批量导入（`.plt` 解析器 + 流式批量插入）
+- 轨迹导入：（✅ 2026-09-12 完成，见 `2026-09-12-m1-import-design.md`）
+  - `POST /api/tracks/import` 支持 **GPX** 文件上传
+    —— CSV 暂不做：没有真实数据源会用它，格式还得自己拍；解析器接口已就位，以后加一个类即可
+  - GeoLife 数据集批量导入（`.plt` 解析器 + 分批插入）—— `POST /api/import/geolife`
 - 轨迹列表 + 详情（距离、时长、点数）
 - **Cesium 三维回放**：时间轴拖动，模型沿轨迹移动，配速度 / 海拔曲线
 
@@ -269,25 +270,44 @@ ST_MakeLine(geom ORDER BY recorded_at)
 ```
 com.calcite
 ├── CalciteApplication.java        ← 已有
-├── common/                        ← 待建
-│   ├── ApiResponse.java           统一响应格式
-│   ├── GlobalExceptionHandler.java
-│   └── GeoUtils.java              坐标 / 距离工具
-├── track/                         ← 待建（M1 主线）
-│   ├── TrackController.java
-│   ├── TrackService.java
-│   ├── TrackRepository.java
-│   ├── Track.java                 实体
+├── domain/                        ✅ 已有：实体（数据库表的 Java 影子）
+│   ├── Track.java
 │   └── TrackPoint.java
-├── importer/                      ← 待建
-│   ├── GpxImporter.java
-│   ├── CsvImporter.java
-│   └── GeoLifeImporter.java
-└── analysis/                      ← 待建（M2 / M3）
+├── repository/                    ✅ 已有：持久层（方法名即 SQL）
+│   ├── TrackRepository.java
+│   └── TrackPointRepository.java
+├── service/                       ✅ 已有：业务逻辑层（M1 导入功能引入）
+│   ├── GeoUtils.java              球面距离（Haversine）
+│   ├── TrackCleaner.java          **所有清洗规则只此一处**
+│   ├── CleanedTrack.java
+│   ├── ImportService.java         导入编排：识别 → 解析 → 清洗 → 入库
+│   └── importer/                  可插拔解析器
+│       ├── Importer.java          接口
+│       ├── RawPoint.java          三种格式统一输出的中间结构
+│       ├── ParsedTrack.java
+│       ├── FormatDetector.java    按【内容】识别格式（不看扩展名）
+│       ├── GpxImporter.java       JDK DOM，零新依赖
+│       └── GeoLifeImporter.java   .plt（海拔英尺 → 米）
+├── config/                        ✅ 已有：配置绑定
+│   └── ImportProperties.java      @ConfigurationProperties（YAML 列表必须用它）
+├── web/                           ✅ 已有：接口层
+│   ├── HealthController.java
+│   ├── TrackController.java
+│   ├── ImportController.java
+│   └── dto/                       TrackSummary / TrackDetail / TrackPointDto / ImportResult
+└── analysis/                      ← M2 / M3 待建
     ├── StayPointService.java      停留点识别
     ├── HotspotService.java        热点分析
     └── SimilarityService.java     轨迹相似度
 ```
+
+> **分包方式的修订（2026-09-12）**：本文档原规划**按功能分包**（`track/` / `importer/` / `analysis/`），
+> M1 实现时实际采用了**按层分包**（`web/` / `service/` / `repository/` / `domain/` / `config/`）。
+>
+> 理由：① 类还少时按层分包更好理解；② 已产出的《项目结构地图》画的也是这套，改分包会让已学内容作废；
+> ③ 按功能分包一般是等类多到按层包过于拥挤时才转 —— 那是一次**以后可以做的重构，不是现在**。
+>
+> 详见 `2026-09-12-m1-import-design.md` 第三节。
 
 现有 `HealthController` 迁至 `common/`，保留为健康检查。
 
@@ -336,7 +356,7 @@ frontend/src
 | GET | `/api/analysis/similarity` | 两条轨迹的相似度 |
 | GET | `/api/analysis/density` | 区域密度统计 |
 
-### 4.4 三个必须提前想清楚的技术点
+### 4.4 四个必须提前想清楚的技术点
 
 **① 数据量：接口为什么要有 `simplify` 参数**
 
@@ -350,8 +370,30 @@ frontend/src
 
 - GeoLife 是 **WGS84**（与 Cesium 一致）→ 直接可用
 - 高德 / 腾讯 POI 是 **GCJ-02**（火星坐标），叠加会偏移数百米
-- vivo 健康数据大概率是 WGS84，导入时需校验
+- ✅ **vivo 健康数据已实测确认为 WGS84**（2026-09-12）
+  - 验证方法：取轨迹中心 `25.0336, 117.0209`，用 OpenStreetMap 数据反查 → 命中「**东区操场**」（龙岩市 · 同心路）
+  - 再取 OSM 上该操场的自身坐标 `25.033514, 117.020893`，与我们的点相差 **10 米**
+  - 判据：若数据是 GCJ-02 而当成 WGS84 用，福建地区会偏 **400–600 米**，该点会直接飘出操场
+  - 结论：**无需任何坐标转换**
 - 坐标转换话题能立刻区分"做过真项目"和"只跑过 demo"
+
+**④ 真实 GPS 数据的脏值：异常速度怎么处理**
+
+实测样本（用户那份 2342 点的校园跑）里有 **4 段速度超过 8 m/s，最高 12.13 m/s（43.7 km/h）**
+—— 人跑不出这个速度，这是 **GPS 漂移**。
+
+处理方式（2026-09-12 定案）：**存下来 + 标记**，而不是丢弃。
+
+- `track_point` 表增加 `is_outlier BOOLEAN NOT NULL DEFAULT false`
+- 判定用**自适应阈值**：`速度 > max(8 m/s, 3 × 该轨迹速度中位数)`
+  - 为什么不用固定阈值：GeoLife 里有**汽车（20 m/s）甚至火车（80 m/s）**的轨迹，
+    固定 8 m/s 会把它们全部误标成异常
+  - 中位数会自适应轨迹类型：跑步轨迹中位数 1.6 → 阈值 8；汽车轨迹中位数 12 → 阈值 36
+- 异常段**两端都标记**（无法判断是哪一端漂了，宁可多标不可漏标）
+- 实测效果：2342 点里**精确标记 8 个**（seq = 1128, 1129, 1135, 1136, 1144, 1145, 1585, 1586），占 0.34%
+
+另：**海拔整条全同 → 全部存 NULL**。实测样本 `ele` 全是 `0.0`（vivo 没记录海拔），
+存 0 会让前端画出一条贴底直线误导人；前端已有「这条轨迹没有海拔数据」的降级显示。
 
 ---
 
