@@ -97,3 +97,7 @@ pnpm-debug.log*
 
 # 头脑风暴可视化伴侣的临时产物
 .superpowers/
+
+# Python 编译缓存
+__pycache__/
+*.pyc
