@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS stay_point (
 );
 
 \echo ''
-\echo '########## 建索引（面试重点）##########'
+\echo '########## 建索引（性能关键）##########'
 -- 时空联合索引：空间和时间放在同一个 GIST 索引里，一次扫描过滤两个条件
 CREATE INDEX IF NOT EXISTS idx_track_point_st  ON track_point USING GIST (geom, recorded_at);
 -- 按轨迹取点、按顺序排序
