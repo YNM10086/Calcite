@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS track_point (
   recorded_at TIMESTAMPTZ NOT NULL,
   elevation_m DOUBLE PRECISION,
   speed_mps   DOUBLE PRECISION,
+  is_outlier  BOOLEAN     NOT NULL DEFAULT false, -- 疑似 GPS 漂移点（导入时标记）
   geom        GEOMETRY(Point, 4326) NOT NULL
 );
 
@@ -75,5 +76,11 @@ FROM pg_indexes
 WHERE schemaname = 'public'
   AND tablename IN ('track', 'track_point', 'stay_point')
 ORDER BY tablename, indexname;
+
+\echo ''
+\echo '########## 补列（对已存在的老库生效）##########'
+-- CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，所以新加的列必须在这里单独补一句。
+-- 加上它就保持了「整个脚本重跑一遍就和代码对齐」这个特性。
+ALTER TABLE track_point ADD COLUMN IF NOT EXISTS is_outlier BOOLEAN NOT NULL DEFAULT false;
 
 \echo ''

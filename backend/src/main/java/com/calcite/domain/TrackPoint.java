@@ -48,11 +48,34 @@ public class TrackPoint {
     @Column(name = "speed_mps")
     private Double speedMps;
 
+    /** 疑似 GPS 漂移点，导入时由 TrackCleaner 标记 */
+    @Column(name = "is_outlier", nullable = false)
+    private boolean outlier = false;
+
     /** 点坐标，SRID 4326 */
     @Column(name = "geom", nullable = false, columnDefinition = "geometry(Point,4326)")
     private Point geom;
 
+    /** JPA 用 */
     protected TrackPoint() {
+    }
+
+    /**
+     * 导入时用。
+     *
+     * <p>原来只有 protected 构造器 —— 因为在此之前数据一直是 SQL 插的，
+     * Java 代码从没创建过 TrackPoint。导入功能是第一个需要在 Java 里
+     * new 出轨迹点的地方，所以补一个 public 的。
+     */
+    public TrackPoint(Long trackId, Integer seq, OffsetDateTime recordedAt,
+                      Double elevationM, Double speedMps, Point geom, boolean outlier) {
+        this.trackId = trackId;
+        this.seq = seq;
+        this.recordedAt = recordedAt;
+        this.elevationM = elevationM;
+        this.speedMps = speedMps;
+        this.geom = geom;
+        this.outlier = outlier;
     }
 
     public Long getId() {
@@ -97,6 +120,14 @@ public class TrackPoint {
 
     public void setSpeedMps(Double speedMps) {
         this.speedMps = speedMps;
+    }
+
+    public boolean isOutlier() {
+        return outlier;
+    }
+
+    public void setOutlier(boolean outlier) {
+        this.outlier = outlier;
     }
 
     public Point getGeom() {

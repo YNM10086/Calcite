@@ -80,6 +80,21 @@ public class Track {
         // JPA 需要一个无参构造器（可以是 protected，不需要给业务代码用）
     }
 
+    /**
+     * 导入时用。
+     *
+     * <p>派生字段（距离 / 时长 / 点数 / 轨迹线）由 ImportService 算好后用 setter 补上，
+     * 所以这个构造器只收元数据。
+     */
+    public Track(String name, String source, String externalId,
+                 OffsetDateTime startTime, OffsetDateTime endTime) {
+        this.name = name;
+        this.source = source;
+        this.externalId = externalId;
+        this.startTime = startTime;
+        this.endTime = endTime;
+    }
+
     public Long getId() {
         return id;
     }
