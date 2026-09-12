@@ -142,11 +142,19 @@ def bottom_border(paragraph):
     insert_ordered(ppr, borders, _AFTER_PBDR_IN_PPR)
 
 
-INLINE_RE = re.compile(r"(\*\*.+?\*\*|`[^`]+`|\*[^*]+\*)")
+INLINE_RE = re.compile(
+    r"(\*\*.+?\*\*"                                       # **粗体**
+    r"|`[^`]+`"                                           # `行内代码`
+    r"|\*[^*]+\*"                                         # *斜体*
+    # _斜体_：按 CommonMark 规则，前后不能紧挨字母数字，
+    # 否则 snake_case / file_name 这种下划线会被误判成斜体
+    r"|(?<![A-Za-z0-9_])_[^_\s][^_]*?_(?![A-Za-z0-9_])"
+    r")"
+)
 
 
 def add_inline(paragraph, text, base_size=None):
-    """解析 **粗体** / *斜体* / `代码`，写入段落。"""
+    """解析 **粗体** / *斜体* / _斜体_ / `代码`，写入段落。"""
     for part in INLINE_RE.split(text):
         if not part:
             continue
@@ -159,6 +167,9 @@ def add_inline(paragraph, text, base_size=None):
                          color=RGBColor(0xC0, 0x39, 0x2B))
             shade_run(run, CODE_BG)
         elif part.startswith("*") and part.endswith("*") and len(part) > 2:
+            run = paragraph.add_run(part[1:-1])
+            set_run_font(run, italic=True, size=base_size)
+        elif part.startswith("_") and part.endswith("_") and len(part) > 2:
             run = paragraph.add_run(part[1:-1])
             set_run_font(run, italic=True, size=base_size)
         else:
