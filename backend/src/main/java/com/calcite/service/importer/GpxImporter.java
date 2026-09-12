@@ -1,5 +1,6 @@
 package com.calcite.service.importer;
 
+import org.springframework.stereotype.Component;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -17,6 +18,7 @@ import java.util.List;
  * <p>用 JDK 自带的 DOM，**不引入任何新依赖** —— 和项目里"手写 SVG 不装图表库"
  * 是同一个取舍。GPX 文件很小（实测 300 KB），一次性读进内存没问题。
  */
+@Component
 public class GpxImporter implements Importer {
 
     @Override

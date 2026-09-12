@@ -70,6 +70,29 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
+
+            <!--
+              测试运行器。
+
+              这里为什么要显式挂 byte-buddy-agent？
+              Mockito 靠字节码增强实现 mock，默认行为是"自己去 attach 当前 JVM"——
+              而 attach 需要 fork 一个外部进程。本项目在 DSH 沙箱里开发，
+              沙箱禁止 spawn 外部进程，于是报：
+                Could not self-attach to current VM using external process
+
+              预先用 -javaagent 把 agent 挂上就不需要 self-attach 了
+              （这也是 Mockito 官方在报错信息里给的解法）。
+
+              在不受限的普通机器上，这段配置无害（只是换了一种挂载方式）；
+              如果哪天不需要了，删掉这个 plugin 即可。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>-javaagent:${settings.localRepository}/net/bytebuddy/byte-buddy-agent/${byte-buddy.version}/byte-buddy-agent-${byte-buddy.version}.jar</argLine>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>

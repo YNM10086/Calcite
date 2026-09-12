@@ -1,6 +1,8 @@
 package com.calcite.service;
 
 import com.calcite.service.importer.RawPoint;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -22,12 +24,14 @@ import java.util.List;
  * 因为 GeoLife 里有汽车（20 m/s）甚至火车（80 m/s）轨迹，
  * 固定阈值会把它们全部误标成异常。
  */
+@Component
 public class TrackCleaner {
 
     private final double maxSpeedMps;
     private final double speedMedianFactor;
 
-    public TrackCleaner(double maxSpeedMps, double speedMedianFactor) {
+    public TrackCleaner(@Value("${calcite.import.max-speed-mps:8.0}") double maxSpeedMps,
+                        @Value("${calcite.import.speed-median-factor:3}") double speedMedianFactor) {
         this.maxSpeedMps = maxSpeedMps;
         this.speedMedianFactor = speedMedianFactor;
     }

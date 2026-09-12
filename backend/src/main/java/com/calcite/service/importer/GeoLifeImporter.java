@@ -1,5 +1,7 @@
 package com.calcite.service.importer;
 
+import org.springframework.stereotype.Component;
+
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -25,6 +27,7 @@ import java.util.List;
  *       这里用第 6/7 字段（可读、无浮点误差），第 5 个字段在测试里做交叉校验。</li>
  * </ol>
  */
+@Component
 public class GeoLifeImporter implements Importer {
 
     /** 英尺 → 米 */
