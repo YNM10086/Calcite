@@ -35,16 +35,41 @@
 Copy-Item "C:\Users\丧彪\.dsh\sessions" "D:\dsh-sessions-backup-20260910" -Recurse -Force
 ```
 
-### 0.2 建议备份：DSH 配置
+### 0.2 建议备份：配置与技能（✅ **已于 2026-09-10 执行完毕**）
+
+**已完成**，备份在 `D:\dsh-backup-20260910\`：
+
+| 内容 | 来源 | 大小 |
+| --- | --- | --- |
+| `sessions/` | `C:\Users\丧彪\.dsh\sessions` | 88 文件 / 82.28 MB |
+| `storages/` | `C:\Users\丧彪\.dsh\storages` | 92 文件 / 0.61 MB |
+| `agents-skills/` | `C:\Users\丧彪\.agents\skills` | **187 文件 / 1.87 MB（20 个技能）** |
+| `skills/` | `C:\Users\丧彪\.dsh\skills` | 1 文件（只有 officecli） |
+| `settings.yaml` / `AGENTS.md` / `.credentials.yaml` | `C:\Users\丧彪\.dsh\` | 合计约 8.4 KB |
+| `.skill-lock.json` | `C:\Users\丧彪\.agents\` | 0.38 KB |
+
+⚠️ **注意技能的真实位置**：技能分两个根——
+
+- `C:\Users\丧彪\.agents\skills\` ← **主力的 20 个技能在这**（session-memory、brainstorming、writing-plans、executing-plans、test-driven-development、systematic-debugging、verification-before-completion、officecli 相关的 morph-ppt 等，以及 `session-memory/global-knowledge.md` 全局踩坑库）
+- `C:\Users\丧彪\.dsh\skills\` ← 只有 `officecli` 一个
+
+**只备份 `.dsh\skills` 等于没备份技能**（这是这次差点踩的坑）。要恢复原始命令：
 
 ```powershell
-Copy-Item "C:\Users\丧彪\.dsh\settings.yaml"        "D:\dsh-backup-20260910\"
-Copy-Item "C:\Users\丧彪\.dsh\AGENTS.md"            "D:\dsh-backup-20260910\"
-Copy-Item "C:\Users\丧彪\.dsh\.credentials.yaml"    "D:\dsh-backup-20260910\"
-Copy-Item "C:\Users\丧彪\.dsh\skills"               "D:\dsh-backup-20260910\skills" -Recurse -Force
+$dst = "D:\dsh-backup-20260910"
+Copy-Item "C:\Users\丧彪\.dsh\sessions"          "$dst\sessions"      -Recurse -Force
+Copy-Item "C:\Users\丧彪\.dsh\storages"          "$dst\storages"      -Recurse -Force
+Copy-Item "C:\Users\丧彪\.agents\skills"         "$dst\agents-skills" -Recurse -Force
+Copy-Item "C:\Users\丧彪\.dsh\skills"            "$dst\skills"        -Recurse -Force
+Copy-Item "C:\Users\丧彪\.dsh\settings.yaml"     "$dst\"
+Copy-Item "C:\Users\丧彪\.dsh\AGENTS.md"         "$dst\"
+Copy-Item "C:\Users\丧彪\.dsh\.credentials.yaml" "$dst\"
+Copy-Item "C:\Users\丧彪\.agents\.skill-lock.json" "$dst\"
 ```
 
 （`.credentials.yaml` 里有 API 密钥，备份后别传网盘。）
+
+**恢复时**：把 `agents-skills/` 覆盖回 `C:\Users\丧彪\.agents\skills\`，其余按原路径放回。`sessions/` 若新版不兼容，至少原始记录还在，可以手工翻。
 
 ### 0.3 项目代码：不用额外备份
 
@@ -68,17 +93,24 @@ Copy-Item "C:\Users\丧彪\.dsh\skills"               "D:\dsh-backup-20260910\sk
 ```
 C:\Users\丧彪\.dsh\
 ├── sessions/          88 个文件, 82.1 MB   ← 会话历史，升级前必须备份
-├── skills/            技能目录（officecli 等）
+├── skills/            **只有 officecli 一个**（技能主目录在下面 .agents 里）
 ├── attachments/       会话里的图片附件
 ├── collab/
 ├── llm-deepseek/
-├── profiles/
-├── storages/
+├── profiles/          node_modules / web（web.bak-20260814 是旧版备份）
+├── storages/          会话索引与工作区状态（session_projcache、workspace.json）
 ├── settings.yaml      设置
 ├── AGENTS.md          全局指令（很重要的行为规则，见下）
 ├── .credentials.yaml  API 密钥
 └── .anonymous-user-id
+
+C:\Users\丧彪\.agents\      ← **技能的真实主目录（20 个）**
+├── skills/            session-memory / brainstorming / writing-plans / officecli 相关…
+│   └── session-memory\global-knowledge.md   ← 全局踩坑知识库
+└── .skill-lock.json
 ```
+
+⚠️ **技能有两个根**：主力在 `C:\Users\丧彪\.agents\skills\`（20 个），`.dsh\skills\` 里只有 `officecli`。备份或迁移时**别只备份 `.dsh\skills`**。
 
 **没有** `.agent-presets/`，也**没有** `projects/` —— 本会话没有创建过自定义 agent preset，也没有用过动态 Cordis 插件（`cordis_define`），所以这块没有需要迁移的东西。
 
