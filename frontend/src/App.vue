@@ -109,6 +109,48 @@ async function loadTracks() {
   }
 }
 
+/* ============ 轨迹导入 ============ */
+const importing = ref(false)
+const importMessage = ref('')
+
+/**
+ * 上传一个轨迹文件。
+ *
+ * 组件只负责"选文件"，请求统一由 App 发 —— 和 selectTrack 一样的规矩：
+ * 子组件只显示 + 上报意图，状态和数据都由父组件管。
+ */
+async function importTrack(file) {
+  importing.value = true
+  importMessage.value = ''
+  tracksError.value = ''
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch('/api/tracks/import', { method: 'POST', body: form })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+
+    await loadTracks()
+    if (data.skippedDuplicate) {
+      importMessage.value = `这条轨迹已经导入过了（id=${data.id}）`
+    } else {
+      const mm = Math.floor(data.durationS / 60)
+      const ss = String(data.durationS % 60).padStart(2, '0')
+      importMessage.value =
+        `导入成功：${data.name} · ${data.pointCount} 点 · ` +
+        `${(data.distanceM / 1000).toFixed(2)} km · ${mm}分${ss}秒` +
+        (data.outlierCount > 0 ? ` · 标记 ${data.outlierCount} 个疑似漂移点` : '')
+    }
+    // 无论是不是重复，都选中这条轨迹，让用户马上看到它
+    await selectTrack(data.id)
+  } catch (e) {
+    importMessage.value = ''
+    tracksError.value = '导入失败：' + e.message
+  } finally {
+    importing.value = false
+  }
+}
+
 /**
  * 点列表里的一条轨迹
  * 再点一次同一条 = 取消选中（把线从地球上清掉）
@@ -171,7 +213,11 @@ async function selectTrack(id) {
         :loading="tracksLoading"
         :error="tracksError"
         @select="selectTrack"
+        @import="importTrack"
       />
+
+      <p v-if="importing" class="tip">正在导入…</p>
+      <p v-else-if="importMessage" class="import-ok">{{ importMessage }}</p>
     </aside>
 
     <!-- 左下角状态条：当前地球上有几条轨迹、多少点 -->
@@ -307,5 +353,13 @@ async function selectTrack(id) {
 .status.live {
   border-color: rgba(127, 209, 255, 0.5);
   color: #7fd1ff;
+}
+
+.import-ok {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #7ee0a6;
+  word-break: break-all;
 }
 </style>

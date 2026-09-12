@@ -15,8 +15,16 @@ const props = defineProps({
   error: { type: String, default: '' },
 })
 
-// 告诉父组件"用户点了哪条"
-const emit = defineEmits(['select'])
+// 告诉父组件"用户点了哪条" / "用户选了要导入的文件"
+const emit = defineEmits(['select', 'import'])
+
+/** 用户选完文件 → 上报给父组件（组件自己不发请求，这是本组件的边界） */
+function onFilePicked(ev) {
+  const file = ev.target.files?.[0]
+  if (file) emit('import', file)
+  // 清空 input，否则连续选同一个文件不会再触发 change
+  ev.target.value = ''
+}
 
 /** 米 → 人看得懂的距离 */
 function formatDistance(m) {
@@ -41,6 +49,20 @@ function formatTime(iso) {
 
 <template>
   <div class="track-list">
+    <div class="import-bar">
+      <label class="import-btn">
+        导入轨迹
+        <input
+          type="file"
+          accept=".gpx,.plt"
+          hidden
+          data-testid="import-input"
+          @change="onFilePicked"
+        />
+      </label>
+      <span class="import-hint">支持 GPX / GeoLife .plt</span>
+    </div>
+
     <p v-if="loading" class="hint">加载中…</p>
     <p v-else-if="error" class="hint bad">❌ {{ error }}</p>
     <p v-else-if="tracks.length === 0" class="hint">还没有轨迹数据</p>
@@ -139,6 +161,32 @@ li + li {
 
 .meta,
 .time {
+  font-size: 11px;
+  color: #93a4bb;
+}
+
+.import-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.import-btn {
+  padding: 5px 12px;
+  border: 1px solid rgba(127, 209, 255, 0.45);
+  border-radius: 7px;
+  background: rgba(127, 209, 255, 0.12);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.import-btn:hover {
+  background: rgba(127, 209, 255, 0.25);
+}
+
+.import-hint {
   font-size: 11px;
   color: #93a4bb;
 }
