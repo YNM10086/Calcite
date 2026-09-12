@@ -187,8 +187,18 @@
 | --- | --- | --- | --- |
 | 接口层 | `web/` | 收请求、决定返回什么、抛 404 | 不写 SQL |
 | 传输对象 | `web/dto/` | 定义「发给前端的形状」 | 不放业务逻辑 |
+| **业务层** | **`service/`** ⭐ | **算法与编排**：清洗规则、导入流程、距离计算 | **不碰 HTTP，也不写 SQL** |
 | 持久层 | `repository/` | 查/存数据库 | 不碰 HTTP |
 | 实体层 | `domain/` | 数据库表的 Java 影子 | 不认识前端 |
+
+> ⭐ **`service/` 是 2026-09-12 做 M1 轨迹导入时新增的层。**
+>
+> 在那之前 Controller 直接调 Repository——因为逻辑很简单，中间加一层是多余的。
+> 导入功能带来了真正的业务逻辑：**格式识别 → 解析 → 清洗 → 分批入库**。
+> 这些既不该塞进 Controller（那是 HTTP 的事），也不该塞进 Repository（那是数据库的事）。
+>
+> 这就是分层的**自然生长**：不是一开始就要有，而是逻辑复杂到一定程度后水到渠成。
+> （结构地图上一版就把这件事写在第 12.1 节当"预告"，现在它发生了。）
 
 ### 6.1 Repository 的方法名就是 SQL
 
@@ -329,13 +339,29 @@ com.calcite
 ├── repository/                ← 持久层：名词 + Repository
 │   ├── TrackRepository.java
 │   └── TrackPointRepository.java
+├── service/                   ← 业务层：算法与编排（名词 + Service / 工具类）
+│   ├── GeoUtils.java              球面距离（纯静态工具）
+│   ├── TrackCleaner.java          清洗规则（动词 + er）
+│   ├── CleanedTrack.java          清洗结果（record）
+│   ├── ImportService.java         名词 + Service
+│   └── importer/                  子包：可插拔解析器
+│       ├── Importer.java          接口（名词）
+│       ├── RawPoint.java          统一中间结构（record）
+│       ├── ParsedTrack.java
+│       ├── FormatDetector.java    动词 + er
+│       ├── GpxImporter.java       格式名 + Importer
+│       └── GeoLifeImporter.java
+├── config/                    ← 配置绑定：@ConfigurationProperties 类
+│   └── ImportProperties.java      前缀名 + Properties
 └── web/                       ← 接口层：名词 + Controller
     ├── HealthController.java
     ├── TrackController.java
+    ├── ImportController.java
     └── dto/                   ← 传输对象：名词 + Summary/Detail/Dto
         ├── TrackSummary.java
         ├── TrackDetail.java
-        └── TrackPointDto.java
+        ├── TrackPointDto.java
+        └── ImportResult.java
 ```
 
 **包名全小写，类名大驼峰，方法/变量小驼峰**——这是 Java 的铁律，不是风格偏好。
@@ -393,7 +419,10 @@ docs/
 | 改轨迹线的颜色 | `CesiumGlobe.vue` |
 | 改播放速度 | `lib/playback.js` |
 | 给轨迹列表加一列 | ① `web/dto/TrackSummary.java` 加字段 ② `TrackList.vue` 显示 |
-| 加一个新接口 | ① `web/XxxController.java` ② 需要查库就改 `repository/` ③ 想好 DTO |
+| 加一个新接口 | ① `web/XxxController.java` ② 逻辑放 `service/` ③ 查库改 `repository/` ④ 想好 DTO |
+| **加一段业务逻辑（算法/清洗/编排）** | **`service/` 下新建类**；纯计算的就别碰 Spring，写成静态方法更好测 |
+| **加一种新的导入格式** | `service/importer/` 下实现 `Importer` 接口 + 在 `ImportService.pickImporter()` 里加一个 case + 在 `FormatDetector` 里加识别规则 |
+| **加一个可配置项** | 标量用 `@Value`；**列表/嵌套结构用 `@ConfigurationProperties`**（放在 `config/`） |
 | 加一张新表 | ① `scripts/db/04-xxx.sql` ② `domain/Xxx.java` ③ 跑脚本 |
 | 改接口返回的字段名 | `web/dto/` 里对应的 `from()` 方法 + 前端用的地方 |
 | 加一个 npm 包 | `frontend/package.json`（用 `npm install` 自动写） |
@@ -411,22 +440,28 @@ docs/
 
 | 要加的东西 | 放哪里 | 备注 |
 | --- | --- | --- |
-| 停留点算法 | `backend/.../service/StayPointService.java` | **要新建 `service/` 包**——算法比较长，不该塞进 Controller |
+| 停留点算法 | `backend/.../service/StayPointService.java` | `service/` 包**已经存在**（M1 导入功能建的），直接往里加类即可 |
 | 查询接口 | `backend/.../web/StayPointController.java` | 新文件 |
 | 数据表 | `stay_point` | ✅ **已经建好了**，`scripts/db/01-schema.sql` 里 |
 | 地图上的停留圆圈 | `CesiumGlobe.vue` 里加图层 | 或新建 `StayPointLayer.vue` |
 | 停留点列表 | 新建 `StayPointList.vue` | 在 `App.vue` 挂上 |
 
-**注意 `service/` 这个新包**：现在的 Controller 直接调 Repository，因为逻辑很简单。当算法变复杂（比如停留点检测要几十行），就该抽一个 `service/` 层。这是分层的自然生长，不是一开始就需要的。
+> 📌 **上一版这里写着"要新建 `service/` 包"——现在它已经存在了。**
+> M1 的导入功能就是那个"算法复杂到需要中间层"的时刻（见第 6 章）。
 
-### 12.2 轨迹导入
+### 12.2 轨迹导入 —— ✅ **2026-09-12 已完成**
 
-| 要加的东西 | 放哪里 |
+实际落地的位置（和下面这版规划略有出入，以实际为准）：
+
+| 做的东西 | 实际放在哪 |
 | --- | --- |
-| 上传接口 | `web/TrackController.java` 加一个 `@PostMapping`，或新建 `ImportController` |
-| GeoLife `.plt` 解析 | `backend/.../service/GeoLifeParser.java` |
-| 保序去重 | 同上（同一个 service） |
-| 前端上传按钮 | `TrackList.vue` 加按钮，或新建 `ImportPanel.vue` |
+| 上传接口 | `web/ImportController.java`（新建的，没有塞进 TrackController） |
+| 编排流程 | `service/ImportService.java` |
+| 格式识别 | `service/importer/FormatDetector.java`（**按内容，不看扩展名**） |
+| GPX 解析 | `service/importer/GpxImporter.java` |
+| GeoLife `.plt` 解析 | `service/importer/GeoLifeImporter.java` |
+| 清洗规则 | `service/TrackCleaner.java`（**所有规则只此一处**） |
+| 前端上传按钮 | `TrackList.vue` 里加了按钮（没有单独开组件——就一个按钮，不值得） |
 
 ### 12.3 M3 · 轨迹相似度
 

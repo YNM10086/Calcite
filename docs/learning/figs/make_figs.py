@@ -179,7 +179,7 @@ def fig1():
 
 # ------------------------------------------------------------ 图 2 目录结构
 def fig2():
-    g = Fig(1120)
+    g = Fig(1280)
     g.title("图 2 · 目录结构地图",
             "每个格子里写的是「这个目录负责什么」。打星号的是你以后最常改的。")
 
@@ -190,6 +190,9 @@ def fig2():
         ("        web/", "★ 接口层：Controller + dto/", GREEN_F, GREEN_F, 2),
         ("        repository/", "★ 查数据库的接口（方法名即 SQL）", GREEN_F, GREEN_F, 2),
         ("        domain/", "★ 实体类：数据库表的 Java 影子", GREEN_F, GREEN_F, 2),
+        ("        service/", "业务层：算法与编排（M1 导入功能新增）", GREEN_F, GREEN_F, 2),
+        ("            importer/", "可插拔解析器：GPX / GeoLife .plt", GREEN_F, GREEN_F, 3),
+        ("        config/", "配置绑定（@ConfigurationProperties）", GREEN_F, GREEN_F, 2),
         ("    src/main/resources/", "★ 配置文件（application.yml 等）", GREEN_F, GREEN_F, 1),
         ("frontend/", "前端 Vue 代码，另一个独立进程", BLUE, BLUE_F, 0),
         ("    package.json", "★ 前端依赖清单（加 npm 包改这里）", BLUE_F, BLUE_F, 1),
@@ -268,39 +271,44 @@ def fig3():
 
 # --------------------------------------------------------- 图 4 后端分层
 def fig4():
-    g = Fig(760)
-    g.title("图 4 · 后端为什么要分四层",
+    g = Fig(720)
+    g.title("图 4 · 后端为什么要分层",
             "每一层只干一件事。分层不是为了好看，是为了「改一处不用动别处」。")
 
-    g.box(60, 150, 300, 120, "web/Controller", ("收 HTTP 请求", "决定返回什么、什么时候抛 404"),
-          border=GREEN, fill=GREEN_F, ts=23, ss=16)
-    g.box(400, 150, 300, 120, "repository/", ("拿数据", "方法名 = SQL（findByTrackId…）"),
-          border=GREEN, fill=GREEN_F, ts=23, ss=16)
-    g.box(740, 150, 300, 120, "domain/Entity", ("数据库表的 Java 影子", "一个对象 = 一行数据"),
-          border=GREEN, fill=GREEN_F, ts=23, ss=16)
-    g.box(1080, 150, 260, 120, "数据库", ("真正存数据的地方",),
-          border=ORANGE, fill=ORANGE_F, ts=23, ss=16)
+    # 一条链：Controller → service → repository → domain → 数据库
+    chain = [
+        (36, "web/Controller", ("收 HTTP 请求", "决定返回什么 / 抛 404")),
+        (308, "service/", ("算法与编排", "清洗规则只在这一层")),
+        (580, "repository/", ("拿数据", "方法名 = SQL")),
+        (852, "domain/Entity", ("表的 Java 影子", "一个对象 = 一行")),
+    ]
+    for x, name, subs in chain:
+        g.box(x, 150, 240, 120, name, subs, border=GREEN, fill=GREEN_F, ts=21, ss=15)
+    g.box(1124, 150, 240, 120, "数据库", ("真正存数据的地方",),
+          border=ORANGE, fill=ORANGE_F, ts=21, ss=15)
 
-    g.box(60, 330, 300, 120, "web/dto/", ("要发出去的精简版", "只留前端用得上的字段"),
-          border=CYAN, fill=CYAN_F, ts=23, ss=16)
+    for x in (276, 548, 820, 1092):
+        g.arrow(x, 210, x + 28, 210, color=GREEN, width=2)
 
-    g.arrow(360, 210, 396, 210, "调用", color=GREEN, label_dy=-16)
-    g.arrow(700, 210, 736, 210, "调用", color=GREEN, label_dy=-16)
-    g.arrow(1040, 210, 1076, 210, "SQL", color=ORANGE, label_dy=-16)
-    g.arrow(1210, 274, 1210, 470, "", color=ORANGE)
-    g.arrow(1210, 470, 210, 470, "", color=ORANGE)
-    g.arrow(210, 470, 210, 454, "数据往回走", color=ORANGE, label_dx=120, label_dy=0)
+    g.box(36, 330, 240, 120, "web/dto/", ("要发出去的精简版", "只留前端用得上的字段"),
+          border=CYAN, fill=CYAN_F, ts=21, ss=15)
 
-    g.text(400, 500, "为什么要 DTO 这一层？", size=23, bold=True, color=INK)
+    # 数据往回走：从数据库底部绕下来，回到 dto
+    g.d.line([1244, 274, 1244, 580], fill=ORANGE, width=2)
+    g.d.line([1244, 580, 160, 580], fill=ORANGE, width=2)
+    g.arrow(160, 580, 160, 456, "数据往回走", color=ORANGE, label_dx=120, label_dy=0)
+
+    g.text(360, 360, "为什么要 service 这一层？", size=22, bold=True, color=INK)
     for i, s in enumerate([
-        "① 实体里可能有多余字段（比如内部用的 id、数据库时间戳），不该发给前端",
-        "② 前端要的格式和数据库不一样（比如要数组、要重命名的字段），转换放在 DTO 的 from() 里",
-        "③ 以后数据库改字段，只要 DTO 不变，前端就完全不用动",
+        "① 导入要做「识别格式 → 解析 → 清洗 → 分批入库」，",
+        "     这既不是 HTTP 的事，也不是数据库的事",
+        "② 清洗规则只写一份，三种格式、两个入口共用（M1 导入功能引入）",
+        "③ 纯计算（距离、刻度）写成静态方法，不依赖 Spring，秒测",
     ]):
-        g.text(400, 545 + i * 34, s, size=18, color=(0x4E, 0x59, 0x69))
+        g.text(360, 400 + i * 30, s, size=17, color=(0x4E, 0x59, 0x69))
 
-    g.text(60, 660, "记住一句：Controller 不写 SQL，Repository 不碰 HTTP，Entity 不认识前端。",
-           size=19, bold=True, color=RED)
+    g.text(36, 640, "记住一句：Controller 不写 SQL，service 不碰 HTTP，Repository 不碰 SQL 之外的事，Entity 不认识前端。",
+           size=17, bold=True, color=RED)
     g.save("fig4-backend.png")
 
 
@@ -401,19 +409,22 @@ def fig6():
 
 # --------------------------------------------------- 图 7 加东西放哪里
 def fig7():
-    g = Fig(920)
+    g = Fig(1240)
     g.title("图 7 · 以后要加东西，放哪里",
             "先问「这东西属于哪一层」，答案就出来了。这张图以后你会反复回来看。")
 
     items = [
-        ("想加一个新的接口\n（比如导入轨迹）", "backend/src/main/java/com/calcite/web/", "新建 XxxController.java", GREEN, GREEN_F),
+        ("想加一个新的接口\n（比如导入轨迹）", "backend/.../web/", "新建 XxxController.java", GREEN, GREEN_F),
+        ("想加一段业务逻辑\n（算法 / 清洗 / 编排）", "backend/.../service/", "新建 XxxService.java；纯计算的写成静态方法，秒测", GREEN, GREEN_F),
+        ("想加一种新的导入格式", "backend/.../service/importer/", "实现 Importer 接口 + 在 FormatDetector 加识别规则", GREEN, GREEN_F),
+        ("想加一个可配置项", "backend/.../config/", "标量用 @Value；列表/嵌套用 @ConfigurationProperties", GREEN, GREEN_F),
         ("想加一张新表", "scripts/db/", "新建 04-xxx.sql，同时在 domain/ 加实体类", ORANGE, ORANGE_F),
         ("想加一个复杂查询", "backend/.../repository/", "在 Repository 接口里加一个方法", GREEN, GREEN_F),
         ("想加一个新页面 / 新面板", "frontend/src/components/", "新建 Xxx.vue，在 App.vue 里挂上去", BLUE, BLUE_F),
-        ("想加一段计算逻辑\n（不涉及界面）", "frontend/src/lib/", "新建 xxx.js + 在 scripts/ 加检查脚本", PURPLE, PURPLE_F),
+        ("想加一段前端计算逻辑", "frontend/src/lib/", "新建 xxx.js + 在 scripts/ 加检查脚本", PURPLE, PURPLE_F),
         ("想加一个 Java 库", "backend/pom.xml", "<dependency> 写在 <dependencies> 里", GREEN, GREEN_F),
         ("想加一个 npm 包", "frontend/package.json", "用 npm install xxx 自动写入", BLUE, BLUE_F),
-        ("想加一张图片 / 静态资源", "frontend/public/", "这个目录还没建，需要自己新建一个，用 /文件名 访问", BLUE, BLUE_F),
+        ("想加一张图片 / 静态资源", "frontend/public/", "这个目录还没建，需要自己新建，用 /文件名 访问", BLUE, BLUE_F),
     ]
     y = 160
     for want, where, how, border, fill in items:
