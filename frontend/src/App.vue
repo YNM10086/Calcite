@@ -95,18 +95,38 @@ onMounted(() => {
   if (wanted > 0) selectTrack(wanted)
 })
 
+/* ============ 列表筛选 ============ */
+// 状态放在 App（唯一状态中心），TrackList 只负责回显 + 上报
+const sourceFilter = ref('')
+const limit = ref(50)
+const tracksTotal = ref(0)
+
 async function loadTracks() {
   tracksLoading.value = true
   tracksError.value = ''
   try {
-    const res = await fetch('/api/tracks')
+    const params = new URLSearchParams()
+    if (sourceFilter.value) params.set('source', sourceFilter.value)
+    params.set('limit', String(limit.value))
+
+    const res = await fetch('/api/tracks?' + params.toString())
     if (!res.ok) throw new Error('HTTP ' + res.status)
-    tracks.value = await res.json()
+    // 接口返回的是 { total, items } —— total 是符合条件的总数，不只是本页条数
+    const data = await res.json()
+    tracks.value = data.items ?? []
+    tracksTotal.value = data.total ?? tracks.value.length
   } catch (e) {
     tracksError.value = e.message
   } finally {
     tracksLoading.value = false
   }
+}
+
+/** 用户改了筛选条件（来源或条数）→ 重新拉列表 */
+function onFilterChange({ source, limit: newLimit }) {
+  sourceFilter.value = source
+  limit.value = newLimit
+  loadTracks()
 }
 
 /* ============ 轨迹导入 ============ */
@@ -212,8 +232,12 @@ async function selectTrack(id) {
         :selected-id="selectedId"
         :loading="tracksLoading"
         :error="tracksError"
+        :source-filter="sourceFilter"
+        :limit="limit"
+        :total="tracksTotal"
         @select="selectTrack"
         @import="importTrack"
+        @filter="onFilterChange"
       />
 
       <p v-if="importing" class="tip">正在导入…</p>

@@ -13,10 +13,24 @@ const props = defineProps({
   selectedId: { type: Number, default: null },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
+  // 筛选条件：状态由父组件 App.vue 持有，这里只负责回显 + 上报
+  sourceFilter: { type: String, default: '' },
+  limit: { type: Number, default: 50 },
+  total: { type: Number, default: 0 },
 })
 
-// 告诉父组件"用户点了哪条" / "用户选了要导入的文件"
-const emit = defineEmits(['select', 'import'])
+// 告诉父组件"用户点了哪条" / "用户选了要导入的文件" / "用户改了筛选条件"
+const emit = defineEmits(['select', 'import', 'filter'])
+
+/** 来源变了 → 上报（带上当前的条数限制） */
+function onSourceChange(ev) {
+  emit('filter', { source: ev.target.value, limit: props.limit })
+}
+
+/** 条数限制变了 → 上报（带上当前的来源） */
+function onLimitChange(ev) {
+  emit('filter', { source: props.sourceFilter, limit: Number(ev.target.value) })
+}
 
 /** 用户选完文件 → 上报给父组件（组件自己不发请求，这是本组件的边界） */
 function onFilePicked(ev) {
@@ -61,6 +75,24 @@ function formatTime(iso) {
         />
       </label>
       <span class="import-hint">支持 GPX / GeoLife .plt</span>
+    </div>
+
+    <div class="filter-bar">
+      <select :value="sourceFilter" data-testid="source-filter" @change="onSourceChange">
+        <option value="">全部来源</option>
+        <option value="geolife">GeoLife</option>
+        <option value="gpx">我的 GPX</option>
+        <option value="sample">示例数据</option>
+      </select>
+      <select :value="limit" data-testid="limit-filter" @change="onLimitChange">
+        <option :value="20">20 条</option>
+        <option :value="50">50 条</option>
+        <option :value="100">100 条</option>
+        <option :value="500">500 条</option>
+      </select>
+      <span class="count">
+        共 {{ total }} 条<template v-if="tracks.length < total"> · 显示前 {{ tracks.length }}</template>
+      </span>
     </div>
 
     <p v-if="loading" class="hint">加载中…</p>
@@ -187,6 +219,34 @@ li + li {
 }
 
 .import-hint {
+  font-size: 11px;
+  color: #93a4bb;
+}
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.filter-bar select {
+  padding: 3px 6px;
+  border: 1px solid rgba(127, 209, 255, 0.28);
+  border-radius: 6px;
+  background: rgba(10, 16, 26, 0.9);
+  color: #e7eef8;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.filter-bar select:hover {
+  border-color: rgba(127, 209, 255, 0.55);
+}
+
+.count {
+  margin-left: auto;
   font-size: 11px;
   color: #93a4bb;
 }
