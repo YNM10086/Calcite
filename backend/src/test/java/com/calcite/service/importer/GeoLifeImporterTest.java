@@ -77,4 +77,52 @@ class GeoLifeImporterTest {
     void 全空文件抛异常() {
         assertThrows(IllegalArgumentException.class, () -> parseText("\n\n"));
     }
+
+    /**
+     * 真实 GeoLife 文件与自造夹具的关键差异：**文件开头有 6 行文件头**！
+     *
+     * <pre>
+     * Geolife trajectory
+     * WGS 84
+     * Altitude is in Feet
+     * Reserved 3
+     * 0,2,255,My Track,0,0,2,8421376
+     * 0
+     * </pre>
+     *
+     * <p>注意第 5 行有 8 个字段、前两个还是数字（0 和 2），所以"字段数够不够"拦不住它 ——
+     * 实际是被"时间字段解析不出来"才跳过的。这条测试就是把这个行为钉死，
+     * 免得以后有人"优化"解析逻辑时把它弄坏。
+     */
+    @Test
+    void 真实文件_能跳过六行文件头() throws Exception {
+        ParsedTrack t;
+        try (InputStream in = getClass().getResourceAsStream("/sample-real.plt")) {
+            assertNotNull(in, "找不到 /sample-real.plt 夹具");
+            t = new GeoLifeImporter().parse(in);
+        }
+        List<RawPoint> pts = t.points();
+
+        assertEquals(908, pts.size(), "6 行文件头 + 908 行数据");
+
+        RawPoint first = pts.get(0);
+        assertEquals(39.984702, first.lat(), 1e-9);
+        assertEquals(116.318417, first.lon(), 1e-9);
+        assertEquals(492 * 0.3048, first.elevationM(), 1e-4);
+        assertEquals(OffsetDateTime.parse("2008-10-23T02:53:04Z"), first.recordedAt());
+
+        RawPoint last = pts.get(pts.size() - 1);
+        assertEquals(40.009328, last.lat(), 1e-9);
+        assertEquals(116.320887, last.lon(), 1e-9);
+        assertEquals(83 * 0.3048, last.elevationM(), 1e-4);
+        assertEquals(OffsetDateTime.parse("2008-10-23T11:11:12Z"), last.recordedAt());
+    }
+
+    @Test
+    void 第二个真实文件也正确() throws Exception {
+        try (InputStream in = getClass().getResourceAsStream("/sample-real2.plt")) {
+            assertNotNull(in, "找不到 /sample-real2.plt 夹具");
+            assertEquals(244, new GeoLifeImporter().parse(in).points().size());
+        }
+    }
 }
