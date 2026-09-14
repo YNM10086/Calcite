@@ -165,6 +165,18 @@ PowerShell 只负责启动和查错，不显示图形。
 - 明确未做：CSV 上传、上传进度条、拖拽、异步任务、坐标系自动转换
 - **待办**：GeoLife 数据集下载（挂机，官方 ID 52367 / Kaggle 镜像），到位后用 `POST /api/import/geolife` 灌 5-10 个用户
 
+### 数据现状与支线任务（2026-09-14）
+- **GeoLife 已下载**：`D:\Calcite-note\GPX-Data\Geolife Trajectories 1.3\`（182 用户 / **18,670 个 `.plt`** / 1.59 GB）
+- **已导入**：用户 `000` 的 21 条（`POST /api/import/geolife` 用 `maxTracks` 控制量，幂等所以可反复跑）
+- **用户自采数据**：`D:\Calcite-note\GPX-Data\资料一~四.gpx`（vivo 导出，456/623/504/432 点，无海拔，位置分散——正适合 M2 的停留点与热点）
+- `allowed-roots` 已改为 `D:\Calcite-note\GPX-Data\Geolife Trajectories 1.3\Data`
+- **轨迹列表可用性已改进**（2026-09-14）：`GET /api/tracks?source=&limit=` 返回 `{total, items}`，前端加了来源/条数下拉
+- 📌 **支线任务（已调研，暂不实施）**：**底图换成可切换的在线图层**（现在缩放到校园尺度是一片绿色）
+  - **用户已有天地图 API Key**（做别的项目时申请的）——实施时不用重新申请
+  - ⚠️ **关键坑**：高德/腾讯底图是 GCJ-02，与我们实测的 WGS84 数据会偏 400–600 米；**天地图/OSM 才是对齐的**
+  - Key **绝不能入库**（仓库是公开的）→ 放 `frontend/.env.local`（gitignore）
+  - 完整调研（方案取舍表 / 实施要点 / 验收标准）在设计文档 **附录 B.3**
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`
