@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class FormatDetectorTest {
 
@@ -44,5 +45,35 @@ class FormatDetectorTest {
         // 用户那份文件的扩展名是 .gpx.bin_tmp，检测只看内容，所以照样识别成 gpx
         String gpx = "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><gpx></gpx>";
         assertEquals("gpx", FormatDetector.detect(bytes(gpx)));
+    }
+
+    /**
+     * 真实 GeoLife .plt 文件开头有 6 行文件头，**第一行不是数据**。
+     *
+     * <p>这条测试是补的漏：之前只测了"自造的无头夹具"，识别器就一直有 bug ——
+     * 2026-09-14 导入真实数据时 171 个文件全部失败，就是因为只看第一行。
+     */
+    @Test
+    void 识别真实_geolife_文件_它开头有六行文件头() throws Exception {
+        byte[] content;
+        try (java.io.InputStream in = getClass().getResourceAsStream("/sample-real.plt")) {
+            assertNotNull(in, "找不到 /sample-real.plt 夹具");
+            content = in.readAllBytes();
+        }
+        byte[] head = java.util.Arrays.copyOf(content, Math.min(4096, content.length));
+        assertEquals("geolife", FormatDetector.detect(head));
+    }
+
+    @Test
+    void 只有文件头时返回_unknown() {
+        String headerOnly = "Geolife trajectory\nWGS 84\nAltitude is in Feet\nReserved 3\n"
+                + "0,2,255,My Track,0,0,2,8421376\n0\n";
+        assertEquals("unknown", FormatDetector.detect(bytes(headerOnly)));
+    }
+
+    @Test
+    void 七列数字的普通_csv_不会被误判成_plt() {
+        // 7 个字段、前两个是数字，但没有日期/时间列 —— 靠日期时间格式把它排除掉
+        assertEquals("unknown", FormatDetector.detect(bytes("1,2,3,4,5,6,7\n8,9,10,11,12,13,14")));
     }
 }

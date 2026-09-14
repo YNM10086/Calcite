@@ -43,8 +43,12 @@ public class ImportService {
     private static final int SRID = 4326;
     private static final GeometryFactory GEOMETRY_FACTORY =
             new GeometryFactory(new PrecisionModel(), SRID);
+    /** 结果里最多带回几个失败样例（够定位问题就行，不用把几万条错误全塞进响应） */
+    private static final int MAX_ERROR_SAMPLES = 5;
     /** 判定格式时只看开头这么多字节 */
     private static final int HEAD_BYTES = 4096;
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(ImportService.class);
 
     private final TrackRepository trackRepository;
     private final TrackPointRepository trackPointRepository;
@@ -203,6 +207,7 @@ public class ImportService {
         int skipped = 0;
         int failed = 0;
         int totalPoints = 0;
+        List<String> errorSamples = new ArrayList<>();
         long started = System.currentTimeMillis();
 
         for (Path file : pltFiles) {
@@ -221,12 +226,19 @@ public class ImportService {
                     totalPoints += r.pointCount();
                 }
             } catch (Exception e) {
-                failed++; // 单条失败不中断整批
+                failed++;
+                // 必须记下来！曾经这里只加了个计数，导致 171 个文件全部失败却查不出原因
+                String msg = file.getFileName() + " -> " + e.getClass().getSimpleName()
+                        + (e.getMessage() == null ? "" : (": " + e.getMessage()));
+                if (errorSamples.size() < MAX_ERROR_SAMPLES) {
+                    errorSamples.add(msg);
+                }
+                log.warn("轨迹导入失败: {}", msg);
             }
         }
 
         return new GeoLifeImportResult(root.toString(), pltFiles.size(), imported, skipped, failed,
-                totalPoints, System.currentTimeMillis() - started);
+                totalPoints, System.currentTimeMillis() - started, errorSamples);
     }
 
     private static boolean isUnderAllowedRoot(Path path, List<String> allowedRoots) {
@@ -264,6 +276,6 @@ public class ImportService {
     /** 批量导入的汇总结果 */
     public record GeoLifeImportResult(
             String path, int scanned, int imported, int skipped, int failed,
-            int totalPoints, long elapsedMs) {
+            int totalPoints, long elapsedMs, List<String> errorSamples) {
     }
 }

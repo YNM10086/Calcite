@@ -39,7 +39,7 @@ calcite:
     # 允许批量导入的根目录白名单。接口收到的 path 必须落在其中之一，否则拒绝。
     # 本地项目不需要登录，但路径必须收敛，避免任意目录读取。
     allowed-roots:
-      - D:\GeoLife
+      - D:\Calcite-note\GPX-Data\Geolife Trajectories 1.3\Data
     # 单次批量导入最多处理多少条轨迹。
     # 配合"内容哈希幂等"，脚本循环调用即可自动跳过已导入的、继续往后取。
     max-tracks-per-call: 50
