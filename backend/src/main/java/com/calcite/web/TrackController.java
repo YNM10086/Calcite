@@ -3,6 +3,10 @@ package com.calcite.web;
 import com.calcite.domain.Track;
 import com.calcite.repository.TrackPointRepository;
 import com.calcite.repository.TrackRepository;
+import com.calcite.service.StayPointService;
+import com.calcite.service.importer.RawPoint;
+import com.calcite.web.dto.StayPointDto;
+import com.calcite.web.dto.StayPointResponse;
 import com.calcite.web.dto.TrackDetail;
 import com.calcite.web.dto.TrackPage;
 import com.calcite.web.dto.TrackPointDto;
@@ -36,12 +40,15 @@ public class TrackController {
 
     private final TrackRepository trackRepository;
     private final TrackPointRepository trackPointRepository;
+    private final StayPointService stayPointService;
 
-    // 构造器注入：两个 Repository 由 Spring 自动传入
+    // 构造器注入：需要的 Bean 由 Spring 自动传入
     public TrackController(TrackRepository trackRepository,
-                           TrackPointRepository trackPointRepository) {
+                           TrackPointRepository trackPointRepository,
+                           StayPointService stayPointService) {
         this.trackRepository = trackRepository;
         this.trackPointRepository = trackPointRepository;
+        this.stayPointService = stayPointService;
     }
 
     /**
@@ -89,5 +96,39 @@ public class TrackController {
                 .toList();
 
         return TrackDetail.from(track, points);
+    }
+
+    /**
+     * 查一条轨迹的停留点（M2 第一阶段）。
+     *
+     * <p><b>现算不存库</b>：一条轨迹最多几千个点，算一次只要几毫秒；
+     * 而且参数一改结果立刻跟着变，不用管缓存失效。
+     * 等要做「跨轨迹查询」（某个区域被停留过几次）时再考虑把结果入库 —— 那是 M3 的事。
+     *
+     * <p>轨迹不存在 → 404（和 detail 一致）；没有停留 → 200 + 空列表（<b>不是</b> 404）。
+     */
+    @GetMapping("/{id}/stay-points")
+    public StayPointResponse stayPoints(@PathVariable Long id) {
+        if (!trackRepository.existsById(id)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "轨迹不存在: id=" + id);
+        }
+
+        // 表里的点已按 seq 升序，而 seq 是从 0 连续编的 ——
+        // 所以「列表下标」就等于「seq」（StayPointService 依赖这个前提）
+        List<RawPoint> points = trackPointRepository.findByTrackIdOrderBySeqAsc(id)
+                .stream()
+                .map(p -> new RawPoint(
+                        p.getGeom().getY(),   // JTS 的 getY 是纬度
+                        p.getGeom().getX(),   // getX 是经度，别写反
+                        p.getElevationM(),
+                        p.getRecordedAt()))
+                .toList();
+
+        List<StayPointDto> stays = stayPointService.detect(points)
+                .stream()
+                .map(StayPointDto::from)
+                .toList();
+
+        return new StayPointResponse(id, stays.size(), stays);
     }
 }
