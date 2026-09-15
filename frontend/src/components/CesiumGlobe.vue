@@ -30,6 +30,8 @@ const props = defineProps({
   points: { type: Array, default: () => [] },
   // 循环开关：播到终点跳回起点（true）还是停在终点（false）
   loop: { type: Boolean, default: true },
+  // 停留点数组（StayPointDto 列表）
+  stayPoints: { type: Array, default: () => [] },
 })
 
 // 往外报当前时刻（毫秒时间戳），App 用它更新播放条
@@ -48,6 +50,10 @@ const START_ID = 'calcite-track-start'
 const END_ID = 'calcite-track-end'
 const MOVER_ID = 'calcite-track-mover' // 沿轨迹移动的白色标记
 
+// 停留圆圈的数量不固定（一条轨迹可能有好几段停留），所以用数组记着，
+// 重画时逐个删掉 —— 不能用固定 id
+let stayEntities = []
+
 // 时刻往外发的节流：最多每 100ms 一次，避免每帧都触发父组件重渲染
 let lastEmitMs = 0
 // Cesium 的 addEventListener 会返回移除函数，卸载时要调
@@ -60,6 +66,50 @@ function clearTrack() {
   for (const id of [LINE_ID, START_ID, END_ID, MOVER_ID]) {
     const entity = v.entities.getById(id)
     if (entity) v.entities.remove(entity)
+  }
+  for (const e of stayEntities) v.entities.remove(e)
+  stayEntities = []
+}
+
+/**
+ * 画停留点。
+ *
+ * 每段停留画一个半透明圆 —— 圆的半径就是那段的「活动半径」，
+ * 所以圆的大小直接表示"当时活动范围多大"。
+ * 颜色深浅表示停留时长：停得越久越浓。
+ */
+function drawStayPoints(stays) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+
+  for (const e of stayEntities) v.entities.remove(e)
+  stayEntities = []
+  if (!stays || stays.length === 0) return
+
+  // 用最长的那个停留做归一化，映射颜色深浅
+  const maxDur = Math.max(...stays.map((s) => s.durationS || 0), 1)
+
+  for (const s of stays) {
+    // 半径至少给一点，否则完全静止的停留会小到看不见
+    const radius = Math.max(s.radiusM || 0, 3)
+    const ratio = Math.min(1, (s.durationS || 0) / maxDur)
+    // 短的浅（alpha .15），长的浓（alpha .55）
+    const alpha = 0.15 + 0.4 * ratio
+
+    const entity = v.entities.add({
+      position: Cartesian3.fromDegrees(s.lon, s.lat),
+      ellipse: {
+        // Cesium 的 ellipse 半径单位就是米，不用换算
+        semiMajorAxis: radius,
+        semiMinorAxis: radius,
+        material: Color.ORANGE.withAlpha(alpha),
+        outline: true,
+        outlineColor: Color.ORANGE.withAlpha(0.9),
+        outlineWidth: 2,
+        height: 0,
+      },
+    })
+    stayEntities.push(entity)
   }
 }
 
@@ -185,6 +235,15 @@ watch(
   },
 )
 
+// 停留点变化 → 重画圆圈
+watch(
+  () => props.stayPoints,
+  (stays) => {
+    if (ready.value) drawStayPoints(stays)
+  },
+  { deep: true },
+)
+
 onMounted(() => {
   // 1) 底图：Cesium 自带的离线世界地图 NaturalEarthII
   //    不需要联网、不需要任何 access token，打开就有画面
@@ -228,6 +287,7 @@ onMounted(() => {
 
   // 万一父组件在挂载前就已经有点了，补画一次
   drawTrack(props.points)
+  drawStayPoints(props.stayPoints)
 })
 
 onBeforeUnmount(() => {
@@ -245,6 +305,22 @@ onBeforeUnmount(() => {
  * 父组件通过 ref 调用，例如：globe.value.play()
  */
 defineExpose({
+  /**
+   * 把相机飞到某个点（停留点列表点击时用）。
+   * @param {number} lon 经度
+   * @param {number} lat 纬度
+   * @param {number} radiusM 停留的活动半径，用来决定飞多高
+   */
+  focusOn(lon, lat, radiusM) {
+    const v = viewer.value
+    if (!v || v.isDestroyed()) return
+    // 半径越大飞得越高；至少 600 米，不然贴着地面看不清周围
+    const height = Math.max(600, (radiusM || 0) * 25)
+    v.camera.flyTo({
+      destination: Cartesian3.fromDegrees(lon, lat, height),
+      duration: 1.0,
+    })
+  },
   /** 开始播放 */
   play() {
     const v = viewer.value

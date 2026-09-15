@@ -124,7 +124,11 @@ function formatTime(iso) {
 
 <style scoped>
 .track-list {
-  max-height: 260px;
+  /* 改成弹性高度：面板是纵向 flex，列表占满剩余空间并自己滚动。
+     原来是固定 max-height:260px —— 那样一旦加上下面的停留点区块，
+     面板总高会超出视口，停留点会被切掉而且滚不到。 */
+  flex: 1 1 auto;
+  min-height: 120px;
   overflow-y: auto;
 }
 

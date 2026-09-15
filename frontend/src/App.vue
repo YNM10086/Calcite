@@ -3,6 +3,7 @@ import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 import CesiumGlobe from './components/CesiumGlobe.vue'
 import SpeedChart from './components/SpeedChart.vue'
 import TrackList from './components/TrackList.vue'
+import StayPointList from './components/StayPointList.vue'
 import TrackPlayer from './components/TrackPlayer.vue'
 import { canPlay, timeRange } from './lib/playback.js'
 
@@ -129,6 +130,31 @@ function onFilterChange({ source, limit: newLimit }) {
   loadTracks()
 }
 
+/* ============ 停留点 ============ */
+const stays = ref([])
+const staysLoading = ref(false)
+
+/** 拉某条轨迹的停留点 */
+async function loadStays(id) {
+  staysLoading.value = true
+  try {
+    const res = await fetch(`/api/tracks/${id}/stay-points`)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    stays.value = data.stays ?? []
+  } catch (e) {
+    stays.value = []
+    tracksError.value = '停留点加载失败：' + e.message
+  } finally {
+    staysLoading.value = false
+  }
+}
+
+/** 点停留点列表里的一条 → 地球飞过去 */
+function focusStay(s) {
+  globe.value?.focusOn(s.lon, s.lat, s.radiusM)
+}
+
 /* ============ 轨迹导入 ============ */
 const importing = ref(false)
 const importMessage = ref('')
@@ -179,6 +205,7 @@ async function selectTrack(id) {
   if (selectedId.value === id) {
     selectedId.value = null
     detail.value = null
+    stays.value = []
     return
   }
 
@@ -191,6 +218,7 @@ async function selectTrack(id) {
     const res = await fetch(`/api/tracks/${id}`)
     if (!res.ok) throw new Error('HTTP ' + res.status)
     detail.value = await res.json()
+    await loadStays(id)
   } catch (e) {
     tracksError.value = e.message
     selectedId.value = null
@@ -207,6 +235,7 @@ async function selectTrack(id) {
       ref="globe"
       :points="trackPoints"
       :loop="loop"
+      :stay-points="stays"
       @time-change="onTimeChange"
     />
 
@@ -242,6 +271,14 @@ async function selectTrack(id) {
 
       <p v-if="importing" class="tip">正在导入…</p>
       <p v-else-if="importMessage" class="import-ok">{{ importMessage }}</p>
+
+      <h2>停留点<span v-if="stays.length"> （{{ stays.length }} 处）</span></h2>
+      <StayPointList
+        :stays="stays"
+        :loading="staysLoading"
+        :has-track="!!selectedId"
+        @focus="focusStay"
+      />
     </aside>
 
     <!-- 左下角状态条：当前地球上有几条轨迹、多少点 -->
@@ -292,8 +329,16 @@ async function selectTrack(id) {
   position: absolute;
   top: 16px;
   left: 16px;
-  z-index: 10;
+  /* z-index 要高于底部曲线（.chart 是 15），否则面板变高后伸进曲线区域时
+     会被曲线盖住、点不到 —— 这个坑在浏览器验收时被 Playwright 抓到了 */
+  z-index: 20;
   width: 320px;
+  /* 高度上限要同时避开视口底部和底部那两块 UI（曲线 140px + 播放条 46px + 余量），
+     否则停留点区块会伸到曲线底下。
+     内部两个列表区各自 flex:1 + overflow-y:auto 独立滚动。 */
+  max-height: calc(100vh - 220px);
+  display: flex;
+  flex-direction: column;
   padding: 16px 18px;
   border: 1px solid rgba(127, 209, 255, 0.18);
   border-radius: 10px;
