@@ -74,12 +74,31 @@ async def main():
         check("时间轴有 HH:MM 刻度", len(axis_labels) >= 3, str(axis_labels))
 
         # --- 3. 像素判据 ---
+        # 曲线的颜色改过一次（练习里换过配色），所以别写死色值 —— 直接问 DOM 要
+        # stroke 的实际颜色再来数像素。这样以后换配色这脚本不会假红。
+        strokes = await page.evaluate(
+            """() => ['speed', 'elevation'].map((k) => {
+                const el = document.querySelector(`[data-testid="chart-${k}"] path.line`);
+                return getComputedStyle(el).stroke;
+            })"""
+        )
+        speed_rgb, elev_rgb = (
+            tuple(int(v) for v in re.findall(r"\d+", s)[:3]) for s in strokes
+        )
+
+        def near(target, tol=35):
+            return lambda r, g, b: (
+                abs(r - target[0]) <= tol
+                and abs(g - target[1]) <= tol
+                and abs(b - target[2]) <= tol
+            )
+
         await page.screenshot(path=SHOT)
         img = Image.open(SHOT).convert("RGB")
-        green = count_pixels(img, lambda r, g, b: g >= 180 and r <= 150 and b <= 180)
-        orange = count_pixels(img, lambda r, g, b: r >= 200 and 100 <= g <= 200 and b <= 130)
-        check("绿色速度线像素 > 50", green > 50, "实得 " + str(green))
-        check("橙色海拔线像素 > 50", orange > 50, "实得 " + str(orange))
+        speed_px = count_pixels(img, near(speed_rgb))
+        elev_px = count_pixels(img, near(elev_rgb))
+        check("速度线像素 > 50", speed_px > 50, f"颜色 {speed_rgb} 实得 {speed_px}")
+        check("海拔线像素 > 50", elev_px > 50, f"颜色 {elev_rgb} 实得 {elev_px}")
 
         # --- 4. 游标会动 ---
         x1 = await page.eval_on_selector(
@@ -136,11 +155,7 @@ async def main():
         # 的位置、交点又被白点盖住，而只剩几个像素，容易假通过。
         def count_data_pixels(path):
             im = Image.open(path).convert("RGB")
-            return count_pixels(
-                im,
-                lambda r, g, b: (g >= 180 and r <= 150 and b <= 180)
-                or (r >= 200 and 100 <= g <= 200 and b <= 130),
-            )
+            return count_pixels(im, lambda r, g, b: near(speed_rgb)(r, g, b) or near(elev_rgb)(r, g, b))
 
         style = await page.add_style_tag(
             content=".playhead{display:none !important} .dot{display:none !important}"

@@ -196,6 +196,35 @@ PowerShell 只负责启动和查错，不显示图形。
   ② 起点提前的代价是能容纳的停留点变少（合成用例里 600 秒的停留报成 579 秒）
 - 明确未做：结果入库 `stay_point`、前端调参滑块、停留时段在曲线上标色带（用户选了布局 A）、POI 匹配、语义分类
 
+### 前端面板布局改版（2026-09-14）
+- 起因：用户反馈「左上角面板太拥挤，停留点列表的滚动条刺出面板框」
+- 量出来的真实原因：面板固定宽度 320px + `max-height: calc(100vh - 220px)`，
+  而**固定头部内容就占 392px**（其中「后端连通性」那个 4 行列表一项 120px），
+  600px 高的视口里面板只有 397px —— 结构上塞不下，会被 `max-height` 裁掉
+- 改法（`App.vue` + `TrackList.vue` + `StayPointList.vue`）：
+  1. 面板改成 `top/left/bottom` 双向锚点 + `width: min(420px, 34vw)`，**铺满左上角**，
+     下边界永远停在曲线正上方（`--chart-h` / `--player-h` / `--gap` 三个 CSS 变量集中定义）
+  2. 连通性 4 行列表压成一行（`UP · PostgreSQL 18.3 · PostGIS 3.6`），完整信息放 `title`；
+     去掉多余的「点一条轨迹」提示语
+  3. 两个列表 `flex: 1 1 0` 平分剩余空间，最小高度由 `--list-min` 控制
+  4. **状态条从「左下角绝对定位浮层」收进面板底部当一行** —— 它原来 z-index 10、
+     被面板（20）压住，其实早就坏了
+  5. `@media (max-height: 660px)` 矮窗口下隐藏副标题 + 调小列表最小高度
+- 实测（`.tmp/shot-panel.py`，三个视口**全部零溢出**）：
+  - 1600×900：面板 12,12→432,709，两个列表各 235px（原来只有 80px）
+  - 1600×600：面板 397px，列表各 96px
+  - 1366×660（笔记本，最常见的矮窗口）：面板 457px，列表各 126px，副标题自动隐藏
+- ⚠️ **顺手修了两个 bug**
+  1. `.tmp/check-chart-pixels.py` 一直在**假红**：判据写的是「绿色速度线/橙色海拔线」，
+     但练习提交 `8548f50` 换过配色（现在是 `#722ED1` 紫 / `#165DFF` 蓝），
+     那个"绿色 215 像素"其实是地球底色透过来的。已改成**从 DOM 读 stroke 实际颜色**再数像素
+  2. `.tmp/check-stay-points.py` 和 `check-import-pixels.py` 里排除面板用的是写死的
+     `x >= 400`，面板加宽到 432px 后会把面板的蓝字/橙色条目误算成地图上的线。
+     已改成**问 DOM 要 `.panel` 的右边界**（以后改宽度不会再假红/假绿）
+- 回归：后端 58 + check:playback 17 + check:chart 37 + check-stay-points 7 +
+  **check-chart-pixels 10** + **check-import-pixels 5** + **check-filter 6** = **140 项全绿**
+  （之前笔记里写的 119 项只算了前四个，后三个是 M1 留下的脚本，一直没纳入统计）
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`

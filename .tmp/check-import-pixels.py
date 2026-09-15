@@ -56,12 +56,17 @@ async def main():
         check("海拔面板显示「没有海拔数据」而不是贴底直线", has_elev_empty, str(empties))
 
         # --- 4. 轨迹线画出来了（像素）---
+        # 排除区不能写死：面板标题用的是 #7fd1ff，和轨迹线是同一个精确色，
+        # 面板一改宽就会被误算成"地图上的线"。直接问 DOM 要面板右边界。
+        panel_right = await page.eval_on_selector(
+            ".panel", "el => Math.round(el.getBoundingClientRect().right)"
+        )
         await page.screenshot(path=SHOT)
         img = Image.open(SHOT).convert("RGB")
         px = img.load()
         hits = 0
         for y in range(90, 820):
-            for x in range(400, VIEW_W):
+            for x in range(panel_right + 8, VIEW_W):
                 r, g, b = px[x, y][:3]
                 if abs(r - 127) < 45 and abs(g - 209) < 45 and abs(b - 255) < 45:
                     hits += 1

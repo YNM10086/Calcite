@@ -55,10 +55,10 @@ function formatRadius(m) {
 
 <style scoped>
 .stay-list {
-  /* 弹性高度 + 独立滚动：面板是纵向 flex，这样它不会被上面的轨迹列表挤出去，
-     自己内容多时也不会把面板顶爆 */
-  flex: 1 1 auto;
-  min-height: 80px;
+  /* 和轨迹列表平分面板剩余高度，各自独立滚动。
+     flex-basis 用 0 的理由见 TrackList.vue 里的注释。 */
+  flex: 1 1 0;
+  min-height: var(--list-min, 88px);
   overflow-y: auto;
 }
 

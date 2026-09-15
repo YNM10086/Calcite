@@ -11,6 +11,19 @@ import { canPlay, timeRange } from './lib/playback.js'
 const health = ref(null)
 const healthError = ref('')
 
+/** 页面上只显示版本号，完整构建串（msvc 那串）太长，塞进 title 悬浮提示 */
+const pgShort = computed(() => (health.value?.database ?? '').split(' on ')[0])
+const postgisShort = computed(() => (health.value?.postgis ?? '').split(' ')[0])
+const healthTitle = computed(() =>
+  health.value
+    ? `${health.value.application} · ${health.value.database} · PostGIS ${health.value.postgis}`
+    : '',
+)
+/** 标题后面那个小圆点：绿=通，红=断，灰=还不知道 */
+const healthDotClass = computed(() =>
+  healthError.value ? 'bad-dot' : health.value ? 'ok-dot' : '',
+)
+
 /* ============ 轨迹列表 ============ */
 const tracks = ref([])
 const tracksLoading = ref(true)
@@ -241,21 +254,18 @@ async function selectTrack(id) {
 
     <!-- 左上角浮层：标题 + 后端连通性 + 轨迹列表 -->
     <aside class="panel">
-      <h1>Calcite</h1>
+      <h1>Calcite<span class="dot" :class="healthDotClass" /></h1>
       <p class="subtitle">Spring Boot 3 + Vue 3 + Cesium + PostGIS</p>
 
-      <h2>后端连通性</h2>
-      <p v-if="healthError" class="bad">❌ 未连接：{{ healthError }}</p>
-      <ul v-else-if="health" class="ok">
-        <li><span>状态</span>{{ health.status }}</li>
-        <li><span>应用</span>{{ health.application }}</li>
-        <li><span>数据库</span>{{ health.database }}</li>
-        <li><span>PostGIS</span>{{ health.postgis }}</li>
-      </ul>
-      <p v-else class="muted">检查中…</p>
+      <!-- 后端连通性：原来是一个 h2 + 4 行列表，光这一块就占 160px，
+           面板要塞下两个列表就不够了。压成一行，完整信息放 title 悬浮提示。 -->
+      <p v-if="healthError" class="bad health-line">❌ 未连接：{{ healthError }}</p>
+      <p v-else-if="health" class="ok health-line" :title="healthTitle">
+        {{ health.status }} · {{ pgShort }} · PostGIS {{ postgisShort }}
+      </p>
+      <p v-else class="muted health-line">检查中…</p>
 
       <h2>轨迹列表</h2>
-      <p class="tip">点一条轨迹，它会被画到地球上</p>
       <TrackList
         :tracks="tracks"
         :selected-id="selectedId"
@@ -279,17 +289,18 @@ async function selectTrack(id) {
         :has-track="!!selectedId"
         @focus="focusStay"
       />
-    </aside>
 
-    <!-- 左下角状态条：当前地球上有几条轨迹、多少点 -->
-    <div class="status" :class="{ live: trackPoints.length > 0 }">
-      <template v-if="detailLoading">正在加载轨迹点…</template>
-      <template v-else-if="detail">
-        🛰 {{ detail.name }} · {{ detail.points.length }} 个点 ·
-        {{ (detail.distanceM / 1000).toFixed(2) }} km
-      </template>
-      <template v-else>未选择轨迹</template>
-    </div>
+      <!-- 状态条：以前飘在左下角，但面板铺满左上角后会被压在面板底下
+           （它 z-index 10、面板 20），所以收进面板底部当一行信息 -->
+      <div class="status" :class="{ live: trackPoints.length > 0 }">
+        <template v-if="detailLoading">正在加载轨迹点…</template>
+        <template v-else-if="detail">
+          🛰 {{ detail.name }} · {{ detail.points.length }} 个点 ·
+          {{ (detail.distanceM / 1000).toFixed(2) }} km
+        </template>
+        <template v-else>未选择轨迹</template>
+      </div>
+    </aside>
 
     <!-- 底部速度/海拔曲线：游标与回放同步，点曲线跳转到那一刻 -->
     <SpeedChart
@@ -319,26 +330,50 @@ async function selectTrack(id) {
 
 <style scoped>
 .app {
+  /* 底部那两块 UI 的高度，面板要停在它们上面。
+     集中在这里定义，将来播放条改高度只需要改一个数。 */
+  --gap: 12px;
+  --chart-h: 133px;
+  --player-h: 46px;
+  /* 两个列表各自的最小高度，子组件通过 var() 取用。
+     矮窗口下由下面的 media query 调小。 */
+  --list-min: 88px;
   position: relative;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
 }
 
+/* 矮窗口（1366×768 的笔记本视口只有 ~660px）：
+   副标题属于锦上添花，让位给两个列表 */
+@media (max-height: 660px) {
+  .app {
+    --list-min: 72px;
+  }
+
+  .panel .subtitle {
+    display: none;
+  }
+}
+
 .panel {
   position: absolute;
-  top: 16px;
-  left: 16px;
-  /* z-index 要高于底部曲线（.chart 是 15），否则面板变高后伸进曲线区域时
-     会被曲线盖住、点不到 —— 这个坑在浏览器验收时被 Playwright 抓到了 */
+  top: var(--gap);
+  left: var(--gap);
+  /* 铺满左上角：用 top + bottom 双向定位，而不是写死 max-height。
+     这样面板高度自己跟着视口走，底部那条边永远停在曲线正上方。 */
+  bottom: calc(var(--chart-h) + var(--player-h) + var(--gap));
+  /* z-index 要高于底部曲线（.chart 是 15），否则面板伸进曲线区域时会被盖住、点不到
+     —— 这个坑在浏览器验收时被 Playwright 抓到过 */
   z-index: 20;
-  width: 320px;
-  /* 高度上限要同时避开视口底部和底部那两块 UI（曲线 140px + 播放条 46px + 余量），
-     否则停留点区块会伸到曲线底下。
-     内部两个列表区各自 flex:1 + overflow-y:auto 独立滚动。 */
-  max-height: calc(100vh - 220px);
+  /* 原来固定 320px 太窄：「数据库」这种标签会被挤成两行、PostgreSQL 版本号也折行。
+     给到 420px，同时留一个 vw 上限，窄屏上不至于把地球全挡掉。 */
+  width: min(420px, 34vw);
   display: flex;
   flex-direction: column;
+  /* 兜底：万一内容还是塞不下，宁可裁在面板里，也不许溢出去压住别的 UI
+     （这就是之前「停留点滚动条刺出面板框」的成因） */
+  overflow: hidden;
   padding: 16px 18px;
   border: 1px solid rgba(127, 209, 255, 0.18);
   border-radius: 10px;
@@ -349,16 +384,55 @@ async function selectTrack(id) {
 }
 
 .panel h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 20px;
   letter-spacing: 1px;
 }
 
+/* 标题后面的连通性小圆点 */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #93a4bb;
+}
+
+.dot.ok-dot {
+  background: #7ee0a6;
+  box-shadow: 0 0 8px rgba(126, 224, 166, 0.8);
+}
+
+.dot.bad-dot {
+  background: #ff9b9b;
+  box-shadow: 0 0 8px rgba(255, 155, 155, 0.8);
+}
+
 .panel h2 {
-  margin: 14px 0 6px;
+  margin: 12px 0 6px;
   font-size: 13px;
   color: #7fd1ff;
   font-weight: 600;
+}
+
+/* 面板里除两个列表以外的内容都不参与伸缩：
+   空间不够时只压缩列表，标题和连通性信息不能被压扁 */
+.panel > h1,
+.panel > h2,
+.panel > p,
+.panel > div:not(.track-list):not(.stay-list) {
+  flex: 0 0 auto;
+}
+
+/* 连通性压成一行后，别让它撑高 */
+.health-line {
+  margin: 6px 0 0;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .subtitle {
@@ -370,24 +444,6 @@ async function selectTrack(id) {
 .tip {
   margin: 0 0 6px;
   font-size: 11px;
-  color: #93a4bb;
-}
-
-.panel ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.panel li {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 2px 0;
-  font-size: 13px;
-}
-
-.panel li span {
   color: #93a4bb;
 }
 
@@ -406,21 +462,19 @@ async function selectTrack(id) {
 }
 
 .status {
-  position: absolute;
-  bottom: 194px;
-  left: 16px;
-  z-index: 10;
-  padding: 6px 12px;
-  border: 1px solid rgba(127, 209, 255, 0.18);
-  border-radius: 999px;
-  background: rgba(10, 16, 26, 0.78);
+  /* 收进面板底部当一行信息：不再是绝对定位的浮层了 */
+  flex: 0 0 auto;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(127, 209, 255, 0.14);
   color: #93a4bb;
-  font-size: 12px;
-  backdrop-filter: blur(6px);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status.live {
-  border-color: rgba(127, 209, 255, 0.5);
   color: #7fd1ff;
 }
 

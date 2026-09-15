@@ -52,12 +52,17 @@ async def main():
         check("面板有停留点标题", any("停留点" in h for h in heads), str(heads))
 
         # --- 4. 橙色半透明圆画出来了（像素）---
+        # 排除区不能写死：面板的底边框和"停留点"条目的橙色跟圆是一个色系，
+        # 面板一改宽就会被误算进来。直接问 DOM 要面板右边界。
+        panel_right = await page.eval_on_selector(
+            ".panel", "el => Math.round(el.getBoundingClientRect().right)"
+        )
         await page.screenshot(path=SHOT)
         img = Image.open(SHOT).convert("RGB")
         px = img.load()
         hits = 0
         for y in range(60, 820):
-            for x in range(400, VIEW_W):
+            for x in range(panel_right + 8, VIEW_W):
                 r, g, b = px[x, y][:3]
                 # Cesium 的 ORANGE(255,165,0) 带透明度叠在绿色底图上
                 if r > 140 and 80 < g < 215 and b < 130:
