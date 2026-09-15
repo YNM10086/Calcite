@@ -177,6 +177,25 @@ PowerShell 只负责启动和查错，不显示图形。
   - Key **绝不能入库**（仓库是公开的）→ 放 `frontend/.env.local`（gitignore）
   - 完整调研（方案取舍表 / 实施要点 / 验收标准）在设计文档 **附录 B.3**
 
+### M2 第一阶段 · 停留点识别（2026-09-14 完成）
+- 设计文档 `docs/superpowers/specs/2026-09-14-m2-stay-point-design.md`；实施计划 `docs/superpowers/plans/2026-09-14-m2-stay-point.md`（6 任务 / 29 步）
+- 新增：`service/StayPoint`（record）、`service/StayPointService`（算法）、`web/dto/StayPointDto` + `StayPointResponse`、前端 `components/StayPointList.vue`
+- 改动：`TrackController` 加 `GET /api/tracks/{id}/stay-points`；`application.yml` 加 `calcite.stay-point.*`；`CesiumGlobe` 加 `stayPoints` prop + `drawStayPoints`（ellipse 实体）+ `focusOn`；`App.vue` 面板改两段式 flex 布局
+- **算法四条规则**：空间半径 D/2、最短时长 T、**采样间隔 G 断开**、跳段不重复
+- **参数默认 50 米 / 300 秒 / 300 秒**（都在 `application.yml`，可调）
+- ⭐ **G 规则来自真实数据的坑**：有条轨迹断了 **8217 秒**后原地恢复，不加这条会被判成「停留了 2.3 小时」。
+  探索脚本最初漏了 G，21 条轨迹报 23 段；补上后是 **10 段**
+- **真实数据验收（21 条 GeoLife）全部命中**：合计 **10 段**，每条轨迹的段数与时长都与独立 Python 计算一致；
+  `20081115010133` → **0 段**；操场跑圈那条（2342 点）→ **0 段**
+- **真实数据指纹测试**：`sample-real.plt` 默认参数下正好 **1 段**（306 秒 / 半径 24.2 米 / 71 点），
+  离两个阈值都很近，算法一改就红
+- **回归总览（全绿）**：后端 `mvn test` **58 项** + `check:playback` 17 + `check:chart` 37 + `.tmp/check-stay-points.py` **7 项** = **119 项**
+- ⚠️ **浏览器验收抓到一个布局 bug**：面板 z-index 是 10、底部曲线是 15，面板变高后伸进曲线区就被盖住、点不到。
+  修法：面板 z-index → 20，`max-height` → `calc(100vh - 220px)`
+- ⚠️ **算法的两个"非直觉但正确"行为**（已写成测试钉住）：① 停留窗口会"多吃"接近的那几秒；
+  ② 起点提前的代价是能容纳的停留点变少（合成用例里 600 秒的停留报成 579 秒）
+- 明确未做：结果入库 `stay_point`、前端调参滑块、停留时段在曲线上标色带（用户选了布局 A）、POI 匹配、语义分类
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`
