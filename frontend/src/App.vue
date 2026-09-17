@@ -187,8 +187,22 @@ async function switchMode(mode) {
   viewMode.value = mode
   if (mode === 'hotspot') {
     if (hotspots.value.length === 0) await loadHotspots()
+
+    /*
+     * ⚠️ 竞态防护：loadHotspots 是异步的（一次网络往返），用户完全可能在等待期间
+     * 又点回「停留点」。如果不判这两下，挂起的这次调用恢复后会**照样**执行 fitBounds ——
+     * 于是界面在停留点模式（地球上一个热点都不画），相机却飞去了热点区域，
+     * 表现为"地球自己飘走了"。
+     *
+     * 这是最终代码审查抓到的确定性 bug（不依赖时序运气），
+     * 而且讽刺的是：这个竞态正是"等 DOM 更新再飞相机"引入的。
+     */
+    if (viewMode.value !== 'hotspot') return
+
     // 等 DOM 更新后相机再飞，否则地球可能还没拿到数据
     await nextTick()
+    if (viewMode.value !== 'hotspot') return
+
     // 面板会盖住画布左侧。必须把这个比例告诉地球，否则热点包围盒会被居中，
     // 西边那个热点正好落在面板底下 —— 看起来像"只画出了一个热点"（实测踩过）。
     const panelEl = document.querySelector('.panel')

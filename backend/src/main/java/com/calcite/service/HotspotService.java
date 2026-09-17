@@ -45,7 +45,9 @@ public class HotspotService {
      * @param stays     所有（已按时间窗筛选过的）停留点，带 trackId 归属
      * @param radiusM   聚类半径（米）：两个停留点在此距离内视为同一地点
      * @param minVisits 至少几个停留点才算热点
-     * @return 热点列表，按 trackCount → visitCount → totalDurationS 三级降序
+     * @return 热点列表，按 trackCount → visitCount → totalDurationS → centerLat → centerLon
+     *         五级降序（后两级是为了让结果与输入顺序无关 —— 只写三级时，
+     *         前三级全平局的两个热点顺序会随输入漂移，测试就没法钉死）
      * @throws IllegalArgumentException 半径不是有限正数，或最少点数小于 1
      */
     public List<Hotspot> cluster(List<TrackedStay> stays, double radiusM, int minVisits) {

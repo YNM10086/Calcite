@@ -201,8 +201,11 @@ O(n²) 两两比较。当前 n=10，45 次比较，可忽略。
 3. **热点③**：`visitCount=2` 但 `trackCount=1` —— **同一个人去了两次**。
    这正是需要三个口径的原因：按次数它排第 3，按轨迹数它和孤立点一样"冷"
 
-**排序口径**：`rank` 按 `trackCount ↓` → `visitCount ↓` → `totalDurationS ↓` 三级排序。
-选"轨迹数优先"是因为它最接近"这是个公共地点"的含义；三级排序保证结果**完全确定**，可写进测试。
+**排序口径**：`rank` 按 `trackCount ↓` → `visitCount ↓` → `totalDurationS ↓` →
+`centerLat ↑` → `centerLon ↑` **五级**排序。
+选"轨迹数优先"是因为它最接近"这是个公共地点"的含义。
+**为什么是五级而不是三级**：只写三级时，前三项全平局的两个热点顺序会随输入顺序漂移，
+结果就不是**完全确定**的，也没法写进测试。后两级用坐标兜底正是为了消掉这个不确定性。
 
 **错误处理**：
 
@@ -359,7 +362,7 @@ calcite:
 | **⭐ 传递性** | A—B 150m、B—C 150m、A—C 300m → **合成 1 个**（钉住链式效应） |
 | 去重 | 同一条轨迹的 3 个点聚在一起 → `visitCount=3` 但 `trackCount=1` |
 | 汇总 | `totalDurationS` 累加正确；重心坐标正确 |
-| 排序 | `rank` 严格按 `trackCount → visitCount → totalDurationS` 三级降序 |
+| 排序 | `rank` 严格按 `trackCount → visitCount → totalDurationS → centerLat → centerLon` 五级降序 |
 | 参数校验 | `radiusM <= 0`、`minVisits < 1` → 抛 `IllegalArgumentException` |
 | **真实数据指纹** | 25 条轨迹 → 正好 **3 个热点**，且 `visitCount` / `trackCount` / `centerLat` / `centerLon` / `radiusM` 与第 4 节那组**精确值**一致（坐标容差 1e-6，半径容差 0.2 米） |
 

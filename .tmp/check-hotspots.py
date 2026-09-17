@@ -83,6 +83,28 @@ def check(name, ok, detail=""):
     print(("  \u2713 " if ok else "  \u2717 ") + name + ("  " + detail if detail else ""))
 
 
+def trackline_bbox(path, x_from):
+    """
+    轨迹线（精确色 #7fd1ff）的屏幕包围盒。
+    用它判断"相机有没有动"：相机不动时，两次截图里轨迹线的位置和大小**完全一致**。
+
+    为什么不用"整图平均像素差"：实测有防护时 0.00、去掉防护时只有 1.66 ——
+    相机确实飞了，但那个指标太钝，2.0 的阈值根本分辨不出来（等于没测）。
+    换成包围盒之后：有防护 (602,558) 不变；去掉防护变成 (231,288)，差 370px 量级。
+    """
+    img = Image.open(path).convert("RGB")
+    px = img.load()
+    w, h = img.size
+    xs, ys = [], []
+    for y in range(60, h - 80):
+        for x in range(x_from, w):
+            r, g, b = px[x, y][:3]
+            if abs(r - 127) < 30 and abs(g - 209) < 30 and abs(b - 255) < 30:
+                xs.append(x)
+                ys.append(y)
+    return (max(xs) - min(xs), max(ys) - min(ys), len(xs)) if xs else (0, 0, 0)
+
+
 def count_px(path, x_from, pred):
     """在 x >= x_from 的地球区域里数满足 pred 的像素数（左上角 60px 与底部 80px 排除，避开工具栏/版权）。"""
     img = Image.open(path).convert("RGB")
@@ -173,9 +195,15 @@ async def main():
         check("7. 按时长排序后第一条仍是 29 分钟", "29 分钟" in txt2, txt2[:60])
 
         # === 原文 6：点一条触发相机飞行，不许报错 ===
+        # ⚠️ 这里原来写的是 check("...", True) —— 字面量恒真，等于没测，
+        # 点击引发的异常会被 Vue 吞掉、这一项照样绿。改成"点击后有没有新增控制台报错"。
+        err_before_click = len(errors)
         await page.click('[data-testid="hotspot-item"]')
         await page.wait_for_timeout(2500)
-        check("8. 点击热点未报错", True)
+        check("8. 点击热点未产生新的控制台报错",
+              len(errors) == err_before_click,
+              f"点击前 {err_before_click} 条 → 点击后 {len(errors)} 条"
+              + ("; ".join(errors[err_before_click:]) if len(errors) > err_before_click else ""))
 
         # === 增量 B：四个视口下面板都不许溢出 ===
         # 热点模式比停留点模式多占「切换开关 + 提示语 + 排序工具栏」约 17px，
@@ -224,8 +252,45 @@ async def main():
               f"约 126~172px，不是残留）、热点红 {red_stay}px（这才是残留）")
         check("15. 切回停留点后热点红像素 < 40（残留归零）", red_stay < 40, "实得 " + str(red_stay))
 
+        # === 增量 D：切模式的竞态（最终代码审查抓到的确定性 bug，已修）===
+        # 复现：把 /api/analysis/hotspots 拦下来延迟 2 秒，在请求还没回来时切回「停留点」。
+        # 修复前：挂起的 switchMode 恢复后会【照样】执行 fitBounds，
+        #         于是界面在停留点模式（地球不画热点），相机却飞去了热点区域 —— 表现为"地球自己飘走了"。
+        # 判据：切回之后隔 3.5 秒再截一张，画面应该几乎没变（相机没动）。
+        async def delay_route(route):
+            await asyncio.sleep(2.0)
+            await route.continue_()
+
+        # ⚠️ 必须在【全新加载】的页面上做。如果热点已经加载过，
+        # switchMode 里的 `if (hotspots.value.length === 0) await loadHotspots()`
+        # 就是 false —— 没有 await 就没有竞态窗口，这条检查会退化成"永远通过"
+        # （第一版就是这么写的，去掉修复后它照样绿，等于没测）。
+        await page.goto("http://localhost:5173/?track=5", wait_until="load")
+        await page.wait_for_selector('[data-testid="mode-hotspot"]', timeout=30000)
+        await page.wait_for_timeout(4000)
+
+        # 此刻 hotspots 还是空的，点「热点」会真的去打请求（并被拖 2 秒）
+        await page.click('[data-testid="mode-hotspot"]')
+        await page.wait_for_timeout(250)                    # 趁请求还在飞
+        await page.click('[data-testid="mode-stay"]')       # 切回去
+        await page.wait_for_timeout(400)
+        await page.screenshot(path=".tmp/race-a.png")
+        await page.wait_for_timeout(3500)                   # 等挂起的那次切换彻底结束
+        await page.screenshot(path=".tmp/race-b.png")
+        await page.unroute("**/api/analysis/hotspots")
+
+        # 判据：相机没动 → 两次截图里轨迹线的屏幕包围盒完全一致。
+        # （整图平均差在这里太钝：实测有防护 0.00 / 无防护 1.66，分辨不出来。）
+        bw_a, bh_a, n_a = trackline_bbox(".tmp/race-a.png", panel_right + 8)
+        bw_b, bh_b, n_b = trackline_bbox(".tmp/race-b.png", panel_right + 8)
+        moved = abs(bw_a - bw_b) > 10 or abs(bh_a - bh_b) > 10
+        check("16. [增量D] 拉取热点期间切回停留点，相机不会被带飞",
+              not moved,
+              f"轨迹线包围盒 切换后({bw_a}x{bh_a}, {n_a}px) → 3.5秒后({bw_b}x{bh_b}, {n_b}px)"
+              + ("  ← 相机飞走了！" if moved else ""))
+
         # === 原文 8：控制台零报错 ===
-        check("16. 控制台零报错", len(errors) == 0, "; ".join(errors[:3]))
+        check("17. 控制台零报错", len(errors) == 0, "; ".join(errors[:3]))
 
         await browser.close()
 

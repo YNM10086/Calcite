@@ -96,8 +96,26 @@ t('按时长排序 → 1730,1228,650', () => {
 
 t('排序不改动原数组（无副作用）', () => {
   const before = SAMPLE.map((h) => h.rank)
-  sortHotspots(SAMPLE, 'totalDurationS')
+  const r = sortHotspots(SAMPLE, 'totalDurationS')
+  // ⚠️ 光比 rank 数组是不够的：SAMPLE 在三个键上【本来就是降序】，
+  // 所以即使实现原地排序，rank 顺序前后也一样 —— 这条会变成"永远通过"。
+  // 必须另外断言返回的是新对象，且传入的数组自始至终没被换过元素。
+  assert.notStrictEqual(r, SAMPLE, '应该返回新数组，不是原数组')
   assert.deepEqual(SAMPLE.map((h) => h.rank), before)
+  assert.deepEqual(SAMPLE.map((h) => h.rank), [1, 2, 3], '原数组顺序不该被改动')
+})
+
+t('排序不改动原数组（用非单调夹具再钉一次）', () => {
+  // 上面那组在三个键上单调，这里换一组【乱序】的，原地排序会立刻暴露
+  const messy = [
+    { rank: 1, visitCount: 2, trackCount: 1, totalDurationS: 100 },
+    { rank: 2, visitCount: 9, trackCount: 9, totalDurationS: 9000 },
+    { rank: 3, visitCount: 5, trackCount: 5, totalDurationS: 500 },
+  ]
+  const snapshot = messy.map((h) => h.rank)
+  const out = sortHotspots(messy, 'visitCount')
+  assert.deepEqual(out.map((h) => h.visitCount), [9, 5, 2], '返回的应该是排好序的新数组')
+  assert.deepEqual(messy.map((h) => h.rank), snapshot, '传入的数组必须一个元素都没动')
 })
 
 t('未知排序键 → 退回按轨迹数，不抛异常', () => {
