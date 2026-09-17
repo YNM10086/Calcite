@@ -390,8 +390,16 @@ function focusOn(lon, lat, radiusM) {
 /**
  * 把相机飞到能装下所有热点的位置（进入热点模式时用）。
  * 只有一个热点时退化成 focusOn。
+ *
+ * @param {Array}  items     热点列表
+ * @param {number} insetLeft 画面左侧被浮层（面板）遮住的比例，0~0.5
+ *
+ * ⚠️ `insetLeft` 必须传，不能省。原因是实测踩到的：
+ * Cesium 的 flyTo 会把矩形**居中**铺满整个画布，但左侧 432px 被面板盖着，
+ * 于是西边那个热点正好落在面板底下 —— 看着像"只画出了一个热点"。
+ * 把遮挡比例算进去，让包围盒只占右边没被遮的那一段。
  */
-function fitBounds(items) {
+function fitBounds(items, insetLeft = 0) {
   const v = viewer.value
   if (!v || v.isDestroyed() || !items || items.length === 0) return
 
@@ -400,20 +408,30 @@ function fitBounds(items) {
     return
   }
 
-  const lons = items.map((h) => h.centerLon)
-  const lats = items.map((h) => h.centerLat)
-  let west = Math.min(...lons)
-  let east = Math.max(...lons)
-  let south = Math.min(...lats)
-  let north = Math.max(...lats)
+  let west = Math.min(...items.map((h) => h.centerLon))
+  let east = Math.max(...items.map((h) => h.centerLon))
+  let south = Math.min(...items.map((h) => h.centerLat))
+  let north = Math.max(...items.map((h) => h.centerLat))
 
-  // 留 25% 的余量，否则热点会贴着屏幕边缘
-  const padLon = (east - west) * 0.25 || 0.002
+  // 纵向直接留 25% 余量
   const padLat = (north - south) * 0.25 || 0.002
-  west -= padLon
-  east += padLon
   south -= padLat
   north += padLat
+
+  // 横向：让包围盒只落在画面右边的 [p+margin, 1-margin] 这一段里。
+  //   viewSpan = span / band            视野跨度要放大，才能把 span 塞进 band
+  //   westEdge = west0 - (p+margin)*viewSpan
+  //
+  // 左侧为什么要额外加一个 margin：如果只按 p 算，最西边那个热点的【圆心】会正好
+  // 落在面板边缘上，于是半个圆被面板压住。加了 margin 它的圆心才会退到面板右边。
+  const p = Math.min(Math.max(insetLeft, 0), 0.5)
+  const margin = 0.05
+  const band = Math.max(0.2, 1 - p - 2 * margin)
+  const span = (east - west) || 0.002
+  const viewSpan = span / band
+  const westEdge = west - (p + margin) * viewSpan
+  west = westEdge
+  east = westEdge + viewSpan
 
   v.camera.flyTo({
     destination: Rectangle.fromDegrees(west, south, east, north),

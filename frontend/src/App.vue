@@ -189,7 +189,13 @@ async function switchMode(mode) {
     if (hotspots.value.length === 0) await loadHotspots()
     // 等 DOM 更新后相机再飞，否则地球可能还没拿到数据
     await nextTick()
-    globe.value?.fitBounds(sortedHotspots.value)
+    // 面板会盖住画布左侧。必须把这个比例告诉地球，否则热点包围盒会被居中，
+    // 西边那个热点正好落在面板底下 —— 看起来像"只画出了一个热点"（实测踩过）。
+    const panelEl = document.querySelector('.panel')
+    const insetLeft = panelEl
+      ? panelEl.getBoundingClientRect().right / window.innerWidth
+      : 0
+    globe.value?.fitBounds(sortedHotspots.value, insetLeft)
   }
 }
 
@@ -431,7 +437,12 @@ async function selectTrack(id) {
    副标题属于锦上添花，让位给两个列表 */
 @media (max-height: 660px) {
   .app {
-    --list-min: 72px;
+    /* 60px 而不是 72px：热点模式比停留点模式多占了「切换开关 + 提示语 +
+       排序工具栏」约 17px，72px 的下限会让面板在 600px 高的视口里溢出
+       （实测 1600×600 溢出 17px，列表被顶出面板下边界）。
+       注意 min-height 只是【地板】—— 有富余空间时 flex:1 仍会把列表撑大，
+       所以调小它不会让正常视口下的列表变矮，只是矮窗口下不再溢出。 */
+    --list-min: 60px;
   }
 
   .panel .subtitle {
