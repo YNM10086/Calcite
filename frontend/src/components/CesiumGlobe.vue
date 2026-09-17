@@ -8,6 +8,8 @@ import {
   HeightReference,
   ImageryLayer,
   JulianDate,
+  // Cesium 的 Math 别名：相机包围盒给的是弧度，往外传要换成度
+  Math as CesiumMath,
   Rectangle,
   SampledPositionProperty,
   TileMapServiceImageryProvider,
@@ -18,6 +20,8 @@ import {
 import { computeMultiplier, timeRange } from '../lib/playback.js'
 // 热点的「大小 / 颜色」判断全在这个纯函数模块里，组件只负责画
 import { hotspotColor, hotspotPixelSize } from '../lib/hotspot.js'
+// 密度格子的「矩形 / 色阶」同样是纯函数，组件不自己算
+import { cellRect, densityRatio, rampColor } from '../lib/density.js'
 // Cesium 自带的控件样式，必须引入，否则地球上的控件会散架
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -37,10 +41,18 @@ const props = defineProps({
   stayPoints: { type: Array, default: () => [] },
   // 热点列表（跨轨迹聚类的结果）。和 stayPoints 一样是「给数据就画，不给就不画」
   hotspots: { type: Array, default: () => [] },
+  // 网格密度的格子（跨轨迹的全局结果）。传空数组时什么都不画
+  densityCells: { type: Array, default: () => [] },
+  // 本批格子的最大值，用来做对数色阶归一化
+  densityMax: { type: Number, default: 1 },
+  // 格边长（度），用来算每个格子的矩形
+  densityCellSize: { type: Number, default: 0.002 },
 })
 
-// 往外报当前时刻（毫秒时间戳），App 用它更新播放条
-const emit = defineEmits(['time-change'])
+// 往外报当前时刻（毫秒时间戳），App 用它更新播放条；
+// camera-move-end 是把 Cesium 的相机事件转出来的（见 onMounted），
+// App 靠它决定"相机停稳了，按新视野重新查密度"
+const emit = defineEmits(['time-change', 'camera-move-end'])
 
 // 地球容器：Cesium 会接管这个 div
 const container = ref(null)
@@ -62,6 +74,14 @@ let stayEntities = []
 // 同理：热点的数量也不固定，而且和 stayEntities 分开存 ——
 // 两者生命周期不同（可能只画热点不画停留点），混在一个数组里会互相误删
 let hotspotEntities = []
+
+// 同理：密度格子也单独存。它同样是「跨轨迹」的全局结果，
+// 所以和热点一样不能被 clearTrack() 清掉（理由见下面的 drawDensity）
+let densityEntities = []
+
+// 相机停稳的回调。Cesium 的 addEventListener 不是自动回收的，
+// 销毁组件时必须手动移除，否则 Cesium 会一直持有这个闭包
+let cameraMoveEndHandler = null
 
 // 时刻往外发的节流：最多每 100ms 一次，避免每帧都触发父组件重渲染
 let lastEmitMs = 0
@@ -87,6 +107,8 @@ function clearTrack() {
   //
   // 热点的清理统一由 drawHotspots() 自己负责（它开头就清一遍）；
   // 切出热点模式时 App 会传空数组进来，watcher 触发 → 清空。
+  //
+  // 密度格子（densityEntities）同理也【不】在这里清 —— 见 drawDensity()。
 }
 
 /**
@@ -165,6 +187,41 @@ function drawHotspots(hotspots) {
       },
     })
     hotspotEntities.push(entity)
+  }
+}
+
+/**
+ * 画网格密度：每个格子一个矩形，颜色按对数色阶映射。
+ *
+ * ⚠️ 这里【不】把密度格子加进 clearTrack() 的清理范围 ——
+ * 理由和热点一样：密度是跨轨迹的全局结果，不属于任何一条轨迹。
+ * 而 clearTrack() 是由"轨迹点变了"触发的，在密度模式下切轨迹会把它误清掉。
+ * 清理统一由 drawDensity() 自己负责（它开头就清一遍）。
+ *
+ * @param {Array}  cells    格子列表 [{ lon, lat, value }, ...]（lon/lat 是格中心）
+ * @param {number} max      本批最大值，归一化用
+ * @param {number} cellSize 格边长（度）
+ */
+function drawDensity(cells, max, cellSize) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+
+  for (const e of densityEntities) v.entities.remove(e)
+  densityEntities = []
+  if (!cells || cells.length === 0) return
+
+  for (const c of cells) {
+    const r = cellRect(c.lon, c.lat, cellSize)
+    const t = densityRatio(c.value, max)
+    const entity = v.entities.add({
+      rectangle: {
+        coordinates: Rectangle.fromDegrees(r.west, r.south, r.east, r.north),
+        // 半透明：格子之间会重叠视角，太实会把底图糊住
+        material: Color.fromCssColorString(rampColor(t)).withAlpha(0.75),
+        height: 0,
+      },
+    })
+    densityEntities.push(entity)
   }
 }
 
@@ -308,6 +365,17 @@ watch(
   { deep: true },
 )
 
+// 密度格子变化 → 重画矩形。
+// 三个 prop 一起看：App 换档时格子、最大值、格边长会同时变，
+// 任何一个变了都要整批重画（颜色归一化依赖 max，尺寸依赖 cellSize）
+watch(
+  () => [props.densityCells, props.densityMax, props.densityCellSize],
+  ([cells, max, cellSize]) => {
+    if (ready.value) drawDensity(cells, max, cellSize)
+  },
+  { deep: true },
+)
+
 onMounted(() => {
   // 1) 底图：Cesium 自带的离线世界地图 NaturalEarthII
   //    不需要联网、不需要任何 access token，打开就有画面
@@ -349,13 +417,28 @@ onMounted(() => {
     emit('time-change', JulianDate.toDate(v.clock.currentTime).getTime())
   })
 
+  // Cesium 的相机事件不是 Vue 事件，必须自己转出来 ——
+  // App.vue 靠它决定"相机停稳了，该按新视野重新查密度了"。
+  // 漏了这步，密度图就只会在切档时加载一次、缩放时永远不更新。
+  cameraMoveEndHandler = () => emit('camera-move-end')
+  v.camera.moveEnd.addEventListener(cameraMoveEndHandler)
+
   // 万一父组件在挂载前就已经有点了，补画一次
   drawTrack(props.points)
   drawStayPoints(props.stayPoints)
   drawHotspots(props.hotspots)
+  // 密度和热点一样是独立的图层，挂载前父组件可能已经给了格子
+  drawDensity(props.densityCells, props.densityMax, props.densityCellSize)
 })
 
 onBeforeUnmount(() => {
+  // ⚠️ 必须排在 destroy() 之前：viewer 销毁后 camera 也没了，
+  // 那时候再 removeEventListener 不但没意义，还可能直接报错
+  if (cameraMoveEndHandler && viewer.value && !viewer.value.isDestroyed()) {
+    viewer.value.camera.moveEnd.removeEventListener(cameraMoveEndHandler)
+  }
+  cameraMoveEndHandler = null
+
   // 释放 WebGL 资源，否则热更新时会不断泄漏
   if (removeTickListener) {
     removeTickListener()
@@ -440,13 +523,36 @@ function fitBounds(items, insetLeft = 0) {
 }
 
 /**
- * 暴露给父组件的五个方法。
+ * 取当前视野的包围盒（度）。密度模式靠它决定查哪一块。
+ *
+ * ⚠️ Cesium 的 computeViewRectangle() 在视角包含极点、或者看向太空时
+ * 会返回 undefined。**必须处理这种情况** —— 直接把 undefined 传下去
+ * 会让后端的 bbox 解析失败、前端报一堆错。
+ */
+function getViewBbox() {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return null
+  const rect = v.camera.computeViewRectangle()
+  if (!rect) return null
+  const west = CesiumMath.toDegrees(rect.west)
+  const south = CesiumMath.toDegrees(rect.south)
+  const east = CesiumMath.toDegrees(rect.east)
+  const north = CesiumMath.toDegrees(rect.north)
+  // 弧度值是 NaN（相机未就绪等）时也当拿不到，宁可让调用方跳过这次刷新
+  if (![west, south, east, north].every(Number.isFinite)) return null
+  return { west, south, east, north }
+}
+
+/**
+ * 暴露给父组件的六个方法。
  * 父组件通过 ref 调用，例如：globe.value.play()
  */
 defineExpose({
   focusOn,
   /** 飞到能装下所有热点的位置 */
   fitBounds,
+  /** 取当前视野包围盒（密度模式用） */
+  getViewBbox,
   /** 开始播放 */
   play() {
     const v = viewer.value
