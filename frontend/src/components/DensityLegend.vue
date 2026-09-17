@@ -17,7 +17,9 @@ const props = defineProps({
   cells: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
-  scanned: { type: Object, default: () => ({ cells: 0, points: 0, tracks: 0 }) },
+  // ⚠️ 字段名是 maxTracks（单格里最多的轨迹条数），不是 tracks ——
+  // 和接口 DTO 保持一致。App 每次都显式传，这个默认值只是兜底。
+  scanned: { type: Object, default: () => ({ cells: 0, points: 0, maxTracks: 0 }) },
   cellSize: { type: Number, default: 0.002 },
   metric: { type: String, default: 'tracks' },
   hourPreset: { type: String, default: '' },
@@ -75,6 +77,14 @@ function onHour(ev) {
       <p class="stat" data-testid="density-stat">
         {{ formatCount(scanned.cells) }} 个格子 · {{ formatCount(scanned.points) }} 个点 ·
         格边长 {{ cellSize }}°
+      </p>
+      <!--
+        视野太宽时给一句提示。默认全球视野下格边长会到 5°，只画得出几个大方块
+        （实测：3 个格子），看不出路网 —— 用户不知道该放大。
+        这不是 bug 而是"网格密度"的固有性质：格子随视野变，远看只能是粗的。
+      -->
+      <p v-if="cellSize >= 1" class="note warn" data-testid="density-zoom-hint">
+        视野较大（每格 {{ cellSize }}° 见方）—— 放大到城市尺度才看得出路网细节
       </p>
       <p class="note">颜色只在同一视野内可比；跨视野请读上面的刻度</p>
     </template>
@@ -145,6 +155,12 @@ function onHour(ev) {
   font-size: 10px;
   color: #6b7a8d;
   line-height: 1.4;
+}
+
+/* 提示语要比普通说明更显眼一点，但别像报错那样刺眼 */
+.note.warn {
+  color: #ffd08a;
+  font-size: 11px;
 }
 
 .hint {
