@@ -169,7 +169,7 @@ ST_SnapToGrid(POINT(116.2966, 40.0116), 0.001) → POINT(116.297 40.012)
   "bbox": [116.26, 39.86, 116.42, 40.04],
   "cellSize": 0.002,
   "metric": "tracks",
-  "scanned": { "cells": 736, "points": 68921, "tracks": 152 },
+  "scanned": { "cells": 736, "points": 68921, "maxTracks": 152 },
   "params": { "metric": "tracks", "hourFrom": null, "hourTo": null,
               "from": null, "to": null },
   "cells": [
@@ -184,7 +184,8 @@ ST_SnapToGrid(POINT(116.2966, 40.0116), 0.001) → POINT(116.297 40.012)
 1. `lon` / `lat` 是**格子中心**（就是 `ST_SnapToGrid` 的节点），前端画 `cellSize` 见方的方格
 2. 每个格子**同时带 `points` 和 `tracks`**，外加 `value`（按 `metric` 选出的那个）——
    这样**前端切口径不用重新请求**，而 `value` 让渲染逻辑保持简单
-3. `scanned` 让前端能显示"736 个格子 / 68921 个点 / 152 条轨迹"，也能自证没有截断
+3. `scanned` 让前端能显示"736 个格子 / 68921 个点"，也能自证没有截断；
+   其中 `maxTracks` 是**单格里最多的轨迹条数**（不是全库轨迹数 —— 名字带 `max` 以免误读）
 
 ### 错误处理
 
