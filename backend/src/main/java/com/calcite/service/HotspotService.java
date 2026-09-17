@@ -46,14 +46,18 @@ public class HotspotService {
      * @param radiusM   聚类半径（米）：两个停留点在此距离内视为同一地点
      * @param minVisits 至少几个停留点才算热点
      * @return 热点列表，按 trackCount → visitCount → totalDurationS 三级降序
-     * @throws IllegalArgumentException 参数非正数时
+     * @throws IllegalArgumentException 半径不是有限正数，或最少点数小于 1
      */
     public List<Hotspot> cluster(List<TrackedStay> stays, double radiusM, int minVisits) {
-        if (radiusM <= 0) {
-            throw new IllegalArgumentException("聚类半径必须为正数，实际 " + radiusM);
+        // 注意用 !(radiusM > 0) 而不是 radiusM <= 0：
+        // NaN <= 0 是 false，用后者会让 NaN 蒙混过关，之后 d <= NaN 恒为假，
+        // 结果是"非法参数却返回 200 + 空列表"（从 HTTP 层 ?radiusM=NaN 可达）。
+        // Infinity 也要挡掉：它会让所有停留点并成一个热点。
+        if (!(radiusM > 0) || !Double.isFinite(radiusM)) {
+            throw new IllegalArgumentException("聚类半径必须是有限正数，实际 " + radiusM);
         }
         if (minVisits < 1) {
-            throw new IllegalArgumentException("最少点数必须 >= 1，实际 " + minVisits);
+            throw new IllegalArgumentException("最少停留点数必须 >= 1，实际 " + minVisits);
         }
 
         List<Hotspot> out = new ArrayList<>();

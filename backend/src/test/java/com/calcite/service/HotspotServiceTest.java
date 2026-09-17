@@ -172,14 +172,19 @@ class HotspotServiceTest {
 
     @Test
     void 重心是三个点的平均位置() {
+        /*
+         * 偏移特意用【非对称】的 0 / +60 / +120（两两最大距离 120 米，仍在 200 米半径内）。
+         * 如果写成 0 / +60 / -60，均值恰好等于中间那个点，
+         * 于是"拿第一个成员当重心"这种错实现也能通过 —— 这条测试就没有判别力了。
+         */
         List<Hotspot> out = svc.cluster(List.of(
                 stay(1, 0, 300, 0),
                 stay(2, latFor(60), 300, 600),
-                stay(3, latFor(-60), 300, 1200)), 200, 2);
+                stay(3, latFor(120), 300, 1200)), 200, 2);
 
         Hotspot h = out.get(0);
-        // 三个点的纬度偏移是 0、+60m、-60m，重心应该回到基准纬度
-        assertEquals(LAT0, h.centerLat(), 1e-9);
+        // 偏移是 0 / +60 / +120，均值必然落在 +60 米处。
+        assertEquals(LAT0 + latFor(60), h.centerLat(), 1e-9);
         assertEquals(LON0, h.centerLon(), 1e-9);
     }
 
@@ -188,34 +193,59 @@ class HotspotServiceTest {
     @Test
     void 按轨迹数_次数_时长的三级降序排列() {
         /*
-         * 造三个互不相干的热点，故意让三种口径的排序不一致，
+         * 造四个互不相干的热点，故意让三种口径的排序互相矛盾，
          * 检验排序键的优先级是 trackCount > visitCount > totalDurationS。
          *
-         *   热点甲：2 条轨迹、2 次、时长 1000  → trackCount=2 最高
-         *   热点乙：1 条轨迹、3 次、时长 3000  → 次数和时长都最高，但只有 1 条轨迹
-         *   热点丙：1 条轨迹、2 次、时长  600
+         *   热点甲：2 条轨迹、2 次、时长 1000
+         *   热点乙：1 条轨迹、3 次、时长  600
+         *   热点丙：1 条轨迹、2 次、时长 3000
+         *   热点丁：1 条轨迹、2 次、时长  100
          *
-         * 期望顺序：甲、乙、丙
-         * （乙排丙前面，是因为同为 1 条轨迹时比 visitCount：3 > 2）
+         * 期望顺序：甲、乙、丙、丁。三级优先级分别由这几对钉住：
+         *   第 1 级 trackCount：甲(2) vs 乙/丙/丁(1) —— 甲必须排最前
+         *   第 2 级 visitCount：乙(3) vs 丙(2) —— 乙的时长【更小】(600 < 3000) 却排前面，
+         *                       所以只要把第 2、3 级交换，乙丙就会互换，断言立刻红
+         *   第 3 级 totalDurationS：丙(3000) vs 丁(2 次 100 秒) —— 前两级都相同，只能比时长
+         *
+         * ⚠️ 这一组夹具是特意设计的：旧夹具里乙和丙在 visitCount 上就分出胜负了，
+         * totalDurationS 这一级从未决定过任何顺序 → 交换第 2、3 级测试仍然全绿（无判别力）。
          */
         double far = latFor(5000);   // 各热点之间隔 5 公里，绝不互连
         List<TrackedStay> stays = new ArrayList<>();
+        // 甲：轨迹 1 + 2 → 2 条轨迹、2 次、1000 秒
         stays.add(stay(1, 0, 500, 0));
-        stays.add(stay(2, latFor(30), 500, 100));        // 甲：轨迹 1 + 2，2 次，1000 秒
-        stays.add(stay(3, far, 1000, 200));
-        stays.add(stay(3, far + latFor(30), 1000, 300));
-        stays.add(stay(3, far - latFor(30), 1000, 400)); // 乙：轨迹 3 三次，3000 秒
-        stays.add(stay(4, far * 2, 300, 500));
-        stays.add(stay(4, far * 2 + latFor(30), 300, 600)); // 丙：轨迹 4 两次，600 秒
+        stays.add(stay(2, latFor(30), 500, 100));
+        // 乙：轨迹 3 的三个点 → 1 条轨迹、3 次、600 秒（次数最多，但时长最小）
+        stays.add(stay(3, far, 200, 200));
+        stays.add(stay(3, far + latFor(30), 200, 300));
+        stays.add(stay(3, far - latFor(30), 200, 400));
+        // 丙：轨迹 4 的两个点 → 1 条轨迹、2 次、3000 秒（时长最大，但次数不如乙）
+        stays.add(stay(4, far * 2, 1500, 500));
+        stays.add(stay(4, far * 2 + latFor(30), 1500, 600));
+        // 丁：轨迹 5 的两个点 → 1 条轨迹、2 次、100 秒（前两级与丙相同，兜底）
+        stays.add(stay(5, far * 3, 50, 700));
+        stays.add(stay(5, far * 3 + latFor(30), 50, 800));
 
         List<Hotspot> out = svc.cluster(stays, 200, 2);
 
-        assertEquals(3, out.size());
+        assertEquals(4, out.size(), "四个互不相干的热点");
+
+        // 甲：trackCount 最高，必须排第一（钉住第 1 级）
         assertEquals(2, out.get(0).trackCount(), "甲：2 条轨迹，trackCount 最高应排第一");
+        assertEquals(2, out.get(0).visitCount());
+
+        // 乙：次数 3 比丙、丁都多，尽管时长只有 600 秒 —— 这里钉住第 2 级优先于第 3 级
         assertEquals(1, out.get(1).trackCount());
-        assertEquals(3, out.get(1).visitCount(), "乙：同为 1 条轨迹，3 次多于丙的 2 次");
+        assertEquals(3, out.get(1).visitCount(), "乙：同为 1 条轨迹，3 次多于丙/丁的 2 次，且不看时长");
+        assertEquals(600, out.get(1).totalDurationS());
+
+        // 丙与丁：前两级都相同（1 条轨迹、2 次），只能比时长 —— 这里钉住第 3 级
         assertEquals(1, out.get(2).trackCount());
-        assertEquals(2, out.get(2).visitCount(), "丙：1 条轨迹、2 次，排最后");
+        assertEquals(2, out.get(2).visitCount());
+        assertEquals(3000, out.get(2).totalDurationS(), "丙、丁次数相同，丙时长 3000 更大所以排第三");
+        assertEquals(1, out.get(3).trackCount());
+        assertEquals(2, out.get(3).visitCount());
+        assertEquals(100, out.get(3).totalDurationS(), "丁：1 条轨迹、2 次、时长最小，排最后");
     }
 
     // ---------------------------------------------------------------- 参数校验
@@ -226,6 +256,38 @@ class HotspotServiceTest {
         assertThrows(IllegalArgumentException.class, () -> svc.cluster(one, 0, 2));
         assertThrows(IllegalArgumentException.class, () -> svc.cluster(one, -1, 2));
         assertThrows(IllegalArgumentException.class, () -> svc.cluster(one, 200, 0));
+        // NaN 必须挡住：NaN <= 0 是 false，写成 radiusM <= 0 会让它蒙混过关，
+        // 之后 d <= NaN 恒为假 → "非法参数却返回 200 + 空列表"（?radiusM=NaN 从 HTTP 层可达）。
+        assertThrows(IllegalArgumentException.class, () -> svc.cluster(one, Double.NaN, 2));
+        // Infinity 必须挡住：它会让所有停留点并成一个热点。
+        assertThrows(IllegalArgumentException.class, () -> svc.cluster(one, Double.POSITIVE_INFINITY, 2));
+        // minVisits 下界也要有下界以下的用例，不能只测 0。
+        assertThrows(IllegalArgumentException.class, () -> svc.cluster(one, 200, -1));
+    }
+
+    // ---------------------------------------------------------------- 门槛过滤
+
+    @Test
+    void minVisits为3_恰好3点的簇保留_2点的簇剔除() {
+        /*
+         * 门槛规则是「簇大小 >= minVisits 保留，否则当孤立点剔除」。
+         * 此前所有用例都只用 minVisits = 2，等于只验证过"恰好等于门槛的 2 点簇保留"，
+         * 换成别的门槛是否还成立完全没测过。这里用 minVisits = 3 同时钉住两侧：
+         * 3 点簇【恰好等于】门槛 → 保留；2 点簇【差一个】 → 剔除。
+         */
+        double far = latFor(5000);   // 两个簇隔 5 公里，绝不互连
+        List<Hotspot> out = svc.cluster(List.of(
+                stay(1, 0, 300, 0),
+                stay(2, latFor(30), 300, 100),
+                stay(3, latFor(-30), 300, 200),          // 簇甲：3 个点，恰好等于门槛
+                stay(4, far, 300, 300),
+                stay(5, far + latFor(30), 300, 400)),    // 簇乙：只有 2 个点，低于门槛
+                200, 3);
+
+        assertEquals(1, out.size(), "只有 3 点那个簇达标，2 点的簇应被剔除");
+        assertEquals(3, out.get(0).visitCount(), "保留下来的就是那个 3 点簇");
+        assertTrue(out.stream().noneMatch(h -> h.visitCount() < 3),
+                "结果里不该出现低于门槛的簇");
     }
 
     // ---------------------------------------------------------------- 真实数据指纹
