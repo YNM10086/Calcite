@@ -14,9 +14,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class DensityGridTest {
 
-    /** 和 application.yml 里的 cell-ladder 一致 */
+    /**
+     * 和 application.yml 里的 cell-ladder 一致。
+     *
+     * <p>⚠️ 最粗那一档必须够粗：用户一打开地图就是全球视野，如果阶梯只到 0.05°，
+     * 那么 360° 宽的视野会退回 0.05°、算出 2500 多万个格子，后端直接 400 ——
+     * 等于第一次点「密度」就报错。5° 能覆盖 400°，够用。
+     */
     private static final double[] LADDER =
-            {0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 0.0005, 0.0002, 0.0001};
+            {5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 0.0005, 0.0002, 0.0001};
 
     // ---------------------------------------------------------------- bbox 解析
 
@@ -114,7 +120,9 @@ class DensityGridTest {
         double fromQuery = Double.parseDouble("0.001");
         DensityGrid.requireKnownCellSize(fromQuery, LADDER);   // 必须通过
 
-        double fromLadder = LADDER[5];
+        double fromLadder = LADDER[11];
+        // 先确认索引没错（改了阶梯长度就要同步改这里，这条会立刻告诉你）
+        assertEquals(0.001, fromLadder, 1e-15, "阶梯第 11 项应该是 0.001");
         assertEquals(0, Double.compare(fromQuery, fromLadder));
         // 说明"看起来一样"的两个 double 用 == 恰好也相等，
         // 但只要将来 LADDER 改成从配置读入（可能是 1.0E-3 的另一种解析路径），
@@ -135,27 +143,38 @@ class DensityGridTest {
 
     @Test
     void 视野比最粗档还宽_取最粗档() {
-        // 90/80 = 1.125，比阶梯里最粗的 0.05 还大 → 退回最粗档
-        assertEquals(0.05, DensityGrid.pickCellSize(90.0, LADDER, 80), 1e-12);
+        /*
+         * 兜底分支：只有"荒谬地宽"的视野才会走到这里。
+         * 最粗档 5° × 目标 80 格 = 能覆盖 400°，而地球一圈也才 360° ——
+         * 所以正常情况下永远走不到兜底。
+         * 但它必须存在，否则 pickCellSize 会返回 0 或负数，后面全部算错。
+         */
+        assertEquals(5.0, DensityGrid.pickCellSize(1000.0, LADDER, 80), 1e-12);
     }
 
     @Test
     void 挑出来的档永远满足不超过目标格数() {
-        // 只覆盖"阶梯最粗档还兜得住"的视野范围：最粗档 0.05 × 80 = 4°，
-        // 所以 w ≤ 4 时横向格数必然 ≤ 80。
-        for (double w : new double[]{0.005, 0.01, 0.05, 0.16, 0.5, 1, 4}) {
+        /*
+         * ⚠️ 这条测试的范围必须一路覆盖到【全球视野 360°】，否则会漏掉一个真实 bug：
+         * 如果阶梯最粗档不够粗（比如只到 0.05°），那么视野宽度 > 0.05 × 80 = 4° 时
+         * 就会退回最粗档、算出【几百万个格子】—— 后端直接返回 400。
+         * 而用户一打开地图就是全球视野，等于【第一次点「密度」就报错】。
+         *
+         * 这个 bug 在写计划时真的发生过：测试是按【宽阶梯】写的，配置里却配了【窄阶梯】，
+         * 两者互相矛盾，被执行的子代理抓了出来。
+         */
+        for (double w : new double[]{0.005, 0.01, 0.05, 0.16, 0.5, 1, 4, 20, 90, 180, 360}) {
             double cell = DensityGrid.pickCellSize(w, LADDER, 80);
             assertTrue(w / cell <= 80 + 1e-9,
-                    "视野 " + w + " 挑了 " + cell + " 会得到 " + (w / cell) + " 格");
+                    "视野 " + w + "° 挑了 " + cell + "° 会得到 " + (w / cell) + " 格");
+
+            // 顺带守住后端上限：连"全球"这种极端视野也不能估出超过 max-cells 的格子数
+            DensityGrid.Bbox all = new DensityGrid.Bbox(
+                    0, 0, Math.min(w, 360), Math.min(w / 2, 180));
+            long est = DensityGrid.estimateCells(all, cell);
+            assertTrue(est <= 20_000,
+                    "视野 " + w + "° 挑了 " + cell + "° 估算出 " + est + " 个格子，超过上限 20000");
         }
-        // ⚠️ 计划原文这里还列了 w = 20，但那条断言【数学上不可能成立】：
-        // 阶梯最粗档只有 0.05，而上面 视野比最粗档还宽_取最粗档 又钉死
-        // "视野过宽时退回最粗档"，于是 20 / 0.05 = 400 必然 > 80。
-        // 挡住"格子爆炸"的是后续任务的 maxCells = 20000（超了返回 400），不是这条断言。
-        // 所以这里把 w = 20 改成断言它【确实走了"退回最粗档"】这条路。
-        double widened = DensityGrid.pickCellSize(20.0, LADDER, 80);
-        assertEquals(0.05, widened, 1e-12, "视野过宽时应退回最粗档");
-        assertTrue(widened > 0, "退回最粗档后仍是合法的正数，不会返回 0 或负数");
     }
 
     // ---------------------------------------------------------------- 格子数上限
