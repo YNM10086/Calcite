@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "check:playback": "node scripts/check-playback.mjs",
-    "check:chart": "node scripts/check-chart.mjs"
+    "check:chart": "node scripts/check-chart.mjs",
+    "check:hotspot": "node scripts/check-hotspot.mjs"
   },
   "dependencies": {
     "cesium": "^1.145.0",

@@ -11,6 +11,7 @@ import {
   sortHotspots,
   formatDuration,
   formatSpread,
+  SORT_OPTIONS,
 } from '../src/lib/hotspot.js'
 
 let pass = 0
@@ -133,6 +134,30 @@ t('散布小于 10 米显示一位小数', () => {
 
 t('散布大于 10 米取整', () => {
   assert.equal(formatSpread(58.1), '58 米')
+})
+
+// ---------------------------------------------------------------- 排序选项一致性
+/*
+ * SORT_OPTIONS 是给面板下拉框用的。它的 value 会直接喂给 sortHotspots，
+ * 一旦和 sortHotspots 认识的键写岔了，下拉框会**静默失效**（永远退回按轨迹数排），
+ * 而其他测试全都还是绿的。所以这里必须把两者的耦合钉住。
+ */
+t('SORT_OPTIONS 的 value 都是 sortHotspots 认识的键', () => {
+  const allowed = ['trackCount', 'visitCount', 'totalDurationS']
+  for (const o of SORT_OPTIONS) {
+    assert.ok(allowed.includes(o.value), `未知排序键: ${o.value}`)
+  }
+})
+
+t('SORT_OPTIONS 覆盖全部三个口径，一个不少', () => {
+  const values = SORT_OPTIONS.map((o) => o.value).sort()
+  assert.deepEqual(values, ['totalDurationS', 'trackCount', 'visitCount'])
+})
+
+t('SORT_OPTIONS 每项都有中文标签', () => {
+  for (const o of SORT_OPTIONS) {
+    assert.ok(o.label && o.label.length > 0, `${o.value} 缺 label`)
+  }
 })
 
 console.log('')
