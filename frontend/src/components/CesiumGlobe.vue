@@ -525,9 +525,15 @@ function fitBounds(items, insetLeft = 0) {
 /**
  * 取当前视野的包围盒（度）。密度模式靠它决定查哪一块。
  *
- * ⚠️ Cesium 的 computeViewRectangle() 在视角包含极点、或者看向太空时
- * 会返回 undefined。**必须处理这种情况** —— 直接把 undefined 传下去
- * 会让后端的 bbox 解析失败、前端报一堆错。
+ * ⚠️ 三种"拿不到合法包围盒"的情况都必须返回 null，让调用方**跳过这次刷新**：
+ *
+ * 1. viewer 还没建好 / 已销毁
+ * 2. `computeViewRectangle()` 返回 undefined —— 视角包含极点、或者看向太空时就是这样
+ * 3. **视野跨了 180° 经线** —— 这时候 Cesium 给的矩形 `west > east`（它没有帮你做环绕），
+ *    而后端校验"西必须小于东"，直接传下去会拿到 400。
+ *    我们的数据在中国（116~121°E）碰不到，但用户把地球拖到太平洋就会踩到。
+ *
+ * 宁可少刷一次，也不要发一个注定 400 的请求。
  */
 function getViewBbox() {
   const v = viewer.value
@@ -538,8 +544,10 @@ function getViewBbox() {
   const south = CesiumMath.toDegrees(rect.south)
   const east = CesiumMath.toDegrees(rect.east)
   const north = CesiumMath.toDegrees(rect.north)
-  // 弧度值是 NaN（相机未就绪等）时也当拿不到，宁可让调用方跳过这次刷新
+  // 弧度值是 NaN（相机未就绪等）时也当拿不到
   if (![west, south, east, north].every(Number.isFinite)) return null
+  // 跨 180° 经线：west >= east，后端会判非法
+  if (east <= west) return null
   return { west, south, east, north }
 }
 
