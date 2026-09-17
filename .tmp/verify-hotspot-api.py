@@ -120,10 +120,20 @@ def main():
         check(f"第{k}名 lastVisit", a["lastVisit"] == e["lastVisit"])
 
     # ---- 4. 孤立点个数能自证 ----
+    # ⚠️ 这里原来写死的是 `== 1`（旧数据下恰好只有 1 个孤立停留点）。
+    # 2026-09-17 数据从 25 条扩到 246 条后，孤立点变成 33 个 —— 判据直接假红。
+    # 注意：上一轮的"清理写死数字"扫描（模式是 == 3 / 共 25 / 正好 3）**没扫到 == 1**，
+    # 所以这条漏网了。教训：**扫描写死数字的模式不能只列已知的那几个**，
+    # 要按"数字字面量出现在比较里"这种形态去找。
+    #
+    # 正确做法：用脚本【自己的聚类结果】算出期望的孤立点数
+    # （同一个实现既算热点、也就算得出孤立点，不用另写一套）。
+    isolated_expected = len(stays) - sum(c["visitCount"] for c in expected)
     counted = sum(h["visitCount"] for h in api["hotspots"])
     check("孤立点个数 = scannedStays - ΣvisitCount",
-          api["scannedStays"] - counted == 1,
-          f'{api["scannedStays"]} - {counted} = {api["scannedStays"] - counted}（应为 1）')
+          api["scannedStays"] - counted == isolated_expected,
+          f'{api["scannedStays"]} - {counted} = {api["scannedStays"] - counted}'
+          f'（独立实现算出应为 {isolated_expected}）')
 
     print(f"\n{'全部通过' if not fails else str(len(fails)) + ' 项失败: ' + ', '.join(fails)}")
     if fails:
