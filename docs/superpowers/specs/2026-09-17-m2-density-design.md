@@ -117,6 +117,12 @@ ST_SnapToGrid(POINT(116.2966, 40.0116), 0.001) → POINT(116.297 40.012)
 | 对数 | 0.153 |
 | 分位分档 | 0.228 |
 
+![三种色阶画同一份真实数据](docs/learning/figs/fig-density-scales.png)
+
+> 上图的**左边那张是线性色阶** —— 除了最热的几个格子，整条路网是看不见的。
+> 中间（对数）和右边（分位分档）都能看出结构。
+> 复现脚本：`.tmp/render-density-scales.py`（数据由 psql 导出到 `.tmp/density-grid.json`）。
+
 ### 2.4 时段筛选确实有区分度（实测）
 
 | 筛选 | Top 格子（按轨迹条数） |
