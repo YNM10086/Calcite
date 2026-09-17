@@ -87,9 +87,13 @@ async def main():
         want_geo = f"共 {total_geo} 条"
         check("2. 切到 GeoLife 后总数与接口一致", want_geo in count_geo,
               f"期望含 {want_geo!r}，实得 {count_geo!r}")
-        check("3. 切到 GeoLife 后列表确实换了一批",
-              items_geo != items_all,
-              f"全部 {items_all} 条 -> geolife {items_geo} 条（{count_geo}）")
+        # ⚠️ 不要比"条数有没有变" —— 两边都被上限截到 50 条，比出来永远是"没变"，
+        # 这个判据**本身就没有信息量**（49 对 50 也说明不了什么）。
+        # "筛选真的生效"的证据在上一项：总数从 246 变成了 242。
+        # 这里改成一条**真正有信息量**的不变量：列表条数 = min(该来源总数, 上限)。
+        check("3. 切到 GeoLife 后列表条数 = min(总数, 上限)",
+              items_geo == min(total_geo, 50),
+              f"实得 {items_geo} 条，期望 min({total_geo}, 50) = {min(total_geo, 50)}（{count_geo}）")
 
         # --- 4. 把上限降到 20，返回条数应被限制 ---
         # 原来只判 `<= 20`（19、0 都算过）。改成"显示前 20"逐字匹配 + 节点数也得是 20。
