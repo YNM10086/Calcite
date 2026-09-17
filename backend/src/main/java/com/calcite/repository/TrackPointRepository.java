@@ -39,10 +39,17 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
      * 网格密度聚合：把视野内的点按方格分桶，一次算出两个口径。
      *
      * <p><b>为什么用 {@code round(ST_X(geom)/:cell)::int} 而不是 {@code ST_SnapToGrid(geom, :cell)}</b>：
-     * 两者<b>语义完全相同</b>（都是"把坐标就近取整到 cell 的整数倍"），
-     * 实测格子集合逐个相同（全量 3867 = 3867、北京 736 = 736），
-     * 但整数写法快 <b>3.5 倍</b>（92ms vs 330ms），而且不需要排序、不会落盘临时文件。
-     * 这个等价关系由 {@code .tmp/verify-density-api.py} 断言钉住。
+     * 两种写法在<b>非边界点</b>上完全等价 —— 实测「所有归属不同的点都恰好落在格子边界上」
+ * （8 组断言全部满足 diff_points == tie_points），且 round 的格子集合是 ST_SnapToGrid 的子集。
+ * <b>边界点的归属不同</b>：round 走 ST_X/cell 的浮点除法
+ * （116.4095/0.001 = 116409.49999999999），ST_SnapToGrid 走乘法后按「取偶」规则，
+ * 于是在恰好半格的点上会分到相邻格子。
+ * 影响面：默认档 0.002 上两种写法<b>严格相同</b>（3916 = 3916、1335 = 1335，集合逐个相同），
+ * 只有 14 个格子的点数因此差 1（视觉不可见）；0.001 / 0.0005 档还会多出 1~2 个格子。
+ * 由 .tmp/verify-density-api.py 的四条断言钉住。
+     *
+     * <p>整数写法比 ST_SnapToGrid 快约 <b>2 倍</b>（psql 自带计时：93ms vs 188ms），
+     * 而且不需要排序、不会落盘临时文件。
      *
      * <p><b>为什么 {@code AT TIME ZONE} 要显式写</b>：{@code recorded_at} 存的是 UTC，
      * 而"早高峰"是人理解的北京时间。不显式转换的话，结果会随数据库会话时区变化 ——

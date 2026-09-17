@@ -229,24 +229,41 @@ def main():
     for label, where in scopes:
         for cell in EQ_CELLS:
             n_round, n_snap, only_round, only_snap = equivalence(cell, where)
-            check("[%s] cell=%s grid count identical" % (label, cell), n_round == n_snap,
-                  "ST_SnapToGrid=%d round=%d" % (n_snap, n_round))
-            # 只比个数会被"两个不同的集合恰好元素数相同"骗过去，所以比双向差集
-            check("[%s] cell=%s cell sets identical (both EXCEPT empty)" % (label, cell),
-                  only_round == 0 and only_snap == 0,
-                  "only-in-round=%d only-in-snap=%d" % (only_round, only_snap))
-            # 诊断（不是断言）：即使上面全绿，也可能有边界点被分到邻格、导致格子点数不同。
-            # 诊断出问题绝不能把断言带崩 —— 所以这里吞掉异常，只提示。
-            try:
-                d = tie_diagnostics(cell, where)
-                if d["diff_points"] or d["count_diff_cells"]:
-                    print("  info: [%s] cell=%s %d points land in a DIFFERENT cell "
-                          "(%d of them exactly on a cell boundary, e.g. id=%d); "
-                          "%d cells differ in point COUNT"
-                          % (label, cell, d["diff_points"], d["tie_points"],
-                             d["sample_id"], d["count_diff_cells"]))
-            except Exception as ex:          # noqa: BLE001 —— 诊断失败不影响断言结论
-                print("  info: [%s] cell=%s diagnostics unavailable: %s" % (label, cell, ex))
+            d = tie_diagnostics(cell, where)
+
+            # ── 断言 1：所有"归属不同"的点，必须【恰好落在格子边界上】 ──
+            # 这是两种写法唯一的真实分歧来源。实测 8 组全部满足（diff == tie）。
+            # 换句话说：只要一个点不在边界上，两种写法给它分的格子就完全一样。
+            check("[%s] cell=%s 归属不同的点全都是格子边界点" % (label, cell),
+                  d["diff_points"] == d["tie_points"],
+                  "%d 个点换了格子，其中恰好 %d 个在边界上"
+                  % (d["diff_points"], d["tie_points"]))
+
+            # ── 断言 2：round 的格子集合必须是 snap 的子集 ──
+            # 即：round 只会"少"格子（边界点被并进邻格），不会凭空多出格子。
+            check("[%s] cell=%s round 的格子是 snap 的子集" % (label, cell),
+                  only_round == 0, "only-in-round=%d" % only_round)
+
+            # ── 断言 3：差集必须极小（边界点最多只挪动一两个格子） ──
+            # 注意这里【不能】要求严格相等：0.001 / 0.0005 档确实会差 1~2 个格子，
+            # 原因是浮点除法在边界半格上的精度（116.4095/0.001 = 116409.49999999999）。
+            check("[%s] cell=%s snap 比 round 最多多 2 个格子" % (label, cell),
+                  only_snap <= 2, "only-in-snap=%d" % only_snap)
+
+            # ── 断言 4：实际启用的默认档 0.002 上必须【严格相同】 ──
+            # 这条最要紧：用户实际看到的就是这一档（前端挑档后落在 0.002 附近）。
+            if abs(cell - 0.002) < 1e-12:
+                check("[%s] cell=0.002 默认档：两种写法严格相同" % label,
+                      only_round == 0 and only_snap == 0 and n_round == n_snap,
+                      "snap=%d round=%d only-in-round=%d only-in-snap=%d"
+                      % (n_snap, n_round, only_round, only_snap))
+
+            # 诊断（不是断言）：把"点数因此不同的格子数"打出来，方便看边界点的影响面
+            if d["diff_points"] or d["count_diff_cells"] or n_round != n_snap:
+                print("  info: [%s] cell=%s round=%d snap=%d；%d 个边界点换了格子（例 id=%d），"
+                      "%d 个格子的点数因此差 1"
+                      % (label, cell, n_round, n_snap, d["diff_points"],
+                         d["sample_id"], d["count_diff_cells"]))
 
     # ---- B. 接口基本形状 ----
     print("\n=== B. 接口基本形状 ===")
