@@ -4,12 +4,14 @@ import com.calcite.domain.Track;
 import com.calcite.domain.TrackPoint;
 import com.calcite.repository.TrackPointRepository;
 import com.calcite.repository.TrackRepository;
+import com.calcite.service.DensityService;
 import com.calcite.service.Hotspot;
 import com.calcite.service.HotspotService;
 import com.calcite.service.StayPoint;
 import com.calcite.service.StayPointService;
 import com.calcite.service.TrackedStay;
 import com.calcite.service.importer.RawPoint;
+import com.calcite.web.dto.DensityResponse;
 import com.calcite.web.dto.HotspotDto;
 import com.calcite.web.dto.HotspotResponse;
 import org.springframework.beans.factory.annotation.Value;
@@ -43,6 +45,7 @@ public class AnalysisController {
     private final TrackPointRepository trackPointRepository;
     private final StayPointService stayPointService;
     private final HotspotService hotspotService;
+    private final DensityService densityService;
     private final double defaultRadiusM;
     private final int defaultMinVisits;
 
@@ -50,12 +53,14 @@ public class AnalysisController {
                               TrackPointRepository trackPointRepository,
                               StayPointService stayPointService,
                               HotspotService hotspotService,
+                              DensityService densityService,
                               @Value("${calcite.hotspot.radius-m:200}") double defaultRadiusM,
                               @Value("${calcite.hotspot.min-visits:2}") int defaultMinVisits) {
         this.trackRepository = trackRepository;
         this.trackPointRepository = trackPointRepository;
         this.stayPointService = stayPointService;
         this.hotspotService = hotspotService;
+        this.densityService = densityService;
         this.defaultRadiusM = defaultRadiusM;
         this.defaultMinVisits = defaultMinVisits;
     }
@@ -135,5 +140,31 @@ public class AnalysisController {
                 stays.size(),
                 new HotspotResponse.Params(radius, minPts, from, to),
                 dtos);
+    }
+
+    /**
+     * 网格密度（M2 第三阶段）：按固定边长方格统计轨迹点密度。
+     *
+     * <p>和 {@code /hotspots} 的分工：那个吃<b>停留点</b>（264 个，回答"哪里总有人停"），
+     * 这个吃<b>原始轨迹点</b>（28.6 万个，回答"哪些路段总有人经过"）。
+     */
+    @GetMapping("/density")
+    public DensityResponse density(
+            @RequestParam String bbox,
+            @RequestParam double cellSize,
+            @RequestParam(required = false) String metric,
+            @RequestParam(required = false) Integer hourFrom,
+            @RequestParam(required = false) Integer hourTo,
+            @RequestParam(required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime from,
+            @RequestParam(required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to) {
+
+        try {
+            return densityService.density(bbox, cellSize, metric, hourFrom, hourTo, from, to);
+        } catch (IllegalArgumentException e) {
+            // 参数问题一律 400，并把原因原样告诉调用方（这些错误都是给人看的）
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
     }
 }

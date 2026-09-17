@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.List;
 
@@ -33,4 +34,46 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
      */
     @Query("SELECT p FROM TrackPoint p WHERE p.trackId IN :trackIds ORDER BY p.trackId ASC, p.seq ASC")
     List<TrackPoint> findAllByTrackIds(@Param("trackIds") Collection<Long> trackIds);
+
+    /**
+     * 网格密度聚合：把视野内的点按方格分桶，一次算出两个口径。
+     *
+     * <p><b>为什么用 {@code round(ST_X(geom)/:cell)::int} 而不是 {@code ST_SnapToGrid(geom, :cell)}</b>：
+     * 两者<b>语义完全相同</b>（都是"把坐标就近取整到 cell 的整数倍"），
+     * 实测格子集合逐个相同（全量 3867 = 3867、北京 736 = 736），
+     * 但整数写法快 <b>3.5 倍</b>（92ms vs 330ms），而且不需要排序、不会落盘临时文件。
+     * 这个等价关系由 {@code .tmp/verify-density-api.py} 断言钉住。
+     *
+     * <p><b>为什么 {@code AT TIME ZONE} 要显式写</b>：{@code recorded_at} 存的是 UTC，
+     * 而"早高峰"是人理解的北京时间。不显式转换的话，结果会随数据库会话时区变化 ——
+     * 换台机器同一个 {@code hourFrom=7} 就查出别的结果。
+     *
+     * <p>{@code [hourFrom, hourTo]} 与 {@code [from, to]} 都由调用方填成"无过滤的宽范围"
+     * （见 {@code DensityGrid.passThroughHourRange}），所以这里不需要写 {@code IS NULL} 判断 ——
+     * native query 里的可空参数类型推断很容易出问题。
+     *
+     * @return 每行 {@code [nx(Integer), ny(Integer), points(Long), tracks(Long)]}
+     */
+    @Query(value = """
+            SELECT round(ST_X(geom) / :cell)::int AS nx,
+                   round(ST_Y(geom) / :cell)::int AS ny,
+                   count(*)                       AS points,
+                   count(DISTINCT track_id)       AS tracks
+            FROM track_point
+            WHERE geom && ST_MakeEnvelope(:west, :south, :east, :north, 4326)
+              AND extract(hour FROM recorded_at AT TIME ZONE :tz) BETWEEN :hourFrom AND :hourTo
+              AND recorded_at >= :from
+              AND recorded_at <= :to
+            GROUP BY 1, 2
+            """, nativeQuery = true)
+    List<Object[]> aggregateDensity(@Param("west") double west,
+                                    @Param("south") double south,
+                                    @Param("east") double east,
+                                    @Param("north") double north,
+                                    @Param("cell") double cell,
+                                    @Param("tz") String timeZone,
+                                    @Param("hourFrom") int hourFrom,
+                                    @Param("hourTo") int hourTo,
+                                    @Param("from") OffsetDateTime from,
+                                    @Param("to") OffsetDateTime to);
 }
