@@ -6,8 +6,10 @@ import TrackList from './components/TrackList.vue'
 import StayPointList from './components/StayPointList.vue'
 import TrackPlayer from './components/TrackPlayer.vue'
 import HotspotList from './components/HotspotList.vue'
+import DensityLegend from './components/DensityLegend.vue'
 import { canPlay, timeRange } from './lib/playback.js'
 import { sortHotspots } from './lib/hotspot.js'
+import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -171,8 +173,8 @@ function focusStay(s) {
 }
 
 /* ============ 热点（跨轨迹）============ */
-// 'stay' = 看某条轨迹的停留点；'hotspot' = 看全局热点。
-// 两者都会往地球上画圈，同时画会糊在一起，所以做成互斥的两档。
+// 'stay' = 看某条轨迹的停留点；'hotspot' = 看全局热点；'density' = 看跨轨迹的网格密度。
+// 三者都会往地球上画画（圈 / 方格），同时画会糊在一起，所以做成互斥的三档。
 const viewMode = ref('stay')
 const hotspots = ref([])
 const hotspotsLoading = ref(false)
@@ -182,7 +184,7 @@ const hotspotSort = ref('trackCount')
 /** 按当前口径排序后的热点（不改动 hotspots 本身） */
 const sortedHotspots = computed(() => sortHotspots(hotspots.value, hotspotSort.value))
 
-/** 切换模式：从"停留点"切到"热点"时才去拉数据（懒加载） */
+/** 切换模式：三档（停留点 / 热点 / 密度）。只有热点和密度需要懒加载 */
 async function switchMode(mode) {
   viewMode.value = mode
   if (mode === 'hotspot') {
@@ -210,6 +212,14 @@ async function switchMode(mode) {
       ? panelEl.getBoundingClientRect().right / window.innerWidth
       : 0
     globe.value?.fitBounds(sortedHotspots.value, insetLeft)
+    return
+  }
+
+  if (mode === 'density') {
+    // 等地球把新的 prop 吃到、相机也稳定了，再按视野查
+    await nextTick()
+    if (viewMode.value !== 'density') return
+    await loadDensity()
   }
 }
 
@@ -233,6 +243,89 @@ async function loadHotspots() {
 /** 点热点列表里的一条 → 地球飞过去 */
 function focusHotspot(h) {
   globe.value?.focusOn(h.centerLon, h.centerLat, Math.max(h.radiusM, 200))
+}
+
+/* ============ 网格密度（跨轨迹）============ */
+const densityCells = ref([])
+// 字段名必须和接口对得上：后端 DensityResponse.Scanned 是 maxTracks
+// （单格里最多的轨迹条数），不是 tracks —— 名字故意带 max，免得被误读成全库轨迹数。
+// 这里先给一份全零默认值，接口还没回来时图例上的统计行不会显示 undefined。
+const densityScanned = ref({ cells: 0, points: 0, maxTracks: 0 })
+const densityLoading = ref(false)
+const densityError = ref('')
+const densityCellSize = ref(0.002)
+const densityMetric = ref('tracks')
+const densityHourPreset = ref('')
+
+/** 本批格子的最大值，给 Cesium 做对数色阶归一化 */
+const densityMax = computed(() => legendMax(densityCells.value))
+
+/** 防止"相机还在动、上一次请求还没回来"时乱序覆盖：只认最后一次请求 */
+let densitySeq = 0
+
+/**
+ * 按当前视野查密度。
+ *
+ * 视野宽度决定格边长（从固定阶梯里挑一档），**只在跨档时才换格子** ——
+ * 这样拖动地图时地面上的网格是纹丝不动的。
+ */
+async function loadDensity() {
+  const box = globe.value?.getViewBbox()
+  if (!box) return // 视角看太空/含极点 → 跳过这次
+  const width = box.east - box.west
+  const cell = pickCellSize(width, 80)
+
+  const preset = HOUR_PRESETS.find((p) => p.value === densityHourPreset.value)
+  const params = new URLSearchParams()
+  params.set('bbox', [box.west, box.south, box.east, box.north].join(','))
+  params.set('cellSize', String(cell))
+  params.set('metric', densityMetric.value)
+  if (preset && preset.hourFrom != null) {
+    params.set('hourFrom', String(preset.hourFrom))
+    params.set('hourTo', String(preset.hourTo))
+  }
+
+  const mine = ++densitySeq
+  densityLoading.value = true
+  densityError.value = ''
+  try {
+    const res = await fetch('/api/analysis/density?' + params.toString())
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    if (mine !== densitySeq) return // 已经有更新的请求了，丢弃这次结果
+    densityCells.value = data.cells ?? []
+    densityScanned.value = data.scanned ?? { cells: 0, points: 0, maxTracks: 0 }
+    densityCellSize.value = data.cellSize ?? cell
+  } catch (e) {
+    if (mine !== densitySeq) return
+    densityCells.value = []
+    densityError.value = '密度加载失败：' + e.message
+  } finally {
+    // 只有最后一次请求才有资格关掉 loading，否则先发的请求回来就把转圈灭了
+    if (mine === densitySeq) densityLoading.value = false
+  }
+}
+
+/** 相机停稳后（App 里绑到 CesiumGlobe 的 camera-move-end 事件上） */
+let densityTimer = null
+function onCameraMoveEnd() {
+  // 非密度档时相机事件是别的模式（比如热点 fitBounds）引起的，不该触发密度请求
+  if (viewMode.value !== 'density') return
+  // 相机停稳后还会抖一下，稍等片刻再查，避免连续拖动时打出一串请求
+  clearTimeout(densityTimer)
+  densityTimer = setTimeout(loadDensity, 400)
+}
+
+/** 用户换了口径 → 必须重新查：格子里的 value 是后端按 metric 选出来的那个字段 */
+function onDensityMetric(m) {
+  densityMetric.value = m
+  loadDensity()
+}
+
+/** 用户换了时段 → 必须重新查（筛选是在 SQL 里做的，前端没有全量数据） */
+function onDensityHour(v) {
+  densityHourPreset.value = v
+  loadDensity()
 }
 
 /* ============ 轨迹导入 ============ */
@@ -317,7 +410,11 @@ async function selectTrack(id) {
       :loop="loop"
       :stay-points="viewMode === 'stay' ? stays : []"
       :hotspots="viewMode === 'hotspot' ? sortedHotspots : []"
+      :density-cells="viewMode === 'density' ? densityCells : []"
+      :density-max="densityMax"
+      :density-cell-size="densityCellSize"
       @time-change="onTimeChange"
+      @camera-move-end="onCameraMoveEnd"
     />
 
     <!-- 左上角浮层：标题 + 后端连通性 + 轨迹列表 -->
@@ -350,7 +447,8 @@ async function selectTrack(id) {
       <p v-if="importing" class="tip">正在导入…</p>
       <p v-else-if="importMessage" class="import-ok">{{ importMessage }}</p>
 
-      <!-- 停留点 / 热点 两档互斥：两者都会往地球上画圈，同时画会糊在一起 -->
+      <!-- 停留点 / 热点 / 密度 三档互斥：三者都会往地球上画画（圈 / 方格），
+           同时画会糊在一起 -->
       <div class="mode-switch" data-testid="mode-switch">
         <button
           type="button"
@@ -368,6 +466,14 @@ async function selectTrack(id) {
         >
           热点
         </button>
+        <button
+          type="button"
+          :class="{ on: viewMode === 'density' }"
+          data-testid="mode-density"
+          @click="switchMode('density')"
+        >
+          密度
+        </button>
       </div>
 
       <template v-if="viewMode === 'stay'">
@@ -380,7 +486,7 @@ async function selectTrack(id) {
         />
       </template>
 
-      <template v-else>
+      <template v-else-if="viewMode === 'hotspot'">
         <h2>热点<span v-if="hotspots.length"> （{{ hotspots.length }} 处）</span></h2>
         <p class="tip">大小 = 停留次数 · 颜色 = 来过的轨迹条数</p>
         <HotspotList
@@ -390,6 +496,22 @@ async function selectTrack(id) {
           :sort-by="hotspotSort"
           @focus="focusHotspot"
           @sort="hotspotSort = $event"
+        />
+      </template>
+
+      <template v-else>
+        <h2>密度<span v-if="densityCells.length"> （{{ densityCells.length }} 格）</span></h2>
+        <p class="tip">颜色越红 = 这个格子里经过的轨迹越多</p>
+        <DensityLegend
+          :cells="densityCells"
+          :loading="densityLoading"
+          :error="densityError"
+          :scanned="densityScanned"
+          :cell-size="densityCellSize"
+          :metric="densityMetric"
+          :hour-preset="densityHourPreset"
+          @metric="onDensityMetric"
+          @hour="onDensityHour"
         />
       </template>
 
@@ -531,11 +653,11 @@ async function selectTrack(id) {
 .panel > h2,
 .panel > p,
 .panel > .mode-switch,
-.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list) {
+.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend) {
   flex: 0 0 auto;
 }
 
-/* 「停留点 / 热点」两档切换开关。
+/* 「停留点 / 热点 / 密度」三档切换开关。
    必须参与上面那条 flex: 0 0 auto（见选择器列表里的 .mode-switch），
    否则矮窗口下它会被 flex 收缩压成一条细缝，点都点不到。 */
 .mode-switch {
