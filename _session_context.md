@@ -225,6 +225,18 @@ PowerShell 只负责启动和查错，不显示图形。
   **check-chart-pixels 10** + **check-import-pixels 5** + **check-filter 6** = **140 项全绿**
   （之前笔记里写的 119 项只算了前四个，后三个是 M1 留下的脚本，一直没纳入统计）
 
+### M2 第二阶段 · 停留热点（2026-09-15 进行中）
+- 实施计划 `docs/superpowers/plans/2026-09-15-m2-hotspot.md`（分支 `feat/m2-hotspot`）
+- **Task 1 已完成**（`19e2626`）：`service/TrackedStay`（record）+ `service/Hotspot`（record）+ `TrackPointRepository.findAllByTrackIds`
+- **Task 2 已完成**（`7d760c4`）：`service/HotspotService`（**并查集单链聚类**，等价 minPts=2 的 DBSCAN）
+  - 五步：两两 haversine → `d <= radiusM` 连边（**含等号，有测试钉住**）→ 并查集连通分量 → 分量 < minVisits 判孤立点 → 汇总（重心/visitCount/trackCount/totalDurationS/真实散布/首末访问）
+  - 排序**五级**：`trackCount → visitCount → totalDurationS → centerLat → centerLon`（后两级让结果与输入顺序无关）
+  - **传递性（链式效应）是算法定义不是 bug**：A─B─C 各 150 米则合成一个横跨 300 米的热点，已用测试钉住
+  - 无状态、O(n²)（停留点几十个够用；上万需按经纬度分桶），参数走方法参数可每请求不同
+  - 测试 `HotspotServiceTest` **13 项**，含**真实数据指纹**（25 条轨迹 → 10 个停留点 → 3 个热点，第 4 个孤立点被排除）
+  - ⚠️ 夹具坐标必须**全精度**（截断到 5 位小数 ≈ 1 米误差，1e-6 容差直接红）；已在提交后逐行 `-ceq` 比对计划原文，10 行全部一致
+- **回归：后端 `mvn test` 71 项全绿**（原 58 + 新 13）
+
 ### ▶ 下次接着做（2026-09-14 收工时的状态）
 - **M2 第一阶段（停留点）已完成**，学习笔记已产出并看过（用户反馈"效果好"）
 - **下一步 = M2 第二阶段「热点区域」**：把**所有轨迹**的停留点汇总起来做空间聚类，
