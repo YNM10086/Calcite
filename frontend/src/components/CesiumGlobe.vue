@@ -78,9 +78,15 @@ function clearTrack() {
   }
   for (const e of stayEntities) v.entities.remove(e)
   stayEntities = []
-  // 热点也一并清掉：切轨迹时旧热点属于上一条数据，留着就是脏数据
-  for (const e of hotspotEntities) v.entities.remove(e)
-  hotspotEntities = []
+  // ⚠️ 这里【故意不清】hotspotEntities。
+  //
+  // clearTrack() 是由「轨迹点变了」触发的（drawTrack → clearTrack），而热点是
+  // 【跨轨迹】的全局结果、不属于任何一条轨迹。如果在热点模式下点另一条轨迹：
+  // points 变了、hotspots 的引用却没变 —— 热点会被清掉但它的 watcher 不触发、
+  // 于是不会重画，表现为"热点凭空消失"。
+  //
+  // 热点的清理统一由 drawHotspots() 自己负责（它开头就清一遍）；
+  // 切出热点模式时 App 会传空数组进来，watcher 触发 → 清空。
 }
 
 /**
