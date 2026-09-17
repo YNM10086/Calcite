@@ -301,6 +301,25 @@ async def main():
         check("7. 缩放后像素分布变化", bool(px_changed and (after["cells"] or 0) > 0),
               f"暖色 {before['px']} → {after['px']}（Δ{px_delta}）")
 
+        # ---------- ⚠️ 还原视野：缩放测试会缩过头，后面的检查必须换个干净视野做 ----------
+        # 实测：Cesium 的滚轮在近处非常猛，3 档就把视野从约 9 公里缩到了 **2.2 米见方**。
+        # 在那个视野上再切时段/口径，两边都是 0 个格子，"有没有变化"根本比不出来 ——
+        # 于是第 9、10 项会假红（红得毫无信息）。
+        # 所以这里【重新加载页面 + 重新进密度档】，把视野恢复到最初那个有数据的状态。
+        note("缩放测试已完成（它证明了相机事件接线正确）；现在重载页面恢复视野，再测时段/口径")
+        await page.goto("http://localhost:5173/?track=5", wait_until="load")
+        await page.wait_for_selector('[data-testid="mode-density"]', timeout=30000)
+        await page.wait_for_timeout(4000)
+        await page.click('[data-testid="mode-density"]')
+        await page.wait_for_selector('[data-testid="density-legend-bar"]', timeout=30000)
+        await page.wait_for_timeout(6000)
+        base = await read_density(page)
+        base["px"] = warm_px(SHOT + ".reset.png", x0) if False else None
+        await page.screenshot(path=SHOT + ".reset.png")
+        base["px"] = warm_px(SHOT + ".reset.png", x0)
+        note(f"视野已还原：{base['cells']} 格 / 格边长 {base['cell']}° / 暖色 {base['px']} px")
+        after = base          # 后面的检查以"还原后的视野"为基准
+
         # ---------- 8. 时段切换（早高峰 7-9）----------
         await page.select_option('[data-testid="density-hour"]', "7-9")
         await page.wait_for_timeout(4500)
