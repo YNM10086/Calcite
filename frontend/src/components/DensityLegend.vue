@@ -7,7 +7,6 @@ import {
   rampColor,
   legendMax,
   legendTicks,
-  densityRatio,
   formatCount,
   HOUR_PRESETS,
   METRIC_OPTIONS,
