@@ -8,6 +8,7 @@ import com.calcite.service.DensityService;
 import com.calcite.service.Hotspot;
 import com.calcite.service.HotspotService;
 import com.calcite.service.StayPoint;
+import com.calcite.service.StayPointCache;
 import com.calcite.service.StayPointService;
 import com.calcite.service.TrackedStay;
 import com.calcite.service.importer.RawPoint;
@@ -46,6 +47,7 @@ public class AnalysisController {
     private final StayPointService stayPointService;
     private final HotspotService hotspotService;
     private final DensityService densityService;
+    private final StayPointCache stayPointCache;
     private final double defaultRadiusM;
     private final int defaultMinVisits;
 
@@ -54,6 +56,7 @@ public class AnalysisController {
                               StayPointService stayPointService,
                               HotspotService hotspotService,
                               DensityService densityService,
+                              StayPointCache stayPointCache,
                               @Value("${calcite.hotspot.radius-m:200}") double defaultRadiusM,
                               @Value("${calcite.hotspot.min-visits:2}") int defaultMinVisits) {
         this.trackRepository = trackRepository;
@@ -61,6 +64,7 @@ public class AnalysisController {
         this.stayPointService = stayPointService;
         this.hotspotService = hotspotService;
         this.densityService = densityService;
+        this.stayPointCache = stayPointCache;
         this.defaultRadiusM = defaultRadiusM;
         this.defaultMinVisits = defaultMinVisits;
     }
@@ -116,8 +120,12 @@ public class AnalysisController {
             }
 
             for (Map.Entry<Long, List<RawPoint>> e : byTrack.entrySet()) {
-                for (StayPoint s : stayPointService.detect(e.getValue())) {
-                    stays.add(new TrackedStay(e.getKey(), s));
+                Long trackId = e.getKey();
+                List<RawPoint> points = e.getValue();
+                // 走缓存：轨迹导入后不再变，所以同一个 trackId 的结果恒定，缓存永不失效
+                for (StayPoint s : stayPointCache.get(trackId,
+                        () -> stayPointService.detect(points))) {
+                    stays.add(new TrackedStay(trackId, s));
                 }
             }
         }
