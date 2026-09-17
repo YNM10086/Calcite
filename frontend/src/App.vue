@@ -1,11 +1,13 @@
 <script setup>
-import { computed, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, shallowRef, watch } from 'vue'
 import CesiumGlobe from './components/CesiumGlobe.vue'
 import SpeedChart from './components/SpeedChart.vue'
 import TrackList from './components/TrackList.vue'
 import StayPointList from './components/StayPointList.vue'
 import TrackPlayer from './components/TrackPlayer.vue'
+import HotspotList from './components/HotspotList.vue'
 import { canPlay, timeRange } from './lib/playback.js'
+import { sortHotspots } from './lib/hotspot.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -168,6 +170,51 @@ function focusStay(s) {
   globe.value?.focusOn(s.lon, s.lat, s.radiusM)
 }
 
+/* ============ 热点（跨轨迹）============ */
+// 'stay' = 看某条轨迹的停留点；'hotspot' = 看全局热点。
+// 两者都会往地球上画圈，同时画会糊在一起，所以做成互斥的两档。
+const viewMode = ref('stay')
+const hotspots = ref([])
+const hotspotsLoading = ref(false)
+const hotspotsError = ref('')
+const hotspotSort = ref('trackCount')
+
+/** 按当前口径排序后的热点（不改动 hotspots 本身） */
+const sortedHotspots = computed(() => sortHotspots(hotspots.value, hotspotSort.value))
+
+/** 切换模式：从"停留点"切到"热点"时才去拉数据（懒加载） */
+async function switchMode(mode) {
+  viewMode.value = mode
+  if (mode === 'hotspot') {
+    if (hotspots.value.length === 0) await loadHotspots()
+    // 等 DOM 更新后相机再飞，否则地球可能还没拿到数据
+    await nextTick()
+    globe.value?.fitBounds(sortedHotspots.value)
+  }
+}
+
+/** 拉全部热点 */
+async function loadHotspots() {
+  hotspotsLoading.value = true
+  hotspotsError.value = ''
+  try {
+    const res = await fetch('/api/analysis/hotspots')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    hotspots.value = data.hotspots ?? []
+  } catch (e) {
+    hotspots.value = []
+    hotspotsError.value = '热点加载失败：' + e.message
+  } finally {
+    hotspotsLoading.value = false
+  }
+}
+
+/** 点热点列表里的一条 → 地球飞过去 */
+function focusHotspot(h) {
+  globe.value?.focusOn(h.centerLon, h.centerLat, Math.max(h.radiusM, 200))
+}
+
 /* ============ 轨迹导入 ============ */
 const importing = ref(false)
 const importMessage = ref('')
@@ -248,7 +295,8 @@ async function selectTrack(id) {
       ref="globe"
       :points="trackPoints"
       :loop="loop"
-      :stay-points="stays"
+      :stay-points="viewMode === 'stay' ? stays : []"
+      :hotspots="viewMode === 'hotspot' ? sortedHotspots : []"
       @time-change="onTimeChange"
     />
 
@@ -282,13 +330,48 @@ async function selectTrack(id) {
       <p v-if="importing" class="tip">正在导入…</p>
       <p v-else-if="importMessage" class="import-ok">{{ importMessage }}</p>
 
-      <h2>停留点<span v-if="stays.length"> （{{ stays.length }} 处）</span></h2>
-      <StayPointList
-        :stays="stays"
-        :loading="staysLoading"
-        :has-track="!!selectedId"
-        @focus="focusStay"
-      />
+      <!-- 停留点 / 热点 两档互斥：两者都会往地球上画圈，同时画会糊在一起 -->
+      <div class="mode-switch" data-testid="mode-switch">
+        <button
+          type="button"
+          :class="{ on: viewMode === 'stay' }"
+          data-testid="mode-stay"
+          @click="switchMode('stay')"
+        >
+          停留点
+        </button>
+        <button
+          type="button"
+          :class="{ on: viewMode === 'hotspot' }"
+          data-testid="mode-hotspot"
+          @click="switchMode('hotspot')"
+        >
+          热点
+        </button>
+      </div>
+
+      <template v-if="viewMode === 'stay'">
+        <h2>停留点<span v-if="stays.length"> （{{ stays.length }} 处）</span></h2>
+        <StayPointList
+          :stays="stays"
+          :loading="staysLoading"
+          :has-track="!!selectedId"
+          @focus="focusStay"
+        />
+      </template>
+
+      <template v-else>
+        <h2>热点<span v-if="hotspots.length"> （{{ hotspots.length }} 处）</span></h2>
+        <p class="tip">大小 = 停留次数 · 颜色 = 来过的轨迹条数</p>
+        <HotspotList
+          :hotspots="sortedHotspots"
+          :loading="hotspotsLoading"
+          :error="hotspotsError"
+          :sort-by="hotspotSort"
+          @focus="focusHotspot"
+          @sort="hotspotSort = $event"
+        />
+      </template>
 
       <!-- 状态条：以前飘在左下角，但面板铺满左上角后会被压在面板底下
            （它 z-index 10、面板 20），所以收进面板底部当一行信息 -->
@@ -422,8 +505,43 @@ async function selectTrack(id) {
 .panel > h1,
 .panel > h2,
 .panel > p,
-.panel > div:not(.track-list):not(.stay-list) {
+.panel > .mode-switch,
+.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list) {
   flex: 0 0 auto;
+}
+
+/* 「停留点 / 热点」两档切换开关。
+   必须参与上面那条 flex: 0 0 auto（见选择器列表里的 .mode-switch），
+   否则矮窗口下它会被 flex 收缩压成一条细缝，点都点不到。 */
+.mode-switch {
+  display: flex;
+  flex: 0 0 auto;
+  margin: 10px 0 0;
+  border: 1px solid rgba(127, 209, 255, 0.45);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mode-switch button {
+  flex: 1;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: #93a4bb;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-switch button:hover {
+  background: rgba(127, 209, 255, 0.12);
+}
+
+.mode-switch button.on {
+  background: #7fd1ff;
+  color: #0a101a;
+  font-weight: 700;
 }
 
 /* 连通性压成一行后，别让它撑高 */
