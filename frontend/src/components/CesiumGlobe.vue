@@ -5,6 +5,7 @@ import {
   ClockRange,
   ClockStep,
   Color,
+  HeightReference,
   ImageryLayer,
   JulianDate,
   Rectangle,
@@ -15,6 +16,8 @@ import {
   buildModuleUrl,
 } from 'cesium'
 import { computeMultiplier, timeRange } from '../lib/playback.js'
+// 热点的「大小 / 颜色」判断全在这个纯函数模块里，组件只负责画
+import { hotspotColor, hotspotPixelSize } from '../lib/hotspot.js'
 // Cesium 自带的控件样式，必须引入，否则地球上的控件会散架
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -32,6 +35,8 @@ const props = defineProps({
   loop: { type: Boolean, default: true },
   // 停留点数组（StayPointDto 列表）
   stayPoints: { type: Array, default: () => [] },
+  // 热点列表（跨轨迹聚类的结果）。和 stayPoints 一样是「给数据就画，不给就不画」
+  hotspots: { type: Array, default: () => [] },
 })
 
 // 往外报当前时刻（毫秒时间戳），App 用它更新播放条
@@ -54,6 +59,10 @@ const MOVER_ID = 'calcite-track-mover' // 沿轨迹移动的白色标记
 // 重画时逐个删掉 —— 不能用固定 id
 let stayEntities = []
 
+// 同理：热点的数量也不固定，而且和 stayEntities 分开存 ——
+// 两者生命周期不同（可能只画热点不画停留点），混在一个数组里会互相误删
+let hotspotEntities = []
+
 // 时刻往外发的节流：最多每 100ms 一次，避免每帧都触发父组件重渲染
 let lastEmitMs = 0
 // Cesium 的 addEventListener 会返回移除函数，卸载时要调
@@ -69,6 +78,9 @@ function clearTrack() {
   }
   for (const e of stayEntities) v.entities.remove(e)
   stayEntities = []
+  // 热点也一并清掉：切轨迹时旧热点属于上一条数据，留着就是脏数据
+  for (const e of hotspotEntities) v.entities.remove(e)
+  hotspotEntities = []
 }
 
 /**
@@ -110,6 +122,43 @@ function drawStayPoints(stays) {
       },
     })
     stayEntities.push(entity)
+  }
+}
+
+/**
+ * 画热点。
+ *
+ * 和停留点不一样：热点不是一块有明确边界的区域，所以**不画地理半径**，
+ * 而是画一个屏幕像素大小的点标记 —— 否则最小的热点（真实散布只有 9.4 米）
+ * 在城市尺度下根本看不见。
+ *
+ * 两个视觉通道各管一个维度，互不干扰：
+ *   - 大小（pixelSize） ← visitCount  来过几次
+ *   - 颜色（color）     ← trackCount  几条不同轨迹
+ */
+function drawHotspots(hotspots) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+
+  for (const e of hotspotEntities) v.entities.remove(e)
+  hotspotEntities = []
+  if (!hotspots || hotspots.length === 0) return
+
+  for (const h of hotspots) {
+    const entity = v.entities.add({
+      position: Cartesian3.fromDegrees(h.centerLon, h.centerLat),
+      point: {
+        // pixelSize 的单位就是屏幕像素，不做任何米/像素换算
+        pixelSize: hotspotPixelSize(h.visitCount),
+        color: Color.fromCssColorString(hotspotColor(h.trackCount)).withAlpha(0.75),
+        outlineColor: Color.fromCssColorString(hotspotColor(h.trackCount)),
+        outlineWidth: 2,
+        // 贴地 + 不测深度，保证热点不会被地形或地球背面吞掉
+        heightReference: HeightReference.CLAMP_TO_GROUND,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+    })
+    hotspotEntities.push(entity)
   }
 }
 
@@ -244,6 +293,15 @@ watch(
   { deep: true },
 )
 
+// 热点变化 → 重画点标记
+watch(
+  () => props.hotspots,
+  (hotspots) => {
+    if (ready.value) drawHotspots(hotspots)
+  },
+  { deep: true },
+)
+
 onMounted(() => {
   // 1) 底图：Cesium 自带的离线世界地图 NaturalEarthII
   //    不需要联网、不需要任何 access token，打开就有画面
@@ -288,6 +346,7 @@ onMounted(() => {
   // 万一父组件在挂载前就已经有点了，补画一次
   drawTrack(props.points)
   drawStayPoints(props.stayPoints)
+  drawHotspots(props.hotspots)
 })
 
 onBeforeUnmount(() => {
@@ -301,26 +360,69 @@ onBeforeUnmount(() => {
 })
 
 /**
- * 暴露给父组件的三个方法。
+ * 把相机飞到某个点（停留点列表点击时用）。
+ *
+ * 为什么写成局部函数而不是 defineExpose 里的内联方法：
+ * fitBounds 需要在内部按名字调用它，而对象字面量里的方法不是局部作用域里的函数，
+ * 内联写会让 fitBounds 里报 focusOn is not defined。
+ *
+ * @param {number} lon 经度
+ * @param {number} lat 纬度
+ * @param {number} radiusM 停留的活动半径，用来决定飞多高
+ */
+function focusOn(lon, lat, radiusM) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  // 半径越大飞得越高；至少 600 米，不然贴着地面看不清周围
+  const height = Math.max(600, (radiusM || 0) * 25)
+  v.camera.flyTo({
+    destination: Cartesian3.fromDegrees(lon, lat, height),
+    duration: 1.0,
+  })
+}
+
+/**
+ * 把相机飞到能装下所有热点的位置（进入热点模式时用）。
+ * 只有一个热点时退化成 focusOn。
+ */
+function fitBounds(items) {
+  const v = viewer.value
+  if (!v || v.isDestroyed() || !items || items.length === 0) return
+
+  if (items.length === 1) {
+    focusOn(items[0].centerLon, items[0].centerLat, 300)
+    return
+  }
+
+  const lons = items.map((h) => h.centerLon)
+  const lats = items.map((h) => h.centerLat)
+  let west = Math.min(...lons)
+  let east = Math.max(...lons)
+  let south = Math.min(...lats)
+  let north = Math.max(...lats)
+
+  // 留 25% 的余量，否则热点会贴着屏幕边缘
+  const padLon = (east - west) * 0.25 || 0.002
+  const padLat = (north - south) * 0.25 || 0.002
+  west -= padLon
+  east += padLon
+  south -= padLat
+  north += padLat
+
+  v.camera.flyTo({
+    destination: Rectangle.fromDegrees(west, south, east, north),
+    duration: 1.2,
+  })
+}
+
+/**
+ * 暴露给父组件的五个方法。
  * 父组件通过 ref 调用，例如：globe.value.play()
  */
 defineExpose({
-  /**
-   * 把相机飞到某个点（停留点列表点击时用）。
-   * @param {number} lon 经度
-   * @param {number} lat 纬度
-   * @param {number} radiusM 停留的活动半径，用来决定飞多高
-   */
-  focusOn(lon, lat, radiusM) {
-    const v = viewer.value
-    if (!v || v.isDestroyed()) return
-    // 半径越大飞得越高；至少 600 米，不然贴着地面看不清周围
-    const height = Math.max(600, (radiusM || 0) * 25)
-    v.camera.flyTo({
-      destination: Cartesian3.fromDegrees(lon, lat, height),
-      duration: 1.0,
-    })
-  },
+  focusOn,
+  /** 飞到能装下所有热点的位置 */
+  fitBounds,
   /** 开始播放 */
   play() {
     const v = viewer.value
