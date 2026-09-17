@@ -15,15 +15,23 @@ r"""停留热点功能的浏览器像素验收（共 16 项）。
   增量 C（2 项）模式互斥用结构性判据（DOM 节点数），不用像素
       —— 像素判据会被停留点圆干扰，节点有无是硬事实。
 
-约定：库里 25 条轨迹 → 10 个停留点 → 默认参数下正好 3 个热点
-      （2 个 trackCount=3 的红热点 + 1 个黄/橙热点；默认排序第一条是 visitCount=4）。
+⚠️ 期望值一律**当场问接口要**，脚本里不许再出现"热点只有几个 / 轨迹有多少条"这类写死的数量。
+    2026-09-17 导入数据后（246 条轨迹 → 37 个热点），本文里原来写死的
+    「列表条数」「第一条的访问次数与轨迹数」「按时长排序第一条的分钟数」全部变红，
+    于是顺带把 check-filter.py 里写死的轨迹总数也改掉了。
+    写死环境相关的数字等于把"数据本身"当成判据 —— 数据一扩充，脚本红的不是 bug，是它自己。
+    （注意：连注释里都不要再抄那几个旧字面量，否则 Step 4 的形态扫描会把注释当成残留命中。）
+    （同源教训：第二阶段把"像素判据写死面板宽度 400"修成"问 DOM 要面板右边界"。）
+    本条对应实施计划的 Step 4 检查：全文不得再命中「热点数/轨迹数写死」的形态。
 
 用法（需要提权 danger-full-access，Playwright 靠命名管道通信）：
     $env:PYTHONIOENCODING='utf-8'
     & "E:\python\python_address\python.exe" .tmp\check-hotspots.py
 """
 import asyncio
+import json
 import sys
+import urllib.request
 
 from PIL import Image
 from playwright.async_api import async_playwright
@@ -35,10 +43,16 @@ try:
 except Exception:
     pass
 
+BASE = "http://localhost:8080"
 VIEW_W, VIEW_H = 1600, 900
 SHOT = ".tmp/hotspot-shot.png"             # 1600x900 热点模式截图（原文命名）
 SHOT_STAY = ".tmp/hotspot-shot.stay.png"   # 切回停留点后的截图（原文命名）
 SHOT_1366 = ".tmp/hotspot-1366x660.png"    # 矮窗口视口截图（1366x660 是上阶段抓到布局 bug 的视口）
+
+# 界面上热点列表最多画几个 —— **这是界面行为的上限，不是数据量**，所以留在脚本里是合法的。
+# 它对应 App.vue 的 `hotspots`（`/api/analysis/hotspots` 目前不带 limit，前端全量渲染），
+# 改动它会同时改界面行为，因此不会像"37 个热点"那样被导数据打破。
+HOTSPOT_LIST_CAP = 50
 
 # 判据一：宽松「橙色系」，即任务原文的判据。
 # 它会同时命中停留点圆 Color.ORANGE(255,165,0)；但热点模式下两种圈互斥，
@@ -81,6 +95,24 @@ results = []
 def check(name, ok, detail=""):
     results.append((name, bool(ok), detail))
     print(("  \u2713 " if ok else "  \u2717 ") + name + ("  " + detail if detail else ""))
+
+
+def fetch_hotspots():
+    """
+    问后端要「当前数据的真实热点列表」—— 这就是界面应该显示的东西，用它当期望值。
+
+    为什么不写死条数：写死的期望值本质是"拿某一次的数据当判据"。
+    2026-09-17 又导入了一批 GeoLife 之后，热点从 3 个变成 37 个，所有写死数量的断言
+    一起变红 —— 红的不是功能退化，是脚本自己过期了。接口返回什么，就期待界面显示什么，
+    这样无论以后数据扩到多少，只要界面忠实渲染，这个脚本就一直有意义。
+    """
+    with urllib.request.urlopen(BASE + "/api/analysis/hotspots", timeout=600) as r:
+        return json.loads(r.read().decode("utf-8"))["hotspots"]
+
+
+def max_by(items, key):
+    """列表里 key 最大的那条（前端 sortHotspots 是纯降序，没有并列时的次级口径）。"""
+    return max(items, key=lambda h: h.get(key) or 0)
 
 
 def trackline_bbox(path, x_from):
@@ -132,6 +164,19 @@ def red_bbox(path, x_from):
 
 
 async def main():
+    # ---- 进浏览器之前先问一次接口，后面所有数量断言都用这里的期望值 ----
+    expect = fetch_hotspots()
+    expect_n = len(expect)
+    expect_shown = min(expect_n, HOTSPOT_LIST_CAP)
+    first = expect[0]                       # 接口默认排序（五级口径）的第一名
+    top_by_duration = max_by(expect, "totalDurationS")
+    print(f"[参考] 接口当前返回 {expect_n} 个热点；界面最多画 {HOTSPOT_LIST_CAP} 个 "
+          f"→ 期待列表 {expect_shown} 条")
+    print(f"[参考] 接口第一名：{first['visitCount']} 次 / {first['trackCount']} 条轨迹 / "
+          f"{first['totalDurationS']} 秒；按时长排序的第一名："
+          f"{top_by_duration['visitCount']} 次 / {top_by_duration['trackCount']} 条轨迹 / "
+          f"{top_by_duration['totalDurationS']} 秒")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             channel="chrome", headless=True, args=["--no-sandbox"]
@@ -151,10 +196,12 @@ async def main():
         await page.wait_for_selector('[data-testid="hotspot-item"]', timeout=30000)
         await page.wait_for_timeout(6000)
 
-        # === 原文 1：列表正好 3 条 ===
+        # === 原文 1：列表条数与接口一致（原来写死条数，被数据打破）===
         info = await page.evaluate(MEASURE)
         items = info["hotspotItems"]
-        check("1. 热点列表正好 3 条", items == 3, "实得 " + str(items))
+        check("1. 热点列表条数与接口一致",
+              items == expect_shown,
+              f"界面 {items} 条 / 接口 {expect_n} 个（界面上限 {HOTSPOT_LIST_CAP}）")
         print(f"      [参考] 切换开关 className = {info['modeOn']!r}")
 
         # === 原文 2：三个口径都在 ===
@@ -162,9 +209,15 @@ async def main():
         check("2. 显示次数/轨迹数/时长三个口径",
               "次" in txt and "条轨迹" in txt and "分钟" in txt, txt[:80])
 
-        # === 原文 3：默认按轨迹数排序，第一条应是 visitCount=4 / trackCount=3 ===
-        check("3. 默认排序第一条是 4 次 3 条轨迹",
-              "4 次" in txt and "3 条轨迹" in txt, txt[:60])
+        # === 原文 3：默认按轨迹数排序，第一条应与接口第一名一致 ===
+        # 原来写死"4 次 / 3 条轨迹"；现在把接口第一名的两个数字拼成判据，
+        # 力度完全一样（还是逐字相等），但数据换了也不用改脚本。
+        # ⚠️ 精确匹配（不搞"含 '次' 就算过"那种放松）——否则第一条换人也能绿。
+        want_visits = f"{first['visitCount']} 次"
+        want_tracks = f"{first['trackCount']} 条轨迹"
+        check("3. 默认排序第一条与接口第一名一致",
+              want_visits in txt and want_tracks in txt,
+              f"接口第一名 {want_visits} / {want_tracks}；界面：{txt[:60]}")
 
         # ---- 截图 1（必须趁相机还在 fitBounds 后的全景位置，点过列表就飞走了）----
         panel_right = await page.eval_on_selector(
@@ -188,11 +241,18 @@ async def main():
               (x1 - x0) > 600,
               f"包围盒 x[{x0}..{x1}] 宽 {x1 - x0}px，共 {n} 个红像素")
 
-        # === 原文 5：按时长排序，第一条应该还是这条（totalDurationS 最大）===
+        # === 原文 5：按时长排序，第一条应与接口里时长最大的那条一致 ===
+        # 原来写死"29 分钟"（那是旧的 3 个热点的数据）；现在按接口算出"谁该第一"，
+        # 用它的 visitCount 逐字匹配 —— 不依赖前端的时长格式（"x 分钟" / "x 小时 y 分"），
+        # 但仍然是精确判据：第一名换人、或者排序接线断了，这里都会红。
         await page.select_option('[data-testid="hotspot-sort"]', "totalDurationS")
         await page.wait_for_timeout(800)
         txt2 = ((await page.text_content('[data-testid="hotspot-item"]')) or "").strip()
-        check("7. 按时长排序后第一条仍是 29 分钟", "29 分钟" in txt2, txt2[:60])
+        want_dur_first = f"{top_by_duration['visitCount']} 次"
+        check("7. 按时长排序后第一条与接口时长第一名一致",
+              want_dur_first in txt2,
+              f"接口时长第一名 {want_dur_first} / {top_by_duration['totalDurationS']} 秒；"
+              f"界面：{txt2[:60]}")
 
         # === 原文 6：点一条触发相机飞行，不许报错 ===
         # ⚠️ 这里原来写的是 check("...", True) —— 字面量恒真，等于没测，
