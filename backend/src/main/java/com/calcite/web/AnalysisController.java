@@ -103,8 +103,9 @@ public class AnalysisController {
                     "参数非法：radiusM 必须是有限正数，minVisits 必须 >= 1");
         }
 
-        List<Track> tracks = trackRepository.findAll();
-        List<Long> trackIds = tracks.stream().map(Track::getId).toList();
+        // 只要 id —— 不要 findAll()：那会把 246 条轨迹的 geom（约 28.6 万个顶点）
+        // 全部水合成实体，而这里只用得到 id 和条数。实测这是热态还要 2.4 秒的主因。
+        List<Long> trackIds = trackRepository.findAllIds();
 
         List<TrackedStay> stays = new ArrayList<>();
         if (!trackIds.isEmpty()) {
@@ -144,7 +145,7 @@ public class AnalysisController {
         }
 
         return new HotspotResponse(
-                tracks.size(),
+                trackIds.size(),
                 stays.size(),
                 new HotspotResponse.Params(radius, minPts, from, to),
                 dtos);

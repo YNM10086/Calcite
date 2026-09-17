@@ -40,4 +40,15 @@ public interface TrackRepository extends JpaRepository<Track, Long> {
 
     /** 某个来源的轨迹总数（前端显示"共 N 条"用） */
     long countBySource(String source);
+
+    /**
+     * 只取所有轨迹的 id（热点接口用）。
+     *
+     * <p><b>为什么不能用 {@code findAll()}</b>：{@code Track} 实体带着 {@code geom}
+     * （完整的 LineString），246 条轨迹一共约 <b>28.6 万个顶点</b> ——
+     * 而热点接口只需要 id 和条数。实测这正是热点接口"缓存之后还要 2.4 秒"的主因：
+     * 每次请求都要把 32 MB 载荷水合成实体。
+     */
+    @Query("SELECT t.id FROM Track t")
+    List<Long> findAllIds();
 }
