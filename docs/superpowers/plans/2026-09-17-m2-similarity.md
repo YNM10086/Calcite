@@ -1237,8 +1237,13 @@ if ($m) { "track 6 vs 18: fwd=$($m.forwardPct) rev=$($m.reversePct) similarity=$
 else { "track 18 没出现在结果里（也可接受，说明它被正确过滤了）" }
 ```
 
-**Expected**：如果出现，`forwardPct` = **100**、`reversePct` ≈ **35**、**`similarity` ≈ 35**。
-**如果 `similarity` 是 100，说明"取小"没生效 —— 立刻停下来查。**
+**Expected（实测值）**：`forwardPct` ≈ **43.0**、`reversePct` ≈ **34.4**、**`similarity` ≈ 34.4**。
+
+> ⚠️ **`forwardPct` 是 43 而不是 100，这是【正确的】** —— track 18 的采样间距是 42 米，
+> 点对点会低估 `fwd`（真值 100%）。**但相似度取的是另一个方向（`rev` 34.4）**，
+> 所以结果 `34.4` 与真值 `35.0` 只差 0.6 个百分点。详见设计文档 2.6 / 2.7 节。
+
+**如果 `similarity` 接近 100，说明"取小"没生效 —— 立刻停下来查。**
 
 - [ ] **Step 9: 验证 Review Focus 的几条边界**
 
@@ -1260,7 +1265,11 @@ $b = Invoke-RestMethod "http://localhost:8080/api/analysis/similarity?trackId=20
 "limit=3 → 返回 $($b.matches.Count) 条，compared 仍是 $($b.compared)"
 ```
 
-**Expected**：① `matches` 为空且不报错；② **400**；③ **404**；④ 返回 3 条但 `compared` 仍是 197。
+**Expected**：② **400**；③ **404**；④ 返回 3 条但 `compared` 仍是 197。
+
+> ⚠️ **① 的期望要改**：3 条 GPX 轨迹是**同一场地**跑的，它们**互相之间很相似**，
+> 所以 `matches` **不为空**（实测如此）。要验证"空数组不是错误"这条路径，
+> 改用一个**苛刻的容差**：`?trackId=1&toleranceM=1` → 期望 200 + `matches: []`。
 
 > ⚠️ ① 里如果 GPX 那条（id=3）的 `matches` **不为空**，说明你的轨迹 id 猜错了 ——
 > 先用 `Invoke-RestMethod "http://localhost:8080/api/tracks?limit=1&source=gpx"` 查真实 id 再试。
@@ -1411,21 +1420,49 @@ def main():
           d.get(6, 0) * 3 < d.get(18, 1), f"6={d.get(6)}米 18={d.get(18)}米")
 
     # ================= C. 点对点近似 vs 点到折线（量化取舍）=================
-    print("\n=== C. 点对点近似 vs 点到折线 ===")
-    # 独立实现真正的"点到折线"：用 PostGIS 逐点算（不用索引，慢但精确）
-    for a, b in [(20, 39), (6, 18), (20, 35)]:
-        exact = psql_json(f"""
+    print("\n=== C. 相似度【取小】对近似是否稳健 ===")
+    # ⚠️ 这里必须比【相似度】，不能比 forwardPct！
+    #
+    # 实测（设计文档 2.6/2.7 节）：track 6 的点对 track 18
+    #   到【折线】：244/244 = 100%   到【采样点】：105/244 = 43%
+    # 因为 track 18 的采样间距是 42 米，点对点会严重低估 fwd。
+    #
+    # 但相似度取的是 min(fwd, rev)，而被低估的方向【恰好是本来更大的那个】——
+    # 所以相似度几乎不受影响（六组实测差 ≤ 0.6 个百分点）。
+    # 断言必须打在这个性质上，不能打在 forwardPct 上（后者本来就对不上）。
+    for a, b in [(20, 39), (6, 18), (20, 35), (6, 16), (6, 24)]:
+        truth = psql_json(f"""
             SELECT json_agg(row_to_json(t)) FROM (
-              SELECT round(100.0 * count(*) FILTER (
-                       WHERE ST_DWithin(p.geom::geography, t2.geom::geography, {TOL}))
-                     / count(*), 1) AS pct
-              FROM track_point p JOIN track t2 ON t2.id = {b}
-              WHERE p.track_id = {a}) t;""")[0]["pct"]
+              SELECT least(
+                (SELECT 100.0 * count(*) FILTER (
+                          WHERE ST_DWithin(p.geom::geography, t2.geom::geography, {TOL}))
+                        / count(*)
+                 FROM track_point p JOIN track t2 ON t2.id = {b} WHERE p.track_id = {a}),
+                (SELECT 100.0 * count(*) FILTER (
+                          WHERE ST_DWithin(p.geom::geography, t1.geom::geography, {TOL}))
+                        / count(*)
+                 FROM track_point p JOIN track t1 ON t1.id = {a} WHERE p.track_id = {b})
+              ) AS sim) t;""")[0]["sim"]
         api = get(f"/api/analysis/similarity?trackId={a}&limit=500")
-        got = next((m["forwardPct"] for m in api["matches"] if m["trackId"] == b), 0.0)
-        diff = abs(exact - got)
-        check(f"({a},{b}) 点对点 ≈ 点到折线", diff <= 2.0,
-              f"点到折线={exact}% 点对点={got}% 差 {round(diff, 1)} 个百分点")
+        got = next((m["similarity"] for m in api["matches"] if m["trackId"] == b), 0.0)
+        diff = abs(truth - got)
+        check(f"({a},{b}) 相似度对近似稳健（取小救了我们）", diff <= 2.0,
+              f"真值(点到折线)={round(truth,1)}% 接口(点对点)={got}% 差 {round(diff,1)} 个百分点")
+
+    # 顺手把"近似确实很差"这件事也钉住 —— 免得将来有人以为点对点=点到折线
+    fwd_line = psql_json(f"""
+        SELECT json_agg(row_to_json(t)) FROM (
+          SELECT round(100.0 * count(*) FILTER (
+                   WHERE ST_DWithin(p.geom::geography, t2.geom::geography, {TOL}))
+                 / count(*), 1) AS pct
+          FROM track_point p JOIN track t2 ON t2.id = 18
+          WHERE p.track_id = 6) t;""")[0]["pct"]
+    api6 = get("/api/analysis/similarity?trackId=6&limit=500")
+    m18 = next((m for m in api6["matches"] if m["trackId"] == 18), None)
+    if m18 is not None:
+        check("（已知限制）点对点的 forwardPct 确实远低于真值",
+              fwd_line - m18["forwardPct"] > 20,
+              f"真值 {fwd_line}% vs 点对点 {m18['forwardPct']}% —— 差异是预期的，不是 bug")
 
     # ================= D. 与独立实现对拍（逐条）=================
     print("\n=== D. 与独立实现对拍（trackId=20）===")
