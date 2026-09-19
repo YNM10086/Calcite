@@ -10,11 +10,13 @@ import com.calcite.service.HotspotService;
 import com.calcite.service.StayPoint;
 import com.calcite.service.StayPointCache;
 import com.calcite.service.StayPointService;
+import com.calcite.service.SimilarityService;
 import com.calcite.service.TrackedStay;
 import com.calcite.service.importer.RawPoint;
 import com.calcite.web.dto.DensityResponse;
 import com.calcite.web.dto.HotspotDto;
 import com.calcite.web.dto.HotspotResponse;
+import com.calcite.web.dto.SimilarityResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -48,6 +50,7 @@ public class AnalysisController {
     private final HotspotService hotspotService;
     private final DensityService densityService;
     private final StayPointCache stayPointCache;
+    private final SimilarityService similarityService;
     private final double defaultRadiusM;
     private final int defaultMinVisits;
 
@@ -57,6 +60,7 @@ public class AnalysisController {
                               HotspotService hotspotService,
                               DensityService densityService,
                               StayPointCache stayPointCache,
+                              SimilarityService similarityService,
                               @Value("${calcite.hotspot.radius-m:200}") double defaultRadiusM,
                               @Value("${calcite.hotspot.min-visits:2}") int defaultMinVisits) {
         this.trackRepository = trackRepository;
@@ -65,6 +69,7 @@ public class AnalysisController {
         this.hotspotService = hotspotService;
         this.densityService = densityService;
         this.stayPointCache = stayPointCache;
+        this.similarityService = similarityService;
         this.defaultRadiusM = defaultRadiusM;
         this.defaultMinVisits = defaultMinVisits;
     }
@@ -173,6 +178,30 @@ public class AnalysisController {
             return densityService.density(bbox, cellSize, metric, hourFrom, hourTo, from, to);
         } catch (IllegalArgumentException e) {
             // 参数问题一律 400，并把原因原样告诉调用方（这些错误都是给人看的）
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+    }
+
+    /**
+     * 轨迹相似度（M2 第四阶段）：找出和某条主线走同一条路的其它轨迹。
+     *
+     * <p>用<b>双向重合度</b>（取两个方向的最小值），不是 Frechet 距离 ——
+     * 理由见设计文档 2.2 / 2.3 节（Frechet 没有能同时罩住北京和长三角的投影，
+     * 而且单向重合度会把"被包含的一小段"判成完全相同）。
+     *
+     * <p>参数非法 → 400；主线不存在 → 404；主线附近一条候选都没有 →
+     * <b>200 + 空数组</b>（"没有相似的轨迹"是正常结果，不是错误）。
+     */
+    @GetMapping("/similarity")
+    public SimilarityResponse similarity(
+            @RequestParam Long trackId,
+            @RequestParam(required = false) Double toleranceM,
+            @RequestParam(required = false) Integer limit) {
+        try {
+            return similarityService.similarity(trackId, toleranceM, limit);
+        } catch (SimilarityService.TrackNotFoundException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
         }
     }

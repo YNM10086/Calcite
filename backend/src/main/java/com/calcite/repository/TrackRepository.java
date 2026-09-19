@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -51,4 +52,65 @@ public interface TrackRepository extends JpaRepository<Track, Long> {
      */
     @Query("SELECT t.id FROM Track t")
     List<Long> findAllIds();
+
+    /**
+     * 主线的元数据 + 几何统计（相似度接口用）。
+     *
+     * <p>{@code latMin/latMax} 是给包围盒扩边量 {@code eps} 用的：
+     * 度不是长度单位，{@code eps} 必须按主线<b>实际所在的纬度</b>算
+     * （详见 {@code SimilarityMath.epsDegrees}）。
+     *
+     * <p>{@code ST_Length(geom::geography)} 返回<b>米</b>（不是度）。
+     *
+     * @return 单行 {@code [latMin(Double), latMax(Double), lengthM(Double)]}
+     */
+    @Query(value = """
+            SELECT ST_YMin(geom), ST_YMax(geom), ST_Length(geom::geography)
+            FROM track WHERE id = :trackId
+            """, nativeQuery = true)
+    List<Object[]> findBaselineGeometryStats(@Param("trackId") Long trackId);
+
+    /**
+     * 主线的元数据。native query 是为了用 {@code to_char} 把 {@code timestamptz}
+     * 转成 ISO 字符串，避免类型映射歧义。
+     *
+     * <p>{@code timestamptz} 在 native query 里映射成哪个 Java 类型
+     * （{@code Timestamp} / {@code OffsetDateTime} / {@code Instant}）取决于驱动与
+     * Hibernate 版本，靠猜容易在运行时炸。转成字符串就没有歧义了，代价只是一次解析。
+     *
+     * @return 单行 {@code [name(String), source(String), pointCount(Integer), startTime(String)]}
+     */
+    @Query(value = """
+            SELECT t.name, t.source, t.point_count,
+                   to_char(t.start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM track t WHERE t.id = :trackId
+            """, nativeQuery = true)
+    List<Object[]> findBaselineMeta(@Param("trackId") Long trackId);
+
+    /**
+     * 批量取匹配轨迹的元数据（含长度）。native query 是为了用 {@code ST_Length(geography)}。
+     *
+     * <p><b>为什么不用 JPQL</b>：JPQL 没有 {@code ST_Length}，取不到米制长度。
+     *
+     * <p><b>为什么不用 {@code findAllById}</b>：那会把每条轨迹的 {@code geom}
+     * （完整 LineString）全水合出来 —— 197 条轨迹约 28 万个顶点，而这里只需要名字和几个数。
+     * （这个坑在热点接口上踩过一次，实测要 2.4 秒。）
+     *
+     * <p>{@code start_time} 用 {@code to_char} 转成 ISO 字符串 ——
+     * 避免 native query 里 {@code timestamptz} 的类型映射歧义（同 {@link #findBaselineMeta}）。
+     *
+     * @return 每行 {@code [id(Long), name(String), source(String), pointCount(Integer),
+     *                     lengthM(Double), startTime(String ISO-8601)]}
+     */
+    @Query(value = """
+            SELECT t.id,
+                   t.name,
+                   t.source,
+                   t.point_count,
+                   ST_Length(t.geom::geography),
+                   to_char(t.start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM track t
+            WHERE t.id IN (:ids)
+            """, nativeQuery = true)
+    List<Object[]> findSummariesByIds(@Param("ids") Collection<Long> ids);
 }
