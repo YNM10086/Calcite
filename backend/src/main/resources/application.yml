@@ -84,3 +84,14 @@ calcite:
     max-cells: 20000
     # 时区：库里存 UTC，但"早高峰"是北京时间，SQL 里显式转换
     time-zone: Asia/Shanghai
+
+  # 轨迹相似度（M2 第四阶段）
+  similarity:
+    # 默认容差（米）。GeoLife 采样间隔 3~15 米，城市 GPS 漂移 10~30 米
+    default-tolerance-m: 50
+    # 容差允许范围（防止传 1000000 把所有轨迹都说成"相似"）
+    min-tolerance-m: 1
+    max-tolerance-m: 1000
+    # 默认最多返回多少条（按相似度倒序）
+    default-limit: 50
+    max-limit: 500
