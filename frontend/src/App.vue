@@ -7,9 +7,11 @@ import StayPointList from './components/StayPointList.vue'
 import TrackPlayer from './components/TrackPlayer.vue'
 import HotspotList from './components/HotspotList.vue'
 import DensityLegend from './components/DensityLegend.vue'
+import SimilarityList from './components/SimilarityList.vue'
 import { canPlay, timeRange } from './lib/playback.js'
 import { sortHotspots } from './lib/hotspot.js'
 import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
+import { filterMatches } from './lib/similarity.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -173,8 +175,9 @@ function focusStay(s) {
 }
 
 /* ============ 热点（跨轨迹）============ */
-// 'stay' = 看某条轨迹的停留点；'hotspot' = 看全局热点；'density' = 看跨轨迹的网格密度。
-// 三者都会往地球上画画（圈 / 方格），同时画会糊在一起，所以做成互斥的三档。
+// 'stay' = 看某条轨迹的停留点；'hotspot' = 看全局热点；'density' = 看跨轨迹的网格密度；
+// 'similar' = 看"和当前选中轨迹相似的那些轨迹"。
+// 四者都会往地球上画画（圈 / 方格 / 线），同时画会糊在一起，所以做成互斥的四档。
 const viewMode = ref('stay')
 const hotspots = ref([])
 const hotspotsLoading = ref(false)
@@ -184,7 +187,7 @@ const hotspotSort = ref('trackCount')
 /** 按当前口径排序后的热点（不改动 hotspots 本身） */
 const sortedHotspots = computed(() => sortHotspots(hotspots.value, hotspotSort.value))
 
-/** 切换模式：三档（停留点 / 热点 / 密度）。只有热点和密度需要懒加载 */
+/** 切换模式：四档（停留点 / 热点 / 密度 / 相似）。只有热点、密度、相似需要懒加载 */
 async function switchMode(mode) {
   viewMode.value = mode
   if (mode === 'hotspot') {
@@ -220,6 +223,20 @@ async function switchMode(mode) {
     await nextTick()
     if (viewMode.value !== 'density') return
     await loadDensity()
+  }
+
+  /*
+   * 第四档「相似」：和密度一样是按需加载，所以只需要在这里【追加】一个分支。
+   * 上面三个分支一个字都没动 —— 尤其是那两处 `viewMode.value !== 'xxx'` 的竞态守卫，
+   * 它们是上一阶段修掉的确定性 bug（挂起的请求恢复后会错误地飞相机）。
+   * 这里同样要守一次：loadSimilarity 有一次网络往返，用户可能在等待期间切走。
+   * 注意密度分支结尾没有 return，会落到这里，但 mode 是 'density' 所以不会进这个 if。
+   */
+  if (mode === 'similar') {
+    await nextTick()
+    if (viewMode.value !== 'similar') return
+    await loadSimilarity()
+    return
   }
 }
 
@@ -328,6 +345,144 @@ function onDensityHour(v) {
   loadDensity()
 }
 
+/* ============ 轨迹相似度（第四档）============ */
+const similarityMatches = ref([])
+/** 主线的元信息（name / pointCount / lengthM / compared / toleranceM），给列表当"分母"用 */
+const similarityInfo = ref({})
+const similarityLoading = ref(false)
+const similarityError = ref('')
+/**
+ * 当前筛选档位（最低相似度）。
+ *
+ * ⚠️ 必须是 50 —— `SimilarityList` 的 `filter` prop 默认就是 50，
+ * `<select>` 靠 `:value="filter"` 反查该选中哪一项。两边对不上时浏览器找不到匹配的
+ * option，会渲染成**空白选中项**（下拉看着像没选，其实筛的是 50）。
+ */
+const similarityFilter = ref(50)
+
+/** 防止"切轨迹时旧请求后回来盖掉新结果"——和热点/密度那套同一个问题 */
+let similaritySeq = 0
+
+/**
+ * 主线的点（给地球画那条亮蓝粗线用）。
+ *
+ * 直接复用 `trackPoints`：它已经是**当前选中轨迹**的点，字段名就是地球要的
+ * `{ lon, lat, elevationM }`，坐标转换在地球组件内部做，这里不必再转一次。
+ */
+const similarityBaselinePoints = computed(() => trackPoints.value)
+
+/** 面板标题上要显示的条数（列表内部也会筛，这里只为统计） */
+const similarityShownCount = computed(
+  () => filterMatches(similarityMatches.value, similarityFilter.value).length,
+)
+
+/**
+ * 地球上要叠画的匹配轨迹（只取前 N 条）。
+ *
+ * 为什么只画 10 条：再多在屏幕上也分不清哪条是哪条，反而把主线埋掉。
+ */
+const SIM_DRAW_TOP = 10
+const similarityTracks = ref([])
+
+/**
+ * 取前 N 条匹配轨迹的点，给地球叠画用。
+ *
+ * 为什么要逐条取：`/api/analysis/similarity` 只返回**元数据**（相似度、长度、日期），
+ * 不返回几何 —— 那是刻意的，否则一次响应要带上十几条轨迹的全部点。
+ * 轨迹的点在 `GET /api/tracks/{id}` 里（返回 `TrackDetail`，含 `points` 字段）。
+ */
+async function loadSimilarityTracks(matches, seq) {
+  const top = matches.slice(0, SIM_DRAW_TOP)
+  const loaded = await Promise.all(top.map(async (m) => {
+    try {
+      const res = await fetch(`/api/tracks/${m.trackId}`)
+      if (!res.ok) return null
+      const d = await res.json()
+      return { trackId: m.trackId, similarity: m.similarity, points: d.points ?? [] }
+    } catch {
+      return null            // 单条失败不影响其它条
+    }
+  }))
+  if (seq !== similaritySeq) return          // 用户已经切走了，丢弃这批结果
+  similarityTracks.value = loaded.filter(Boolean)
+}
+
+/**
+ * 查相似度。主线就是**当前选中的轨迹**（本文件里那个变量叫 `selectedId`）。
+ */
+async function loadSimilarity() {
+  const id = selectedId.value
+  if (id == null) {
+    /*
+     * 没有主线 = 这一档什么都不该画。
+     *
+     * ⚠️ 同时要把 seq 推进一格：上一次请求（以及它拉点的 loadSimilarityTracks）
+     * 可能还在路上，不推进的话它们回来时 `seq === similaritySeq` 依然成立，
+     * 会把**上一条轨迹**的红线又画回地球 —— 表现为"取消选中后红线赖着不走"。
+     */
+    similaritySeq++
+    similarityMatches.value = []
+    similarityTracks.value = []
+    similarityInfo.value = {}
+    similarityError.value = ''
+    similarityLoading.value = false
+    return
+  }
+
+  const mine = ++similaritySeq
+  similarityLoading.value = true
+  similarityError.value = ''
+  try {
+    const res = await fetch(`/api/analysis/similarity?trackId=${id}&limit=200`)
+    if (res.status === 404) throw new Error('这条轨迹不存在')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const data = await res.json()
+    if (mine !== similaritySeq) return          // 已经有更新的请求了，丢弃
+    similarityMatches.value = data.matches ?? []
+    // 顺手把前 10 条的点也取回来给地球叠画（不阻塞列表显示，所以不 await）
+    loadSimilarityTracks(similarityMatches.value, mine)
+    similarityInfo.value = {
+      name: data.name,
+      pointCount: data.pointCount,
+      lengthM: data.lengthM,
+      compared: data.compared,
+      toleranceM: data.toleranceM,
+    }
+  } catch (e) {
+    if (mine !== similaritySeq) return
+    similarityMatches.value = []
+    // 出错时地球上的红线也必须清掉，否则会留下上一次查询的"幽灵轨迹"
+    similarityTracks.value = []
+    similarityError.value = '相似度查询失败：' + e.message
+  } finally {
+    if (mine === similaritySeq) similarityLoading.value = false
+  }
+}
+
+/** 点列表里的一条 → 相机飞过去（复用地球暴露的 focusOn） */
+async function focusSimilar(trackId) {
+  let target = similarityTracks.value.find((t) => t.trackId === trackId)
+  /*
+   * 地球上只叠画了前 10 条（SIM_DRAW_TOP），点第 11 条及以后这里会找不到。
+   * 直接 return 的话那些条目就是"点了没反应"的死条，所以缺哪条就单独去取一次。
+   * 单次点击一次请求，代价可以接受。
+   */
+  if (!target) {
+    try {
+      const res = await fetch(`/api/tracks/${trackId}`)
+      if (!res.ok) return
+      const d = await res.json()
+      target = { trackId, similarity: 0, points: d.points ?? [] }
+    } catch {
+      return
+    }
+  }
+  if (!target.points || target.points.length === 0) return
+  // 用轨迹中点（而不是起点）当目标：飞过去之后两边都能看在眼里
+  const mid = target.points[Math.floor(target.points.length / 2)]
+  globe.value?.focusOn(mid.lon, mid.lat, 500)
+}
+
 /* ============ 轨迹导入 ============ */
 const importing = ref(false)
 const importMessage = ref('')
@@ -379,6 +534,8 @@ async function selectTrack(id) {
     selectedId.value = null
     detail.value = null
     stays.value = []
+    // 相似档下取消选中：主线没了，叠画的匹配轨迹也必须跟着清掉
+    if (viewMode.value === 'similar') await loadSimilarity()
     return
   }
 
@@ -398,6 +555,17 @@ async function selectTrack(id) {
   } finally {
     detailLoading.value = false
   }
+
+  /*
+   * 相似档下换了主线（第四档的主线 = 当前选中的轨迹）必须重查。
+   *
+   * ⚠️ 位置放在点加载【之后】（try/finally 之外）：
+   * 地球画主线靠的是 trackPoints ← detail.points，点还没到就查的话，
+   * 匹配轨迹会先画出来、主线却还是空的，看起来像"只画了红线"。
+   * 放在 finally 之后还有个好处：加载失败时 selectedId 已被清空，
+   * 这里的 loadSimilarity() 会走"没有主线"分支，把上一次的红线一并清掉。
+   */
+  if (viewMode.value === 'similar') await loadSimilarity()
 }
 </script>
 
@@ -413,6 +581,9 @@ async function selectTrack(id) {
       :density-cells="viewMode === 'density' ? densityCells : []"
       :density-max="densityMax"
       :density-cell-size="densityCellSize"
+      :similar-baseline="viewMode === 'similar' && similarityBaselinePoints.length
+        ? { points: similarityBaselinePoints } : null"
+      :similar-tracks="viewMode === 'similar' ? similarityTracks : []"
       @time-change="onTimeChange"
       @camera-move-end="onCameraMoveEnd"
     />
@@ -447,7 +618,7 @@ async function selectTrack(id) {
       <p v-if="importing" class="tip">正在导入…</p>
       <p v-else-if="importMessage" class="import-ok">{{ importMessage }}</p>
 
-      <!-- 停留点 / 热点 / 密度 三档互斥：三者都会往地球上画画（圈 / 方格），
+      <!-- 停留点 / 热点 / 密度 / 相似 四档互斥：四者都会往地球上画画（圈 / 方格 / 线），
            同时画会糊在一起 -->
       <div class="mode-switch" data-testid="mode-switch">
         <button
@@ -474,6 +645,14 @@ async function selectTrack(id) {
         >
           密度
         </button>
+        <button
+          type="button"
+          :class="{ on: viewMode === 'similar' }"
+          data-testid="mode-similar"
+          @click="switchMode('similar')"
+        >
+          相似
+        </button>
       </div>
 
       <template v-if="viewMode === 'stay'">
@@ -499,7 +678,7 @@ async function selectTrack(id) {
         />
       </template>
 
-      <template v-else>
+      <template v-else-if="viewMode === 'density'">
         <h2>密度<span v-if="densityCells.length"> （{{ densityCells.length }} 格）</span></h2>
         <p class="tip">颜色越红 = 这个格子里经过的轨迹越多</p>
         <DensityLegend
@@ -512,6 +691,24 @@ async function selectTrack(id) {
           :hour-preset="densityHourPreset"
           @metric="onDensityMetric"
           @hour="onDensityHour"
+        />
+      </template>
+
+      <template v-else>
+        <h2>相似<span v-if="similarityMatches.length"> （{{ similarityShownCount }} 条）</span></h2>
+        <p class="tip">越红 = 和主线重合得越多 · 主线是蓝色那条</p>
+        <p v-if="selectedId == null" class="tip" data-testid="similarity-need-track">
+          先在左边选一条轨迹，才能找和它相似的
+        </p>
+        <SimilarityList
+          v-else
+          :matches="similarityMatches"
+          :baseline="similarityInfo"
+          :loading="similarityLoading"
+          :error="similarityError"
+          :filter="similarityFilter"
+          @filter="similarityFilter = $event"
+          @focus="focusSimilar"
         />
       </template>
 
@@ -647,17 +844,20 @@ async function selectTrack(id) {
   font-weight: 600;
 }
 
-/* 面板里除两个列表以外的内容都不参与伸缩：
-   空间不够时只压缩列表，标题和连通性信息不能被压扁 */
+/* 面板里除列表以外的内容都不参与伸缩：
+   空间不够时只压缩列表，标题和连通性信息不能被压扁。
+   ⚠️ 每新增一个"要自己滚动的列表"都必须加进 :not(...)，否则它会被当成固定内容
+   —— flex: 0 0 auto 下矮窗口里列表不滚动、直接被面板的 overflow:hidden 裁掉。
+   .similarity-list 是第四档的列表，同一条规矩。 */
 .panel > h1,
 .panel > h2,
 .panel > p,
 .panel > .mode-switch,
-.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend) {
+.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend):not(.similarity-list) {
   flex: 0 0 auto;
 }
 
-/* 「停留点 / 热点 / 密度」三档切换开关。
+/* 「停留点 / 热点 / 密度 / 相似」四档切换开关。
    必须参与上面那条 flex: 0 0 auto（见选择器列表里的 .mode-switch），
    否则矮窗口下它会被 flex 收缩压成一条细缝，点都点不到。 */
 .mode-switch {
