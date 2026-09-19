@@ -66,7 +66,7 @@ function onPick(id) {
             {{ formatPct(m.similarity) }}
           </span>
           <span class="name">{{ m.name }}</span>
-          <span class="meta">{{ (m.lengthM / 1000).toFixed(1) }} km · {{ formatDays(m.daysAway) }}</span>
+          <span class="meta">{{ ((m.lengthM ?? 0) / 1000).toFixed(1) }} km · {{ formatDays(m.daysAway) }}</span>
         </li>
       </ul>
     </template>

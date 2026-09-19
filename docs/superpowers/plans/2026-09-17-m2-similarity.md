@@ -2066,7 +2066,7 @@ function onPick(id) {
 
 **用项目自带的 `@vue/compiler-sfc` 真编译一遍**（不需要 spawn，前面的任务验证过可行）：
 `parse` + `compileScript` + `compileTemplate`，有错会直接报出来。
-重点确认：三个 SFC 块成对闭合、五个 testid 都在
+重点确认：三个 SFC 块成对闭合、**六个** testid 都在
 （`similarity-list` / `similarity-baseline` / `similarity-compared` / `similarity-filter` /
 `similarity-item` / `similarity-empty`）。
 
