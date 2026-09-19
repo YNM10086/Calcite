@@ -10,7 +10,8 @@
     "check:playback": "node scripts/check-playback.mjs",
     "check:chart": "node scripts/check-chart.mjs",
     "check:hotspot": "node scripts/check-hotspot.mjs",
-    "check:density": "node scripts/check-density.mjs"
+    "check:density": "node scripts/check-density.mjs",
+    "check:similarity": "node scripts/check-similarity.mjs"
   },
   "dependencies": {
     "cesium": "^1.145.0",
