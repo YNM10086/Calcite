@@ -2614,9 +2614,20 @@ git commit -m "docs(m2): 轨迹相似度完成——设计文档附录B + 会话
 > **背景**：用户在第三阶段结束时**点名要**一份 Word，
 > **重点是「数据扩充对 Calcite 的影响」**。素材已经齐了。
 
-- [ ] **Step 1: 加载 `officecli` 技能**
+- [ ] **Step 1: 用 `python-docx`，不要用 officecli**
 
-用 `skill` 工具加载 `officecli`，按它的指引做 `.docx`。
+⚠️ **这是本任务最容易踩的坑**：项目在 **2026-09-08 就定稿**了文档工具决策 ——
+**Word 一律走 `python-docx`**（`scripts/tools/md2docx.py`，已支持表格/图片/字体）。
+`officecli` 在本机**写不进 docx**（`add`/`save` 报成功但文件是空的，
+`validate` 对空文档还假报通过）——**不要用它写 docx**。
+
+正确流程（和前三份学习笔记完全一致）：
+1. **先写一份 `.md`**（markdown，表格照常用）
+2. 在**仓库根目录**跑：`python scripts/tools/md2docx.py <md路径> <docx路径>`
+   （**必须在根目录** —— 图路径是相对的）
+3. 用 `officecli raw` **只做验证**（验真），或直接检查文件大小 / 能否打开
+
+输出位置参考已有的三份笔记：和 `D:\\Calcite-note\\Calcite-M2停留热点笔记.docx` 同目录。
 
 - [ ] **Step 2: 收集素材（都在仓库里，不要编）**
 
@@ -2667,8 +2678,8 @@ git commit -m "docs(m2): 轨迹相似度完成——设计文档附录B + 会话
 
 - [ ] **Step 4: 生成并检查**
 
-用 `officecli` 生成 `.docx`，然后：
-- **用 officecli 读回来检查**（标题层级、表格、图片是否正常）
+用 `md2docx.py` 生成 `.docx`（见 Step 1），然后：
+- **检查生成结果**：文件大小合理（不是空文件）、能用 python-docx 读回来、标题层级与表格正常
 - 确认字数/篇幅合适（用户要的是"讲述"，不是 API 文档）
 - **确认所有数字都对得上**（第 4 节的每个数字都要能在仓库里找到出处）
 
