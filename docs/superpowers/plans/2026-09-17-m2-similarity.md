@@ -1403,13 +1403,28 @@ def main():
     print("\n=== B. 被包含的一小段（设计文档 2.3 节的坑）===")
     r6 = get("/api/analysis/similarity?trackId=6&limit=500")
     m18 = next((m for m in r6["matches"] if m["trackId"] == 18), None)
+    # 先独立算【点到折线】的真值 —— "被包含"这件事要用真值来证明
+    line_truth = psql_json(f"""
+        SELECT json_agg(row_to_json(t)) FROM (
+          SELECT round(100.0 * count(*) FILTER (
+                   WHERE ST_DWithin(p.geom::geography, t18.geom::geography, {TOL}))
+                 / count(*), 1) AS pct
+          FROM track_point p, track t18
+          WHERE p.track_id = 6 AND t18.id = 18) t;""")[0]["pct"]
+    check("track 6 的点【全部】落在 track 18 的折线上（所以它确实是被包含）",
+          line_truth >= 99.0, f"点到折线真值={line_truth}%")
     if m18 is None:
         print("  info: track 18 没出现在 track 6 的结果里（说明被正确过滤了）")
     else:
-        check("track 6 vs 18 的单向重合度接近 100%", m18["forwardPct"] >= 99.0,
-              f"fwd={m18['forwardPct']}")
-        check("track 6 vs 18 的双向相似度必须 < 50%（取小生效）",
+        # ⚠️ 这里【不能】断言 m18["forwardPct"] >= 99 ——
+        # 接口用的是【点对点】，track 18 采样间距 42 米，会把它低估成 43%。
+        # 那是已知且刻意的取舍（见设计文档 2.6/2.7 节），不是 bug。
+        # 要断言的是：**双向相似度**被压到 50% 以下（"取小"生效）。
+        check("track 6 vs 18 的双向相似度必须 < 50%（取小把'被包含'压下去了）",
               m18["similarity"] < 50.0, f"similarity={m18['similarity']}")
+        check("（已知限制）接口的 forwardPct 被点对点低估",
+              m18["forwardPct"] < line_truth - 20,
+              f"真值 {line_truth}% vs 接口 {m18['forwardPct']}% —— 差异是预期的")
     # 长度对比：证明这一对确实是"被包含"而不是"同一条路"
     lens = psql_json(
         "SELECT json_agg(row_to_json(t)) FROM ("
@@ -1521,16 +1536,38 @@ def main():
         except urllib.error.HTTPError as ex:
             check(name, ex.code == want, f"HTTP {ex.code}（期望 {want}）")
 
-    # 主线孤立无邻居 → 200 + 空数组（Review Focus 第 1 条）
-    gpx = get("/api/tracks?limit=1&source=gpx")
-    if gpx.get("tracks"):
-        gid = gpx["tracks"][0]["id"]
-        g = get(f"/api/analysis/similarity?trackId={gid}")
-        check("福建的 GPX 轨迹 → 200 + 空匹配（不是错误）",
-              g["matches"] == [], f"compared={g['compared']} matches={len(g['matches'])}")
-    else:
-        print("  info: 没找到 gpx 轨迹，跳过这一条")
-
+    # 没有邻居 → 200 + 空数组（Review Focus 第 1 条）
+    # ⚠️ 三个坑都踩过：
+    #   ① /api/tracks 返回的是 {total, items}，不是 {tracks} —— 键名写错会让这一项
+    #      **静默跳过**（输出看着像无害的 info，实际覆盖为 0）。
+    #   ② 不能断言"GPX 轨迹必然孤立" —— 3 条 GPX 是同一场地跑的，它们**互相之间是相似的**。
+    #   ③ 实测当前 246 条轨迹**每一条都至少有 1 个邻居**，把容差压到 1 米才有个别孤立的。
+    #      所以断言要写成"扫描几条、至少有一条返回空数组"，而不是指定某一条。
+    listing = get("/api/tracks?limit=200")
+    items = listing.get("items", [])
+    check("能取到轨迹列表（键名必须是 items）", len(items) > 0,
+          f"拿到 {len(items)} 条（total={listing.get('total')}）")
+    probe = items[:6]
+    empty_n, ok_n = 0, 0
+    for t in probe:
+        try:
+            g = get(f"/api/analysis/similarity?trackId={t['id']}&toleranceM=1")
+        except urllib.error.HTTPError as ex:
+            print(f"    info: trackId={t['id']} 返回 HTTP {ex.code}")
+            continue
+        ok_n += 1
+        if g["matches"] == []:
+            empty_n += 1
+    check("苛刻容差下没有一条报错（不是 500）", ok_n == len(probe),
+          f"{ok_n}/{len(probe)} 条正常返回")
+    check("至少有一条返回空数组（'没有邻居'是正常结果，不是错误）", empty_n >= 1,
+          f"{empty_n}/{ok_n} 条为空")
+    # 防"假绿"：同一个接口在正常容差下必须能给出结果 ——
+    # 否则上面那个"空数组"断言可能被一个永远返回空的 bug 骗过
+    if items:
+        g2 = get(f"/api/analysis/similarity?trackId={items[0]['id']}&toleranceM=50")
+        check("同一接口在正常容差下不是永远返回空", g2["compared"] > 0,
+              f"trackId={items[0]['id']} compared={g2['compared']}")
     # ================= H. daysAway =================
     print("\n=== H. daysAway ===")
     m39 = next((m for m in r["matches"] if m["trackId"] == 39), None)
