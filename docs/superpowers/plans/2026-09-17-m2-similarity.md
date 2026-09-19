@@ -2364,9 +2364,13 @@ function focusSimilar(trackId) {
 
 ```html
       :similar-baseline="viewMode === 'similar' && similarityBaselinePoints.length
-        ? { positions: similarityBaselinePoints } : null"
+        ? { points: similarityBaselinePoints } : null"
       :similar-tracks="viewMode === 'similar' ? similarityTracks : []"
 ```
+
+> **键名统一用 `points`**（装的是**原始点** `{lon, lat, elevationM}`，不是 `Cartesian3`）——
+> 和 → 地球组件的 `points` prop 命名一致。地球那边的 `drawSimilarity()`
+> 已经用 `toCartesians()` 认两种格式，所以改不改都能跑，但统一之后少一个坑。
 
 其中 `similarityTracks` 是**匹配轨迹的点**组成的数组。**它的来源要按现状决定**：
 
