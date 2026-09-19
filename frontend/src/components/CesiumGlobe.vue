@@ -22,6 +22,8 @@ import { computeMultiplier, timeRange } from '../lib/playback.js'
 import { hotspotColor, hotspotPixelSize } from '../lib/hotspot.js'
 // 密度格子的「矩形 / 色阶」同样是纯函数，组件不自己算
 import { cellRect, densityRatio, rampColor } from '../lib/density.js'
+// 相似度的「颜色」同样是纯函数，组件不自己算
+import { simColor } from '../lib/similarity.js'
 // Cesium 自带的控件样式，必须引入，否则地球上的控件会散架
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -47,6 +49,9 @@ const props = defineProps({
   densityMax: { type: Number, default: 1 },
   // 格边长（度），用来算每个格子的矩形
   densityCellSize: { type: Number, default: 0.002 },
+  // 相似档：主线（单独画，要醒目）+ 匹配到的轨迹（按相似度上色）
+  similarBaseline: { type: Object, default: null },
+  similarTracks: { type: Array, default: () => [] },
 })
 
 // 往外报当前时刻（毫秒时间戳），App 用它更新播放条；
@@ -78,6 +83,10 @@ let hotspotEntities = []
 // 同理：密度格子也单独存。它同样是「跨轨迹」的全局结果，
 // 所以和热点一样不能被 clearTrack() 清掉（理由见下面的 drawDensity）
 let densityEntities = []
+
+// 同理：相似轨迹（主线 + 匹配到的）也单独存。它同样是「跨轨迹」的结果
+// （"当前这条 vs 别的轨迹"），所以也不进 clearTrack() 的清理范围 —— 见 drawSimilarity()
+let similarEntities = []
 
 // 相机停稳的回调。Cesium 的 addEventListener 不是自动回收的，
 // 销毁组件时必须手动移除，否则 Cesium 会一直持有这个闭包
@@ -222,6 +231,85 @@ function drawDensity(cells, max, cellSize) {
       },
     })
     densityEntities.push(entity)
+  }
+}
+
+/**
+ * 原始轨迹点 → Cesium 坐标数组。
+ *
+ * ⚠️ 为什么要这一层适配（计划里的 drawSimilarity 直接用了 t.positions，现状不是这样）：
+ * 本项目从后端到地球传的一直是**原始点** `{ seq, recordedAt, lon, lat, elevationM }`
+ * （见 TrackPointDto 与上面 points prop 的注释），坐标转换是**在组件内部**做的
+ * —— drawTrack() 里就是这么干的。App.vue 组装 similarBaseline / similarTracks 时
+ * 照的也是这个现状，给的并不是 Cartesian3 数组。
+ * 所以按现状在组件里转，而不是反过来去改地球已有的数据结构。
+ *
+ * 两种输入都认：已经是 Cartesian3（有 x/y/z 三个数字）就直接用，是原始点就 fromDegrees 转。
+ * 多认一种不会出错，还能让以后真传 Cartesian3 的调用方不必改代码。
+ */
+function toCartesians(list) {
+  if (!Array.isArray(list)) return []
+  return list.map((p) =>
+    p && typeof p.x === 'number' && typeof p.y === 'number' && typeof p.z === 'number'
+      ? p
+      : Cartesian3.fromDegrees(p.lon, p.lat, p.elevationM ?? p.elevation ?? 0),
+  )
+}
+
+/**
+ * 画相似轨迹：主线用醒目的亮蓝粗线画在最上面，匹配到的按相似度上色叠在下面。
+ *
+ * ⚠️ 和热点/密度一样，这些实体【不】进 clearTrack() 的清理范围 ——
+ * 相似是"当前选中轨迹 vs 别的轨迹"的结果，由选中轨迹变化驱动；
+ * 而 clearTrack() 是由"轨迹点变了"触发的（drawTrack → clearTrack），两者会互相打架：
+ * 在相似档里点另一条轨迹，points 变了、similarTracks 的引用却没变，
+ * 实体被清掉而 watcher 不触发 → 表现为"叠画凭空消失"。
+ * 清理统一由 drawSimilarity() 自己负责（它开头清一遍）；切出相似档时 App 传空值进来，watcher 触发 → 清空。
+ *
+ * 数据形状（按现状，见 App.vue 的组装）：
+ *   baseline: { positions: [{ lon, lat, elevationM }, ...], ... }（也兼容 points 键）
+ *   tracks:   [{ trackId, similarity, points: [{ lon, lat, elevationM }, ...] }, ...]
+ */
+function drawSimilarity(baseline, tracks) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+
+  for (const e of similarEntities) v.entities.remove(e)
+  similarEntities = []
+  if (!baseline && (!tracks || tracks.length === 0)) return
+
+  // 先画匹配的（细、按相似度上色），后画主线（粗、亮蓝）—— 后加的在上层。
+  // 顺序反过来的话，高度重合的匹配轨迹会把主线整个盖住，就认不出基准是哪条了。
+  for (const t of tracks || []) {
+    const positions = toCartesians(t.points ?? t.positions)
+    // 少于 2 个点连不成线
+    if (positions.length < 2) continue
+    similarEntities.push(
+      v.entities.add({
+        polyline: {
+          positions,
+          width: 3,
+          material: Color.fromCssColorString(simColor(t.similarity)).withAlpha(0.85),
+          clampToGround: false,
+        },
+      }),
+    )
+  }
+
+  const basePositions = toCartesians(baseline && (baseline.points ?? baseline.positions))
+  if (basePositions.length >= 2) {
+    similarEntities.push(
+      v.entities.add({
+        polyline: {
+          positions: basePositions,
+          width: 6,
+          // 主线用亮蓝 —— 和匹配轨迹的暖色系形成对比，一眼能分清谁是谁。
+          // 不用"最红"那条：红色系已经被"相似度"占用，主线不是某个相似度、它是基准。
+          material: Color.fromCssColorString('rgb(127,209,255)'),
+          clampToGround: false,
+        },
+      }),
+    )
   }
 }
 
@@ -376,6 +464,17 @@ watch(
   { deep: true },
 )
 
+// 相似数据变化 → 重画叠线。
+// 主线和匹配轨迹一起看：App 会先把主线给出来、匹配轨迹的点是逐条异步取回来的，
+// 所以这个 watch 会被触发多次 —— 每次都以"当前拿到的全部"重画一遍（drawSimilarity 自己先清）
+watch(
+  () => [props.similarBaseline, props.similarTracks],
+  ([b, ts]) => {
+    if (ready.value) drawSimilarity(b, ts)
+  },
+  { deep: true },
+)
+
 onMounted(() => {
   // 1) 底图：Cesium 自带的离线世界地图 NaturalEarthII
   //    不需要联网、不需要任何 access token，打开就有画面
@@ -429,6 +528,8 @@ onMounted(() => {
   drawHotspots(props.hotspots)
   // 密度和热点一样是独立的图层，挂载前父组件可能已经给了格子
   drawDensity(props.densityCells, props.densityMax, props.densityCellSize)
+  // 相似叠画同理：父组件可能在地球建好之前就已经把数据给了
+  drawSimilarity(props.similarBaseline, props.similarTracks)
 })
 
 onBeforeUnmount(() => {
