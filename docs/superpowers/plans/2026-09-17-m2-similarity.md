@@ -1817,6 +1817,9 @@ export function simColor(similarity) {
 
 /** 相差天数的文案 */
 export function formatDays(daysAway) {
+  // ⚠️ 必须先判 null/undefined：Number(null) === 0，只判 isFinite 的话
+  // ull\ 会静默变成 0 → 返回「同一天」，把"没算出来"说成了"确定同一天"。
+  if (daysAway == null) return '—'
   const v = Number(daysAway)
   if (!Number.isFinite(v) || v < 0) return '—'
   if (v === 0) return '同一天'
@@ -1825,6 +1828,8 @@ export function formatDays(daysAway) {
 
 /** 百分比文案，保留一位小数（91.10 → '91.1%'，100.0 → '100%'） */
 export function formatPct(v) {
+  // ⚠️ 同上：Number(null) === 0，只判 isFinite 会返回 '0%' 而不是 '—'。
+  if (v == null) return '—'
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
   const r = Math.round(n * 10) / 10
