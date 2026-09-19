@@ -469,7 +469,7 @@ public final class SimilarityMath {
 Run: 只跑 `SimilarityMathTest`
 Expected: `Tests run: 20, Failures: 0, Errors: 0`
 
-> **自己数一遍 `@Test` 的个数再报告**；如果与 18 不符，说明抄漏或抄多了。
+> **自己数一遍 `@Test` 的个数再报告**；如果与 20 不符，说明抄漏或抄多了。
 
 - [ ] **Step 5: 建 `SimilarityProperties` 并加配置**
 
@@ -551,7 +551,7 @@ Expected: `Tests run: 116, Failures: 0, Errors: 0`（原 96 + 新增 20）
 
 ```powershell
 git add backend/src/main/java/com/calcite/config/SimilarityProperties.java backend/src/main/java/com/calcite/service/SimilarityMath.java backend/src/test/java/com/calcite/service/SimilarityMathTest.java backend/src/main/resources/application.yml
-git commit -m "feat(similarity): SimilarityMath 纯静态工具（取小 + eps 按纬度算）+ 18 项无数据库单测"
+git commit -m "feat(similarity): SimilarityMath 纯静态工具（取小 + eps 按纬度算）+ 20 项无数据库单测"
 ```
 
 ---
