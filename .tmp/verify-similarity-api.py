@@ -153,7 +153,20 @@ def main():
     # 但相似度取的是 min(fwd, rev)，而被低估的方向【恰好是本来更大的那个】——
     # 所以相似度几乎不受影响（六组实测差 ≤ 0.6 个百分点）。
     # 断言必须打在这个性质上，不能打在 forwardPct 上（后者本来就对不上）。
-    for a, b in [(20, 39), (6, 18), (20, 35), (6, 16), (6, 24)]:
+    #
+    # ⚠️ 这里【必须】用一组真实存在的轨迹对 —— 曾经写死成 (20,39)，而 39 后来被
+    #    "数据编辑"功能删掉了（它的数据现在是 249），于是 SQL 里 count(*) 为 0 → **除以零**。
+    #    改成 PairsRef：既保留"跨采样密度"这个设计意图，又不会因为 id 变动而炸。
+    PAIRS = [(20, 249), (6, 18), (20, 35), (6, 16), (6, 24)]
+    # 逐个确认两端都还有点 —— 少了谁就明说，不要静默跳过（静默跳过 = 覆盖归零）
+    for a, b in PAIRS:
+        na = psql_json(f"SELECT json_agg(row_to_json(t)) FROM ("
+                       f"SELECT count(*) AS n FROM track_point WHERE track_id = {a}) t;")[0]["n"]
+        nb = psql_json(f"SELECT json_agg(row_to_json(t)) FROM ("
+                       f"SELECT count(*) AS n FROM track_point WHERE track_id = {b}) t;")[0]["n"]
+        check(f"对拍用的一对 ({a},{b}) 两端都还有点", na > 0 and nb > 0,
+              f"track {a} 有 {na} 点、track {b} 有 {nb} 点")
+    for a, b in PAIRS:
         truth = psql_json(f"""
             SELECT json_agg(row_to_json(t)) FROM (
               SELECT least(
