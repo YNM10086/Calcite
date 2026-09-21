@@ -4,7 +4,9 @@ import com.calcite.domain.Track;
 import com.calcite.repository.TrackPointRepository;
 import com.calcite.repository.TrackRepository;
 import com.calcite.service.StayPointService;
+import com.calcite.service.TrackEditService;
 import com.calcite.service.importer.RawPoint;
+import com.calcite.web.dto.DeleteTrackResponse;
 import com.calcite.web.dto.StayPointDto;
 import com.calcite.web.dto.StayPointResponse;
 import com.calcite.web.dto.TrackDetail;
@@ -14,23 +16,33 @@ import com.calcite.web.dto.TrackSummary;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 轨迹查询接口（M1 第一个真正的业务接口）。
  *
- * <p>两个端点：
+ * <p>四个端点：
  * <ul>
  *   <li>{@code GET /api/tracks} —— 轨迹列表（不含坐标）</li>
  *   <li>{@code GET /api/tracks/{id}} —— 单条轨迹详情（含全部点的经纬度）</li>
+ *   <li>{@code PATCH /api/tracks/{id}} —— 改名</li>
+ *   <li>{@code DELETE /api/tracks/{id}} —— 删除（先导出回收站，失败不删）</li>
  * </ul>
+ *
+ * <p><b>为什么改名/删除要单独注入 {@link TrackEditService}</b>：写操作里
+ * 「先导出回收站 → 失败就不删」「改名后清相似度缓存」这些顺序保证都在 service 里，
+ * 控制器<b>只负责把异常翻译成合适的 HTTP 状态码</b>，一行业务逻辑都不写。
  *
  * <p>{@code @RequestMapping("/api/tracks")} 加在类上 = 这个类里所有接口的公共前缀。
  */
@@ -41,14 +53,17 @@ public class TrackController {
     private final TrackRepository trackRepository;
     private final TrackPointRepository trackPointRepository;
     private final StayPointService stayPointService;
+    private final TrackEditService trackEditService;
 
     // 构造器注入：需要的 Bean 由 Spring 自动传入
     public TrackController(TrackRepository trackRepository,
                            TrackPointRepository trackPointRepository,
-                           StayPointService stayPointService) {
+                           StayPointService stayPointService,
+                           TrackEditService trackEditService) {
         this.trackRepository = trackRepository;
         this.trackPointRepository = trackPointRepository;
         this.stayPointService = stayPointService;
+        this.trackEditService = trackEditService;
     }
 
     /**
@@ -130,5 +145,55 @@ public class TrackController {
                 .toList();
 
         return new StayPointResponse(id, stays.size(), stays);
+    }
+
+    /**
+     * 改名（数据管理）。
+     *
+     * <p><b>为什么用 {@code PATCH} 而不是 {@code PUT}</b>：请求体里只带一个 {@code name}，
+     * 是对资源做<b>局部</b>修改；{@code PUT} 的语义是"用请求体整体替换这个资源"，
+     * 那会暗示"没传的字段要被清空"——不是我们要的。
+     *
+     * <p><b>为什么改名后要清相似度缓存</b>：{@code SimilarityMatch} 里带了 {@code name}，
+     * 不清的话别的主线的匹配列表里还显示旧名字（详见 {@code TrackEditService.rename}）。
+     * 这个动作在 service 里，控制器不掺和。
+     *
+     * <p>状态码映射：轨迹不存在 → 404；名字非法（空 / 超长）→ 400。
+     */
+    @PatchMapping("/{id}")
+    public Map<String, Object> rename(@PathVariable Long id,
+                                      @RequestBody RenameRequest req) {
+        try {
+            String name = trackEditService.rename(id, req.name());
+            return Map.of("trackId", id, "name", name);
+        } catch (TrackEditService.TrackNotFoundException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalArgumentException e) {
+            // 名字空 / 太长都是用户输入问题 —— 400 而不是 500
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+    }
+
+    /**
+     * 删除一条轨迹。
+     *
+     * <p><b>顺序在 service 里保证</b>：先导出到回收站 → 导出失败就不删 → 才真删。
+     * 所以这个方法只需要把两种失败映射成合适的 HTTP 码。
+     */
+    @DeleteMapping("/{id}")
+    public DeleteTrackResponse delete(@PathVariable Long id) {
+        try {
+            return trackEditService.delete(id);
+        } catch (TrackEditService.TrackNotFoundException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (TrackEditService.RecycleExportFailedException e) {
+            // 500 而不是 400：这不是用户的错，是服务端写不出回收站文件。
+            // 而且此时【轨迹还在】—— 这正是 fail-safe 想要的结果
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, e.getMessage());
+        }
+    }
+
+    /** 改名的请求体：{"name": "新的名字"} */
+    public record RenameRequest(String name) {
     }
 }

@@ -1,5 +1,6 @@
 package com.calcite.service;
 
+import com.calcite.config.DataProperties;
 import com.calcite.domain.Track;
 import com.calcite.domain.TrackPoint;
 import com.calcite.repository.TrackPointRepository;
@@ -11,11 +12,13 @@ import com.calcite.service.importer.Importer;
 import com.calcite.service.importer.ParsedTrack;
 import com.calcite.service.importer.RawPoint;
 import com.calcite.web.dto.ImportResult;
+import com.calcite.web.dto.TrackConflictResponse;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.PrecisionModel;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,7 +37,9 @@ import java.util.Optional;
 /**
  * 导入编排：识别格式 → 解析 → 清洗 → 入库。
  *
- * <p>两个入口（网页上传单文件、目录批量）共用这一套流程。
+ * <p>三个入口（网页上传单文件、目录批量、以及上传时的"新增 / 替换"两种模式）共用这一套流程，
+ * 所以解析（{@link #parse}）、判重（{@link #skipped}）、落库（{@link #persist}）、
+ * 写点（{@link #savePoints}）都抽成了私有方法 —— <b>不复制粘贴第二份</b>。
  */
 @Service
 public class ImportService {
@@ -56,43 +61,195 @@ public class ImportService {
     private final GpxImporter gpxImporter;
     private final GeoLifeImporter geoLifeImporter;
     private final TransactionTemplate txTemplate;
+    /** 同名检测（"这个名字是不是已经被别人占了"） */
+    private final TrackEditService trackEditService;
+    /** 替换某条轨迹后要清它自己的停留点缓存 */
+    private final StayPointCache stayPointCache;
+    /**
+     * 相似度缓存。<b>替换</b>某条轨迹会让别的主线的匹配列表变化 → 必须全清。
+     *
+     * <p>（纯"新增一条"目前<b>不清</b>：那是 M2 遗留的欠账，见 {@code SimilarityCache} 的类注释，
+     * 本任务不扩大范围去改它。）
+     */
+    private final SimilarityCache similarityCache;
 
+    /**
+     * 生产用构造器（Spring 注入）。
+     *
+     * <p><b>为什么这里要显式标 {@code @Autowired}</b>：本类还有下面那个 6 参构造器，
+     * 一个类有多个构造器时 Spring 不再自动挑，必须指明用哪个。
+     */
+    @Autowired
     public ImportService(TrackRepository trackRepository,
                          TrackPointRepository trackPointRepository,
                          TrackCleaner cleaner,
                          GpxImporter gpxImporter,
                          GeoLifeImporter geoLifeImporter,
-                         PlatformTransactionManager txManager) {
+                         PlatformTransactionManager txManager,
+                         TrackEditService trackEditService,
+                         StayPointCache stayPointCache,
+                         SimilarityCache similarityCache) {
         this.trackRepository = trackRepository;
         this.trackPointRepository = trackPointRepository;
         this.cleaner = cleaner;
         this.gpxImporter = gpxImporter;
         this.geoLifeImporter = geoLifeImporter;
         this.txTemplate = new TransactionTemplate(txManager);
+        this.trackEditService = trackEditService;
+        this.stayPointCache = stayPointCache;
+        this.similarityCache = similarityCache;
+    }
+
+    /**
+     * 6 参构造器：<b>只为让现有的 {@code ImportServiceTest} 不改一行</b>（本任务限定只改三个文件）。
+     *
+     * <p><b>为什么不用 {@code null} 顶替那三个新依赖</b>：那样单测里一旦走到
+     * "同名检测 / 替换"就会 NPE —— 一个只在测试里存在的空指针地雷，比多一个构造器糟糕得多。
+     * 这里 new 的是<b>真实可用</b>的协作者（缓存是各自独立的新实例，对单测来说正是想要的语义），
+     * 所以拿这个构造器造出来的对象在任何路径上都是完整可用的。
+     */
+    public ImportService(TrackRepository trackRepository,
+                         TrackPointRepository trackPointRepository,
+                         TrackCleaner cleaner,
+                         GpxImporter gpxImporter,
+                         GeoLifeImporter geoLifeImporter,
+                         PlatformTransactionManager txManager) {
+        this(trackRepository, trackPointRepository, cleaner, gpxImporter, geoLifeImporter, txManager,
+                new TrackEditService(trackRepository, trackPointRepository,
+                        new TrackExporter(new DataProperties()),
+                        new StayPointCache(), new SimilarityCache(), new DataProperties()),
+                new StayPointCache(), new SimilarityCache());
     }
 
     /**
      * 从文件字节导入一条轨迹。
      *
+     * <p>这是"只新增"的入口（批量导入 GeoLife 目录也走它）：内容已存在就跳过，行为与以前完全一致。
+     * 网页上传走的是下面那个能选"替换"的 {@link #importUpload} 重载。
+     *
      * @param fallbackName 文件里没有轨迹名时用它（通常传文件名去掉扩展名）
      */
     @Transactional
     public ImportResult importBytes(byte[] content, String fallbackName) {
-        if (content == null || content.length == 0) {
-            throw new IllegalArgumentException("上传的文件是空的");
-        }
+        requireNotEmpty(content);
 
         String externalId = sha256Hex(content);
         Optional<Track> existing = trackRepository.findByExternalId(externalId);
         if (existing.isPresent()) {
-            Track t = existing.get();
-            return new ImportResult(t.getId(), t.getName(),
-                    t.getPointCount() == null ? 0 : t.getPointCount(),
-                    t.getDistanceM() == null ? 0 : t.getDistanceM(),
-                    t.getDurationS() == null ? 0 : t.getDurationS(),
-                    0, true, "这条轨迹已经导入过了");
+            return skipped(existing.get());
         }
 
+        Parsed parsed = parse(content, fallbackName);
+        return persist(parsed.name(), parsed.format(), externalId, parsed.points());
+    }
+
+    /**
+     * 上传导入（扩展版）：支持"新增"与"替换"两种模式，并做同名检测。
+     *
+     * <p><b>三种结果</b>：
+     * <ol>
+     *   <li>内容哈希已存在 → <b>跳过</b>（幂等，原有行为不变）
+     *   <li>哈希是新的、但<b>名字已存在</b> → 抛 {@link TrackConflictException}（409，SAME_NAME）
+     *   <li>{@code mode=replace} 且新内容的哈希<b>已属于另一条轨迹</b>
+     *       → 抛 {@link TrackConflictException}（409，SAME_CONTENT）</li>
+     * </ol>
+     *
+     * <p><b>⚠️ 第 ③ 条是自查时发现的边界</b>：先导入「资料一」（hash A），
+     * 再拿同一个文件去"替换"「资料二」→ 新的 {@code external_id} 也是 A，
+     * 但 A 已经是「资料一」的 → 撞唯一约束 → <b>500</b>。
+     * 正确行为是<b>再返回一次 409</b>，说清"这份内容已经在库里了"。
+     *
+     * <p><b>⚠️ 为什么替换模式下【不查】同名</b>：重名在设计上就是允许的（用户可以故意留两个同名版本），
+     * 替换时用户已经明确指定了"替换哪一条"，此时再拦一次同名只会让人没法操作。
+     * 改名的唯一性同理，不校验。
+     *
+     * @param mode           {@code append}（默认，新增）或 {@code replace}（替换已有的）
+     * @param replaceTrackId 当 {@code mode=replace} 时，要替换哪一条
+     */
+    @Transactional
+    public ImportResult importUpload(byte[] content, String fallbackName,
+                                     String mode, Long replaceTrackId) {
+        requireNotEmpty(content);
+
+        String externalId = sha256Hex(content);
+        Optional<Track> byHash = trackRepository.findByExternalId(externalId);
+        boolean replace = "replace".equals(mode);
+
+        // ② 幂等：内容一模一样，且不是在替换
+        if (byHash.isPresent() && !replace) {
+            return skipped(byHash.get());
+        }
+
+        // ③ 替换模式下，新内容属于【另一条】轨迹 → 409 SAME_CONTENT（否则会撞 external_id 唯一约束变成 500）
+        if (byHash.isPresent()) {
+            Track other = byHash.get();
+            if (!other.getId().equals(replaceTrackId)) {
+                throw new TrackConflictException(
+                        TrackConflictResponse.sameContent(other.getId(), other.getName()));
+            }
+        }
+
+        Parsed parsed = parse(content, fallbackName);
+
+        // ④ 哈希是新的、但名字已存在 → 409 SAME_NAME（把"要替换的那条"排除掉，否则改名成自己会误报）
+        Optional<Long> conflict = trackEditService.findNameConflict(parsed.name(), replaceTrackId);
+        if (conflict.isPresent() && !replace) {
+            Track existing = trackRepository.findById(conflict.get()).orElseThrow();
+            throw new TrackConflictException(TrackConflictResponse.sameName(
+                    existing.getId(), existing.getName(),
+                    existing.getPointCount(), parsed.points().size()));
+        }
+
+        if (replace) {
+            if (replaceTrackId == null) {
+                throw new IllegalArgumentException("mode=replace 时必须提供 replaceTrackId");
+            }
+            return replaceInPlace(replaceTrackId, externalId, parsed);
+        }
+        return persist(parsed.name(), parsed.format(), externalId, parsed.points());
+    }
+
+    /** 上传的文件是空的就直说 —— 空内容算哈希也能算出个值，会一路走到"导入成功一条 0 点的轨迹" */
+    private static void requireNotEmpty(byte[] content) {
+        if (content == null || content.length == 0) {
+            throw new IllegalArgumentException("上传的文件是空的");
+        }
+    }
+
+    /**
+     * "这份内容已经在库里了" —— 幂等跳过。
+     *
+     * <p>抽出来是为了让新增与替换两条路径<b>给出同一句话、同一套字段兜底</b>；
+     * 顺带把 {@code null} 的点数/距离/时长统一成 0（数据库里老数据可能是 NULL）。
+     */
+    private static ImportResult skipped(Track t) {
+        return new ImportResult(t.getId(), t.getName(),
+                t.getPointCount() == null ? 0 : t.getPointCount(),
+                t.getDistanceM() == null ? 0 : t.getDistanceM(),
+                t.getDurationS() == null ? 0 : t.getDurationS(),
+                0, true, "这条轨迹已经导入过了");
+    }
+
+    /**
+     * 解析结果（本类内部用）。
+     *
+     * <p><b>为什么不直接用 {@link ParsedTrack}</b>：解析实际产出<b>三</b>样东西 —— 格式、名字、点，
+     * 而 {@link ParsedTrack} 只有后两样（格式来自 {@code Importer.format()}）。
+     * 打包成一条 record，格式就能从"解析"这一步传到"入库"那一步，
+     * 不必让 {@link #persist} 自己再选一次解析器。
+     *
+     * <p>名字在这里<b>已经兜过底</b>（文件里没有 {@code <name>} 时用文件名）：
+     * 同名检测和真正入库用的必须是同一个名字。
+     */
+    private record Parsed(String format, String name, List<RawPoint> points) {
+    }
+
+    /**
+     * 识别格式 → 选解析器 → 解析 → 名字兜底。
+     *
+     * <p>新增、替换、批量导入三条路径都走这里。
+     */
+    private Parsed parse(byte[] content, String fallbackName) {
         Importer importer = pickImporter(content);
         ParsedTrack parsed;
         try {
@@ -108,7 +265,7 @@ public class ImportService {
                 ? (fallbackName == null || fallbackName.isBlank() ? "未命名轨迹" : fallbackName)
                 : parsed.name();
 
-        return persist(name, importer.format(), externalId, parsed.points());
+        return new Parsed(importer.format(), name, parsed.points());
     }
 
     /** 按内容选解析器 */
@@ -124,7 +281,7 @@ public class ImportService {
         };
     }
 
-    /** 清洗 + 入库，返回给前端的摘要 */
+    /** 清洗 + 新增一条轨迹，返回给前端的摘要 */
     private ImportResult persist(String name, String source, String externalId, List<RawPoint> raw) {
         CleanedTrack cleaned = cleaner.clean(raw);
         List<RawPoint> pts = cleaned.points();
@@ -134,17 +291,77 @@ public class ImportService {
         OffsetDateTime end = pts.get(n - 1).recordedAt();
 
         Track track = new Track(name, source, externalId, start, end);
-        track.setDistanceM(cleaned.distanceM());
-        track.setDurationS(cleaned.durationS());
-        track.setPointCount(n);
-        track.setGeom(buildLineString(pts));
+        applyCleaned(track, cleaned);
         Track saved = trackRepository.save(track);
 
-        List<TrackPoint> entities = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
+        savePoints(saved.getId(), cleaned);
+        return summarize(saved.getId(), saved.getName(), cleaned, false, "导入成功");
+    }
+
+    /**
+     * 用新文件<b>原地替换</b>一条已有轨迹（{@code trackId} 不变）。
+     *
+     * <p><b>为什么"保持 trackId 不变"而不是删了重建</b>：
+     * <ul>
+     *   <li>前端此刻可能正选中着这条轨迹 —— 删了重建，选中态和地球上的线都会失效</li>
+     *   <li>缓存失效范围更小（只需清这一条 + 相似度全清）</li>
+     * </ul>
+     *
+     * <p><b>为什么要校验来源一致</b>：GPX（个人采集）和 GeoLife（公开数据集）语义不同，
+     * 允许互相替换会让 {@code source} 这个筛选维度失去意义。
+     *
+     * <p><b>⚠️ 为什么删旧点、写新点必须在同一个事务里</b>：中间任何一步失败都要整体回滚，
+     * 否则会留下一条<b>没有点的轨迹</b>（列表里还在、点开是空的）。
+     * 本方法由 {@link #importUpload} 上的 {@code @Transactional} 罩着。
+     */
+    private ImportResult replaceInPlace(Long trackId, String externalId, Parsed parsed) {
+        Track track = trackRepository.findById(trackId)
+                .orElseThrow(() -> new IllegalArgumentException("要替换的轨迹不存在：" + trackId));
+
+        if (!track.getSource().equals(parsed.format())) {
+            throw new IllegalArgumentException(
+                    "来源不一致：原轨迹是 " + track.getSource() + "，上传的是 " + parsed.format());
+        }
+
+        CleanedTrack cleaned = cleaner.clean(parsed.points());
+        List<RawPoint> pts = cleaned.points();
+
+        // 一条 SQL 删掉旧点（不是把几万个实体查出来逐个删 —— 见 TrackPointRepository.deleteByTrackId）
+        trackPointRepository.deleteByTrackId(trackId);
+
+        track.setName(parsed.name());
+        track.setExternalId(externalId);
+        track.setStartTime(pts.get(0).recordedAt());
+        track.setEndTime(pts.get(pts.size() - 1).recordedAt());
+        applyCleaned(track, cleaned);
+        trackRepository.save(track);
+
+        savePoints(trackId, cleaned);
+
+        // 数据变了 → 两个缓存都要清：停留点是"这条轨迹的点"的函数，
+        // 而相似度结果里也带着这条轨迹的名字与几何
+        stayPointCache.invalidate(trackId);
+        similarityCache.invalidateAll();
+
+        return summarize(trackId, parsed.name(), cleaned, false, "替换成功");
+    }
+
+    /** 把清洗结果写进 track 的派生字段与几何（新增与替换<b>共用</b>，免得两处各写一遍还漏字段） */
+    private static void applyCleaned(Track track, CleanedTrack cleaned) {
+        track.setDistanceM(cleaned.distanceM());
+        track.setDurationS(cleaned.durationS());
+        track.setPointCount(cleaned.points().size());
+        track.setGeom(buildLineString(cleaned.points()));
+    }
+
+    /** 把清洗后的点批量写进 {@code track_point}（新增与替换共用） */
+    private void savePoints(Long trackId, CleanedTrack cleaned) {
+        List<RawPoint> pts = cleaned.points();
+        List<TrackPoint> entities = new ArrayList<>(pts.size());
+        for (int i = 0; i < pts.size(); i++) {
             RawPoint p = pts.get(i);
             entities.add(new TrackPoint(
-                    saved.getId(),
+                    trackId,
                     i,
                     p.recordedAt(),
                     p.elevationM(),
@@ -153,10 +370,14 @@ public class ImportService {
                     cleaned.outliers().get(i)));
         }
         trackPointRepository.saveAll(entities);
+    }
 
+    /** 导入 / 替换成功后的摘要（两条路径同一套算法，包括异常点计数） */
+    private static ImportResult summarize(Long id, String name, CleanedTrack cleaned,
+                                          boolean skippedDuplicate, String message) {
         long outlierCount = cleaned.outliers().stream().filter(Boolean::booleanValue).count();
-        return new ImportResult(saved.getId(), saved.getName(), n, cleaned.distanceM(),
-                cleaned.durationS(), outlierCount, false, "导入成功");
+        return new ImportResult(id, name, cleaned.points().size(), cleaned.distanceM(),
+                cleaned.durationS(), outlierCount, skippedDuplicate, message);
     }
 
     private static LineString buildLineString(List<RawPoint> pts) {
@@ -270,6 +491,33 @@ public class ImportService {
             return sb.toString();
         } catch (Exception e) {
             throw new IllegalStateException("算哈希失败", e);
+        }
+    }
+
+    // ------------------------------------------------------------ 冲突异常
+
+    /**
+     * 同名 / 同内容冲突 → 由 {@code ImportController} 映射成 <b>409 Conflict</b>，
+     * 并把 {@link #getBody()} 原样作为响应体。
+     *
+     * <p><b>为什么是 409 而不是 400</b>：请求本身没毛病，是<b>和库里已有的东西撞了</b> ——
+     * 语义上就该是 409。前端靠这个码决定"弹出替换 / 新增的选择"。
+     *
+     * <p><b>为什么把响应体（{@link TrackConflictResponse}）挂在异常上</b>：
+     * "冲突的是什么"是导入过程中才算得出来的（要点数、要名字），
+     * 挂在异常上控制器就不用再查一遍库 —— catch 一次，原样吐回去。
+     */
+    public static class TrackConflictException extends RuntimeException {
+
+        private final transient TrackConflictResponse body;
+
+        public TrackConflictException(TrackConflictResponse body) {
+            super(body.message());
+            this.body = body;
+        }
+
+        public TrackConflictResponse getBody() {
+            return body;
         }
     }
 
