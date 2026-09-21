@@ -167,8 +167,11 @@ PowerShell 只负责启动和查错，不显示图形。
 - **待办**：GeoLife 数据集下载（挂机，官方 ID 52367 / Kaggle 镜像），到位后用 `POST /api/import/geolife` 灌 5-10 个用户
 
 ### 数据现状与支线任务（2026-09-14）
-- 📌 **当前数据规模（2026-09-17 更新，M2 第三阶段结束时）**：
+- 📌 **当前数据规模（2026-09-21 更新，数据管理阶段结束时）**：
   **246 条轨迹 / 286,019 个点 / 264 个停留点 / 37 个热点 / 33 个孤立点**（264 = 37 个热点吃掉 231 + 33 个孤立）
+  - ⚠️ **track 39 的 id 现在是 249** —— 原来 id 39 那条被验收脚本删过
+    （数据管理的"删除后相似度必须变"就是删它），重新导入后拿了新 id，**数据一致**；
+    脚本里写死轨迹 id 配对的地方都要一并改
   - geoLife **242 条** = user `000` **北京 171 条** + user `001` **长三角 71 条**；GeoLife 覆盖 **467 km × 1008 km**
   - 用户自采 **3 条 GPX 在福建** —— 仍然是 **0 个停留点**（跑步轨迹没有"50 米内停 5 分钟"的时刻）
 - **GeoLife 已下载**：`D:\Calcite-note\GPX-Data\Geolife Trajectories 1.3\`（182 用户 / **18,670 个 `.plt`** / 1.59 GB）
@@ -339,16 +342,50 @@ PowerShell 只负责启动和查错，不显示图形。
   浏览器与接口脚本 **10 个全绿**（stay 7 / chart-pixels 10 / import-pixels 5 / filter 7 / hotspots 17 / density 15 / **similarity 17** /
   verify-hotspot-api / verify-density-api 51 / **verify-similarity-api 35**）
 
-### ▶ 下次接着做（2026-09-17 收工时的状态）
+### 数据管理（2026-09-21 完成）
+- 设计文档 `docs/superpowers/specs/2026-09-21-data-management-design.md`；实施计划 `docs/superpowers/plans/2026-09-21-data-management.md`（分支 `feat/data-management`）
+- **交付物（后端）**：`PATCH /api/tracks/{id}`（改名，非空 / 去首尾空格 / ≤ 200 字）、
+  `DELETE /api/tracks/{id}`（删除）、`POST /api/tracks/import?mode=&replaceTrackId=&allowSameName=`（添加 / 替换 / 同名 409）。
+  新增 `config/DataProperties`、`service/TrackExporter`（GeoJSON 导出）、`service/TrackEditService`（编排）、
+  `web/dto/TrackConflictResponse`；改 `web/TrackController`、`service/ImportService`、`application.yml`
+- **交付物（前端）**：`TrackList` 的「导入轨迹」按钮改成「**数据编辑**」→ **整个面板切换成管理视图**
+  （不从按钮下方展开）；新增 `components/DataManager.vue`（表格 + 行内改名 + 删除确认 + 同名三选一）、
+  `components/ConfirmDialog.vue`、`lib/dataEdit.js`（纯计算）；`App.vue` 加 `panelView: 'analysis' | 'manage'`
+- ⭐ **账已兑现**：`StayPointCache` / `SimilarityCache` 的 javadoc 里一直写着
+  「将来加了"删除轨迹 / 重新导入覆盖同名轨迹"，**必须调用 invalidate 清理**」—— 这个功能把它们接上了。
+  **四条关键测试（实测通过）**：
+  1. 删掉相似度第一名（track 39）→ 主线 20 的 `compared` **197 → 196**（缓存真被清了）
+  2. 改名 → 别的主线的匹配列表显示**新名字**（`SimilarityMatch` 带 `name`，不清就是旧名字）
+  3. 删除前回收站文件**真的落盘**（点数与删除前一致、每个点都带时间）
+  4. **新增导入 → `compared` 196 → 197**（新增也清了；这条是实施时补的第四条，设计里只写了三条）
+- **六个关键设计决定**（都有实测依据）：
+  1. **删除前先导出到回收站，导出失败就不删（fail-safe）** —— 实测回收站目录写不进去时
+     `DELETE` 返回 **500 且轨迹原样保留**（这正是设计要的行为）
+  2. **同名上传返回 409**，让用户决定「替换 / 新增 / 取消」（同名是意图问题，系统猜不准；自动替换不可逆）
+  3. **替换保持 `trackId` 不变**（原地更新，不删不插）
+  4. **改名也必须清相似度缓存** —— 因为 `SimilarityMatch` 里带了 `name`（摸代码时才发现，光看"改名"两个字想不到）
+  5. **宁可全清缓存不要漏清** —— 漏一个就是"界面显示一条已经不存在的轨迹"；全清的代价只是下次点相似度等 2 秒
+  6. **整个面板切换成管理视图**（不从按钮下方展开）—— 表格形态最不容易点错（246 条里要删的是哪一条一眼能确认）
+- **回收站目录**：`D:\Calcite-note\backups\deleted`（配置项 `calcite.data.recycle-dir`；
+  **不复用** `calcite.import.allowed-roots` —— 那个是导入时的读白名单，用途不同）
+- **回归基线（实测全绿）**：后端 JUnit **133**（上一阶段 121）；前端 node **134**
+  （playback 17 / chart 37 / hotspot 25 / density 25 / similarity 19 / **data-edit 11**）；
+  浏览器与接口脚本 **11 个全绿**：stay 7 / chart-pixels 10 / **import-pixels 6** / filter 7 / hotspots 17 /
+  density 15 / similarity 17 / **data-edit 19** / verify-hotspot-api 375 / verify-density-api 51 / **verify-similarity-api**
+- **数据现状（2026-09-21 实测）**：**246 条轨迹 / 286,019 个点 / 37 个热点 / 264 个停留点**
+- ⚠️ **收尾时修掉的**：`verify-similarity-api.py` 里写死的轨迹配对 —— track 39 被验收脚本删掉后脚本**除以零**红掉；
+  改成从接口取期望值（同第三阶段的教训：验收判据不要写死数据量 / 数据 id）
+
+### ▶ 下次接着做（2026-09-21 收工时的状态）
 - ✅ **M2 全部完成**（四个阶段：停留点识别 → 停留热点 → 网格密度 → 轨迹相似度）；
   前端**四档**「停留点 / 热点 / 密度 / 相似」可用
 - ✅ **已推送到 GitHub（2026-09-17）** —— `e62b1c8..7e6fe23  main -> main`，
   90 个提交已上传；本地与 origin/main 同步（0 待推送 / 0 落后）。**M2 至此正式交付。**
-- **下一步 = M3**（不是推送了 —— 推送已完成）：
-  停留点 → 面板改版 → 热点 → 网格密度 → 轨迹相似度）。
-  按约定"攒到里程碑完成再推"，**M2 完成就是推的时机**。
-  ⚠️ 沙箱内 git 的 SSH 操作必崩，推送要提权 `danger-full-access`
-- **推送之后才是 M3**：
+- ✅ **「数据管理」也已完成**（2026-09-21，分支 `feat/data-management`，**尚未合并、尚未推送**）——
+  添加 / 替换 / 改名 / **删除** 全通，并兑现了 M2 留下的两处缓存欠账（详见上一节）
+- **下一步 = 合并 + 推送**：把 `feat/data-management` 合并回 `main` 再推
+  （按约定"攒到一块做完再推"；⚠️ 沙箱内 git 的 SSH 操作必崩，推送要提权 `danger-full-access`）
+- **推送之后 = M3**：
   - **空间范围查询** `POST /api/analysis/within`（画矩形 / 多边形 / 缓冲区，查出穿过的轨迹）
   - **路网匹配评估**（附录 B.1 里仍标"待评估"，原计划 M3 之后再评估）
 
@@ -399,6 +436,24 @@ PowerShell 只负责启动和查错，不显示图形。
    → 建议等数据里有"多口径不同序"的热点时再补一条真的能分辨的断言。
 
 
+## 踩坑记录
+
+### 数据管理阶段（2026-09-21，四条）
+
+1. **`maxTracks` 不是"最多补几条"，是"最多处理几个文件"** ——
+   主控为了补回被删的一条轨迹，传了 `maxTracks: 400`，结果把**其它用户从未导入过的 399 个文件**也导进来了
+   （**245 → 645 条**）。修复方式是**直接走 SQL 删掉多余的**（走 API 删会 399 次都撞上"回收站写不进去" → 500）。
+   **教训：批量导入的 `maxTracks` 要按"文件数"理解，补数据之前先算清会扫到哪些文件。**
+2. **跑验收前必须确认后端跑的是当前源码** —— 对拍脚本第一次跑红，看着像"新增没清缓存"的重大发现，
+   实际是 **JVM 启动时间早于编译时间**（跑的是旧代码）。判别方法：比对
+   **`JVM 启动时间` vs `ImportService.class 的编译时间`**。
+3. **沙箱里后端写不进 `D:\Calcite-note\backups\deleted`** —— 实测 PowerShell / cmd / Python 三种运行时
+   写 `D:\`、`E:\`、`C:\Users\` 下的用户目录**全部 `WinError 5`**。
+   **这是沙箱限制，不是代码问题**：同样的源码只改 `calcite.data.recycle-dir` 一个参数、指向工作区目录就一切正常。
+   **在沙箱外跑（IntelliJ / 普通终端）不受此限。**
+4. **删除失败时 HTTP 响应体不带原因** —— Spring 的 `server.error.include-message` 默认 `never`，
+   所以 `RecycleExportFailedException` 的 message 被吞掉，排查只能靠对照实验。**这是待修的小债。**
+
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
 - 数据库连接：`psql -U postgres -h localhost -p 5432 -d calcite`，密码见 `application-local.yml`
@@ -406,7 +461,7 @@ PowerShell 只负责启动和查错，不显示图形。
   `_session_context.md` 已脱敏（只留密码指针），因此**可以正常入库、享有版本历史**
 - 每次改动后本地提交留回滚点；**仓库已公开（2026-09-12 起）**
 - 📌 **推送节奏（用户 2026-09-12 明确要求）：不要频繁推，攒到里程碑完成再推**
-  - 下一个推送节点：**M2 完成**
+  - 下一个推送节点：**「数据管理」（`feat/data-management`）合并后**（M2 已于 2026-09-17 推送）
   - 平时照常本地提交（每个任务一个提交，保留回滚点）
 - ⚠️ **绝不要把密码/密钥写进任何会入库的文件**（连 SQL 注释里也不行）——
   2026-09-12 就是靠"改数据库密码"才补上了早期 `03-show-results.sql` 注释里的泄漏

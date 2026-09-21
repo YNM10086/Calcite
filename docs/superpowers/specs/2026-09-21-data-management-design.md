@@ -1,6 +1,6 @@
 # Calcite · 数据管理（删除 / 改名 / 同名替换 / 添加）设计
 
-> 状态：待评审
+> 状态：**已实施完毕**（2026-09-21，实际交付与实测数字见文末「执行记录」）
 > 前置：M2 四个阶段全部完成（停留点 / 停留热点 / 网格密度 / 轨迹相似度）
 > 日期：2026-09-21
 
@@ -422,6 +422,8 @@ calcite:
 | **允许重名** | 改名不校验唯一性 | 2.2 那个决定的**必然结果** |
 | **并发删除** | 两个人同时删同一条 → 后一个 404 | 个人项目，不做乐观锁 |
 | **回收站会一直涨** | 没有自动清理 | 删一条才产生一个文件，而且**用户可能正需要它**。不做自动清理 |
+| **受限环境里回收站目录可能写不进去** | 后端跑在受限环境（如 DSH 沙箱）时 `calcite.data.recycle-dir` 可能不可写 —— **实测** PowerShell / cmd / Python 三种运行时写 `D:\`、`E:\`、`C:\Users\` 下的用户目录全部 `WinError 5`；此时 `DELETE` 返回 **500 且轨迹原样保留** | **这不是 bug，是 fail-safe 的正确行为**（4.2 要的就是它：导出不成功就绝不删）。沙箱外跑（IntelliJ / 普通终端）不受此限；只把 `recycle-dir` 指向可写目录，同一份源码立刻正常 |
+| **删除失败的 500 响应体不带原因** | Spring 的 `server.error.include-message` 默认是 `never`，`RecycleExportFailedException` 的 message 被吞掉 → 排查只能靠对照实验 | **待修的小债**：失败原因对用户不可见。不影响 fail-safe 语义，留到后续阶段修 |
 
 ---
 
@@ -508,7 +510,82 @@ package.json                          加 check:data-edit
 
 **验收脚本**
 ```
-.tmp/verify-data-edit-api.py          新增：删/替换/改名 + 缓存失效（含三条关键测试）
+.tmp/verify-data-edit-api.py          新增：删/替换/改名 + 缓存失效（含关键测试）
 .tmp/check-data-edit.py               新增：浏览器验收
 .tmp/check-filter.py 等                改：去掉写死的 246
 ```
+
+---
+
+## 执行记录（2026-09-21 · 本阶段已实施完毕）
+
+> 第 1~11 节是**设计**（写于开工前），本节是**交付后的回填**：实际做成什么 + 实测数字。
+> 实施计划：`docs/superpowers/plans/2026-09-21-data-management.md`（分支 `feat/data-management`）。
+
+### 实际交付的接口
+
+```
+PATCH  /api/tracks/{id}                                        改名（非空、去首尾空格、长度 ≤ 200）
+DELETE /api/tracks/{id}                                        删除（★ 先导出回收站，导出失败就不删）
+POST   /api/tracks/import?mode=&replaceTrackId=&allowSameName=  添加 / 替换（同名走 409）
+```
+
+> 与设计的一处差异：同名**新增**需要一个**显式放行开关** `allowSameName` ——
+> 用户在前端选了"新增为另一条"之后重新提交时带上它，否则后端会一直判定为同名冲突。
+
+**后端新增**：`config/DataProperties`、`service/TrackExporter`（GeoJSON 导出，纯文件操作可无库单测）、
+`service/TrackEditService`（改名 / 删除 / 替换 / 同名检测编排）、`web/dto/TrackConflictResponse`（409 响应体）。
+
+**后端改动**：`web/TrackController`（加 PATCH / DELETE / 扩展 POST import）、`service/ImportService`
+（同名检测、`mode=replace`、`allowSameName`）、`resources/application.yml`（加 `calcite.data.*`）。
+
+**前端新增**：`components/DataManager.vue`（表格 + 行内改名 + 删除确认 + 同名三选一）、
+`components/ConfirmDialog.vue`（通用确认弹窗）、`lib/dataEdit.js`（纯计算）。
+**前端改动**：`components/TrackList.vue`（「导入轨迹」→「**数据编辑**」，上传表单搬进管理视图）、
+`App.vue`（`panelView: 'analysis' | 'manage'` + 数据变更后的刷新编排）。
+
+**验收脚本**：`.tmp/verify-data-edit-api.py`（Python 对拍：删 / 替换 / 改名 + 缓存真的失效了）、
+`.tmp/check-data-edit.py`（浏览器验收）；`check-filter.py` / `check-hotspots.py` /
+`verify-hotspot-api.py` / `verify-similarity-api.py` 等改成**从接口取期望值**，不再写死"246 条"。
+
+### ⭐ 四条关键测试（实测结果）
+
+第 9.2 节设计的是三条，实施时**补了第四条**（"新增导入也要清缓存"）：
+
+| # | 断言 | 实测 |
+|---|---|---|
+| 1 | 删除后相似度必须变 | 删掉第一名（track 39）→ 主线 track 20 的 `compared` **197 → 196** |
+| 2 | 改名后别的主线的匹配列表显示新名字 | 通过（`SimilarityMatch` 带 `name`，不清缓存就还是旧名字） |
+| 3 | 删除前回收站文件真的落盘 | 文件数 +1，文件名带轨迹名与点数，**点数与删除前一致、每个点都带时间** |
+| 4 | 新增导入也要清缓存 | `compared` **196 → 197** |
+
+### fail-safe 实测（对应 4.2）
+
+在回收站目录**写不进去**的环境里调 `DELETE` → **500，轨迹原样保留**；
+只把 `calcite.data.recycle-dir` 换成一个可写目录，**同一份源码立刻能正常删除**。
+→ 既证明 fail-safe 真的生效（导出不成功就绝不删），也证明前面那次 500 是**环境权限**，不是代码问题。
+
+### 数据现状（2026-09-21 实测）
+
+**246 条轨迹 / 286,019 个点 / 37 个热点 / 264 个停留点**
+
+⚠️ **track 39 的 id 现在是 249** —— 原 id 39 那条正是被验收脚本删掉的（关键测试 ① 就是删它），
+重新导入后拿了新 id，**内容与删除前一致**。所以脚本里凡写死轨迹 id 配对的地方都要一并改。
+
+### 回归基线（全绿）
+
+- **后端 JUnit 133 项**（上一阶段 121）
+- **前端 node 134 项**：playback 17 / chart 37 / hotspot 25 / density 25 / similarity 19 / **data-edit 11**
+- **浏览器与接口脚本 11 个全绿**：stay 7 / chart-pixels 10 / **import-pixels 6** / filter 7 / hotspots 17 /
+  density 15 / similarity 17 / **data-edit 19** / verify-hotspot-api 375 / verify-density-api 51 / **verify-similarity-api**
+
+### 顺带修掉的
+
+`verify-similarity-api.py` 里写死的轨迹配对：track 39 被验收脚本删掉后，脚本**除以零**红掉 →
+改成从接口取期望值。**教训同第三阶段**：验收判据不要写死数据量 / 数据 id。
+
+### 本阶段暴露、留给下次的四条教训
+
+完整版记在会话记忆 `_session_context.md` 的「踩坑记录」小节：① `maxTracks` 是"**最多处理几个文件**"，
+不是"最多补几条"；② 跑验收前必须确认后端跑的是**当前源码**（比对 JVM 启动时间 vs class 编译时间）；
+③ 沙箱里写不进 `D:\...\backups\deleted`（环境限制）；④ 删除失败的 500 不带原因（Spring 默认行为，待修）。
