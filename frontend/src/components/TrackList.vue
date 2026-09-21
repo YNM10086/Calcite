@@ -5,6 +5,12 @@
  * 它自己不发请求：数据由父组件 App.vue 传进来，点击时只往外抛一个事件。
  * 这样做的好处是数据流单向、好调试：
  *   App 拿数据 → 传给 TrackList 显示 → 用户点了 → TrackList 喊一声 → App 去处理
+ *
+ * ⚠️ 上传表单（添加数据）**已经不在这里了**，搬到了 DataManager.vue。
+ * 原因：上传会往库里写数据，而"写数据"的那几个动作（添加 / 替换 / 改名 / 删除）
+ * 现在是同一个视图里的一组操作，它们的加载态、错误提示、同名冲突弹窗是共用的 ——
+ * 留在列表里会出现"列表能写数据、别处也能写数据"两套互不知情的状态。
+ * 这里只留一个入口按钮，点了往外抛 `openDataManager`。
  */
 const props = defineProps({
   // 轨迹列表（来自 GET /api/tracks）
@@ -19,8 +25,8 @@ const props = defineProps({
   total: { type: Number, default: 0 },
 })
 
-// 告诉父组件"用户点了哪条" / "用户选了要导入的文件" / "用户改了筛选条件"
-const emit = defineEmits(['select', 'import', 'filter'])
+// 告诉父组件"用户点了哪条" / "用户改了筛选条件" / "用户要进数据编辑视图"
+const emit = defineEmits(['select', 'filter', 'openDataManager'])
 
 /** 来源变了 → 上报（带上当前的条数限制） */
 function onSourceChange(ev) {
@@ -30,14 +36,6 @@ function onSourceChange(ev) {
 /** 条数限制变了 → 上报（带上当前的来源） */
 function onLimitChange(ev) {
   emit('filter', { source: props.sourceFilter, limit: Number(ev.target.value) })
-}
-
-/** 用户选完文件 → 上报给父组件（组件自己不发请求，这是本组件的边界） */
-function onFilePicked(ev) {
-  const file = ev.target.files?.[0]
-  if (file) emit('import', file)
-  // 清空 input，否则连续选同一个文件不会再触发 change
-  ev.target.value = ''
 }
 
 /** 米 → 人看得懂的距离 */
@@ -63,18 +61,16 @@ function formatTime(iso) {
 
 <template>
   <div class="track-list">
-    <div class="import-bar">
-      <label class="import-btn">
-        导入轨迹
-        <input
-          type="file"
-          accept=".gpx,.plt"
-          hidden
-          data-testid="import-input"
-          @change="onFilePicked"
-        />
-      </label>
-      <span class="import-hint">支持 GPX / GeoLife .plt</span>
+    <!-- 进数据编辑视图的入口（原来这里是"导入轨迹"的文件选择器）。
+         上传表单连同它的请求逻辑一起搬去了 DataManager.vue，见文件头注释。 -->
+    <div class="open-bar">
+      <button
+        type="button"
+        class="open-btn"
+        data-testid="open-data-manager"
+        @click="emit('openDataManager')"
+      >数据编辑</button>
+      <span class="open-hint">添加 / 替换 / 改名 / 删除</span>
     </div>
 
     <div class="filter-bar">
@@ -201,28 +197,31 @@ li + li {
   color: #93a4bb;
 }
 
-.import-bar {
+/* 入口按钮（原来放上传表单的位置）——样式沿用被搬走的 .import-btn */
+.open-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
 }
 
-.import-btn {
+.open-btn {
   padding: 5px 12px;
   border: 1px solid rgba(127, 209, 255, 0.45);
   border-radius: 7px;
   background: rgba(127, 209, 255, 0.12);
+  color: inherit;
+  font: inherit;
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.import-btn:hover {
+.open-btn:hover {
   background: rgba(127, 209, 255, 0.25);
 }
 
-.import-hint {
+.open-hint {
   font-size: 11px;
   color: #93a4bb;
 }

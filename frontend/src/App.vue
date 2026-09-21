@@ -8,6 +8,7 @@ import TrackPlayer from './components/TrackPlayer.vue'
 import HotspotList from './components/HotspotList.vue'
 import DensityLegend from './components/DensityLegend.vue'
 import SimilarityList from './components/SimilarityList.vue'
+import DataManager from './components/DataManager.vue'
 import { canPlay, timeRange } from './lib/playback.js'
 import { sortHotspots } from './lib/hotspot.js'
 import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
@@ -483,46 +484,53 @@ async function focusSimilar(trackId) {
   globe.value?.focusOn(mid.lon, mid.lat, 500)
 }
 
-/* ============ 轨迹导入 ============ */
-const importing = ref(false)
-const importMessage = ref('')
+/* ============ 数据编辑视图 ============ */
+/*
+ * 面板有两个视图：
+ *   'analysis' = 原来的四档分析（停留点 / 热点 / 密度 / 相似）
+ *   'manage'   = 数据编辑（添加 / 替换 / 改名 / 删除）
+ * 管理视图**不属于任何分析档**，所以它是整块替换（连四档切换那条一起换掉），
+ * 而不是在某个档下面展开一块 —— 那样用户会以为"数据编辑"是第五个分析档。
+ */
+const panelView = ref('analysis')
+
+function openDataManager() {
+  panelView.value = 'manage'
+}
+
+function backToAnalysis() {
+  panelView.value = 'analysis'
+  // 回到分析视图时清空四档的本地状态 —— 管理视图里可能改过数据（见下）
+  resetAnalysisState()
+}
 
 /**
- * 上传一个轨迹文件。
+ * 数据被改过（删除 / 改名 / 替换 / 新增）之后的统一刷新。
  *
- * 组件只负责"选文件"，请求统一由 App 发 —— 和 selectTrack 一样的规矩：
- * 子组件只显示 + 上报意图，状态和数据都由父组件管。
+ * ⚠️ 一条规则：**数据一改，四个分析功能的结果全部失效** —— 因为它们全都基于全库数据。
+ * 后端那边的缓存已经在改的时候清了（StayPointCache / SimilarityCache），
+ * 这里要清的是【前端已经拿到的旧结果】，否则切回分析档看到的还是改动前的数字。
+ *
+ * 为什么不"只清被改的那一条"：四个档里除了"停留点"以外都是跨轨迹的
+ * （热点 / 密度 / 相似度全都要拿全库去比），改任何一条都可能影响别人 —— 宁可全清。
  */
-async function importTrack(file) {
-  importing.value = true
-  importMessage.value = ''
-  tracksError.value = ''
-  try {
-    const form = new FormData()
-    form.append('file', file)
-    const res = await fetch('/api/tracks/import', { method: 'POST', body: form })
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status)
+function resetAnalysisState() {
+  stays.value = []
+  hotspots.value = []
+  densityCells.value = []
+  similarityMatches.value = []
+  similarityTracks.value = []
+  // 相似度的"分母"元信息（主线名字 / 比过多少条）也是旧数据，一并清掉
+  similarityInfo.value = {}
 
-    await loadTracks()
-    if (data.skippedDuplicate) {
-      importMessage.value = `这条轨迹已经导入过了（id=${data.id}）`
-    } else {
-      const mm = Math.floor(data.durationS / 60)
-      const ss = String(data.durationS % 60).padStart(2, '0')
-      importMessage.value =
-        `导入成功：${data.name} · ${data.pointCount} 点 · ` +
-        `${(data.distanceM / 1000).toFixed(2)} km · ${mm}分${ss}秒` +
-        (data.outlierCount > 0 ? ` · 标记 ${data.outlierCount} 个疑似漂移点` : '')
-    }
-    // 无论是不是重复，都选中这条轨迹，让用户马上看到它
-    await selectTrack(data.id)
-  } catch (e) {
-    importMessage.value = ''
-    tracksError.value = '导入失败：' + e.message
-  } finally {
-    importing.value = false
+  // 当前选中的轨迹可能已经被删了 —— 清掉选中，并切回「停留点」档。
+  // 不清的话地球还画着一条已经不存在的轨迹、面板还写着它的名字（Review Focus 第 1 条）。
+  if (selectedId.value != null && !tracks.value.some((t) => t.id === selectedId.value)) {
+    selectedId.value = null
+    detail.value = null
+    viewMode.value = 'stay'
   }
+  loadTracks()
 }
 
 /**
@@ -601,8 +609,9 @@ async function selectTrack(id) {
       </p>
       <p v-else class="muted health-line">检查中…</p>
 
-      <h2>轨迹列表</h2>
+      <h2 v-if="panelView === 'analysis'">轨迹列表</h2>
       <TrackList
+        v-if="panelView === 'analysis'"
         :tracks="tracks"
         :selected-id="selectedId"
         :loading="tracksLoading"
@@ -611,16 +620,37 @@ async function selectTrack(id) {
         :limit="limit"
         :total="tracksTotal"
         @select="selectTrack"
-        @import="importTrack"
+        @open-data-manager="openDataManager"
         @filter="onFilterChange"
       />
 
-      <p v-if="importing" class="tip">正在导入…</p>
-      <p v-else-if="importMessage" class="import-ok">{{ importMessage }}</p>
+      <!-- 数据编辑视图：整块替换四档分析区（连下面那条四档切换一起换掉），
+           因为管理视图不属于任何分析档。
+           @changed = 数据被改过了 → 清掉四个分析档的旧结果并重新拉列表。
+           @focus  = 点某一行 → 地球飞过去（知道自己在删哪条） -->
+      <DataManager
+        v-else
+        :tracks="tracks"
+        :total="tracksTotal"
+        :selected-id="selectedId"
+        :loading="tracksLoading"
+        :error="tracksError"
+        :source-filter="sourceFilter"
+        :limit="limit"
+        @back="backToAnalysis"
+        @changed="resetAnalysisState"
+        @filter="onFilterChange"
+        @focus="selectTrack"
+      />
 
+      <!-- 四档分析区：管理视图下整块不渲染。
+           ⚠️ 这三处 `panelView === 'analysis'` 必须一起加 ——
+           最后一档原来是 `v-else`，而 `v-else` 在前面条件全不成立时也会渲染，
+           漏掉它会让管理视图底下又多出一个「相似」面板。
+           （没有用一个 <template> 包起来，是为了不动这 90 行原有的缩进。） -->
       <!-- 停留点 / 热点 / 密度 / 相似 四档互斥：四者都会往地球上画画（圈 / 方格 / 线），
            同时画会糊在一起 -->
-      <div class="mode-switch" data-testid="mode-switch">
+      <div v-if="panelView === 'analysis'" class="mode-switch" data-testid="mode-switch">
         <button
           type="button"
           :class="{ on: viewMode === 'stay' }"
@@ -655,7 +685,7 @@ async function selectTrack(id) {
         </button>
       </div>
 
-      <template v-if="viewMode === 'stay'">
+      <template v-if="panelView === 'analysis' && viewMode === 'stay'">
         <h2>停留点<span v-if="stays.length"> （{{ stays.length }} 处）</span></h2>
         <StayPointList
           :stays="stays"
@@ -694,7 +724,7 @@ async function selectTrack(id) {
         />
       </template>
 
-      <template v-else>
+      <template v-else-if="viewMode === 'similar'">
         <h2>相似<span v-if="similarityMatches.length"> （{{ similarityShownCount }} 条）</span></h2>
         <p class="tip">越红 = 和主线重合得越多 · 主线是蓝色那条</p>
         <p v-if="selectedId == null" class="tip" data-testid="similarity-need-track">
@@ -848,12 +878,13 @@ async function selectTrack(id) {
    空间不够时只压缩列表，标题和连通性信息不能被压扁。
    ⚠️ 每新增一个"要自己滚动的列表"都必须加进 :not(...)，否则它会被当成固定内容
    —— flex: 0 0 auto 下矮窗口里列表不滚动、直接被面板的 overflow:hidden 裁掉。
-   .similarity-list 是第四档的列表，同一条规矩。 */
+   .similarity-list 是第四档的列表，同一条规矩；
+   .data-manager 是数据编辑视图（它自己内部还有一层 .rows 在滚动）。 */
 .panel > h1,
 .panel > h2,
 .panel > p,
 .panel > .mode-switch,
-.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend):not(.similarity-list) {
+.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend):not(.similarity-list):not(.data-manager) {
   flex: 0 0 auto;
 }
 
@@ -941,13 +972,5 @@ async function selectTrack(id) {
 
 .status.live {
   color: #7fd1ff;
-}
-
-.import-ok {
-  margin: 6px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
-  color: #7ee0a6;
-  word-break: break-all;
 }
 </style>
