@@ -30,7 +30,7 @@ public interface TrackRepository extends JpaRepository<Track, Long> {
      *
      * <p>Spring Data 的派生查询 —— 方法名翻译成 SQL 的 {@code WHERE name = ? LIMIT 1}。
      */
-    Optional<Track> findFirstByName(String name);
+    List<Track> findAllByName(String name);
 
     /**
      * 按开始时间倒序取一批（最新的在前）。

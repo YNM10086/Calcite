@@ -852,7 +852,11 @@ git commit -m "feat(data): TrackEditService 改名/删除（先导出回收站�
     /**
      * 删掉某条轨迹的全部点（"替换"时先清空旧的）。
      *
-     * <p>派生删除：Spring Data 会翻译成 {@code DELETE FROM track_point WHERE track_id = ?}。
+     * <p><b>⚠️ 必须用 {@code @Modifying + @Query}，不能用派生删除</b>：
+     * Spring Data 的派生删除会<b>先把匹配的实体全部查出来</b>再逐个 {@code em.remove()}，发 <b>N 条 DELETE</b> ——
+     * 替换一条 14186 点的轨迹就是 14186 条 DELETE。这个写法只发<b>一条</b>。
+     *
+     * <p>（原注释说的『派生删除 = DELETE FROM ...』是不准确的。）
      * <b>为什么不用 {@code track_pointRepository.deleteAll(points)}</b>：
      * 那会把几万个实体一个个查出来再删 —— 慢得多，而且内存里要放 1 万多个对象。
      */

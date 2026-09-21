@@ -68,19 +68,20 @@ public class TrackEditService {
     }
 
     /**
-     * 判断"改成 newName"会不会和别的轨迹重名（<b>纯静态</b>）。
+     * 判断"找到的那条同名轨迹"是不是就是我自己（<b>纯静态</b>）。
      *
-     * <p>{@code excludeTrackId} 是<b>必须的</b>：改名时要排除自己，
+     * <p>{@code currentId} 是<b>必须的</b>：改名时要排除自己，
      * 否则"把名字改成和现在一样"会被误判成冲突。
      *
-     * @param currentName   被改的那条现在的名字
-     * @param newName       想改成的新名字
-     * @param currentId     被改的那条的 id
-     * @param otherTrackId  库里另一条同名轨迹的 id（没有同名就传 null）
+     * <p><b>⚠️ 为什么参数表里没有名字</b>：早先的版本带了 {@code currentName} / {@code newName}
+     * 两个参数，但<b>实现里根本没用它们</b> —— "按新名字去库里找"是调用方的事。
+     * 参数表在撒谎比没有参数更糟，所以砍掉了。
+     *
+     * @param currentId    被改的那条的 id
+     * @param otherTrackId 库里另一条同名轨迹的 id（没有同名就传 null）
      * @return true = 会和别人撞名
      */
-    public static boolean isNameConflict(String currentName, String newName,
-                                         Long currentId, Long otherTrackId) {
+    public static boolean isNameConflict(Long currentId, Long otherTrackId) {
         if (otherTrackId == null) {
             return false;
         }
@@ -166,13 +167,16 @@ public class TrackEditService {
     /**
      * 库里有没有另一条同名轨迹（没有就返回 empty）。
      *
-     * <p>用派生查询 {@code findFirstByName} 而不是"把前 500 条拉回来在内存里筛" ——
+     * <p>用派生查询 {@code findAllByName} 而不是"把前 500 条拉回来在内存里筛" ——
      * 后者只看了最新的 500 条，是有边界 bug 的写法。
+     * 也不能用 {@code findFirstByName}：{@code name} 在库里没有唯一约束（设计上允许重名），
+     * 同名 ≥2 条时 {@code findFirst} 可能恰好命中"要排除的那条" → <b>漏报冲突</b>。
      */
     public java.util.Optional<Long> findNameConflict(String name, Long excludeTrackId) {
-        return trackRepository.findFirstByName(name)
+        return trackRepository.findAllByName(name).stream()
                 .filter(t -> !t.getId().equals(excludeTrackId))
-                .map(Track::getId);
+                .map(Track::getId)
+                .findFirst();
     }
 
     // ------------------------------------------------------------ 异常

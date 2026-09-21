@@ -2,6 +2,7 @@ package com.calcite.repository;
 
 import com.calcite.domain.TrackPoint;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -29,7 +30,9 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
      * <p><b>⚠️ 必须在一个事务里调用</b>（调用它的 {@code ImportService.replaceInPlace}
      * 上已经有 {@code @Transactional}）—— 删除类方法没有事务会直接抛异常。
      */
-    void deleteByTrackId(Long trackId);
+    @Modifying
+    @Query("DELETE FROM TrackPoint p WHERE p.trackId = :trackId")
+    void deleteByTrackId(@Param("trackId") Long trackId);
 
     /**
      * 一次查出多条轨迹的全部点（热点分析用）。
