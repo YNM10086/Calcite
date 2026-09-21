@@ -95,3 +95,10 @@ calcite:
     # 默认最多返回多少条（按相似度倒序）
     default-limit: 50
     max-limit: 500
+
+  # 数据管理（删除 / 改名 / 同名替换）
+  data:
+    # 删除前的自动导出目录。**删之前先导出，导出失败就不删**（fail-safe）
+    recycle-dir: D:\Calcite-note\backups\deleted
+    # 轨迹显示名的长度上限
+    max-name-length: 200
