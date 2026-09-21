@@ -43,7 +43,16 @@ class ImportServiceTest {
                 new GpxImporter(),
                 new GeoLifeImporter(),
                 // 这些测试只走单文件路径，批量导入用的事务模板用不到，给个 mock 就够
-                mock(org.springframework.transaction.PlatformTransactionManager.class));
+                mock(org.springframework.transaction.PlatformTransactionManager.class),
+                // 三个新协作者一律用 mock。
+                // ⚠️ 这里【故意不用真实实例】：以前 ImportService 里有个 6 参兼容构造器，
+                // 它在生产类内部自己 new StayPointCache()/SimilarityCache() —— 那些实例和 Spring 容器里的
+                // 不是同一个对象，走到那条路径就会出现"清缓存清的不是真缓存"（界面继续显示旧数据且不报错）。
+                // 那个构造器已经删掉了，所以缺什么依赖就在这里补 mock，绝不回头去放松生产类。
+                // 这 7 个用例只走 importBytes/解析路径，TrackEditService 的同名检测不会被触发。
+                mock(TrackEditService.class),
+                mock(StayPointCache.class),
+                mock(SimilarityCache.class));
     }
 
     @Test

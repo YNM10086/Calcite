@@ -1,6 +1,5 @@
 package com.calcite.service;
 
-import com.calcite.config.DataProperties;
 import com.calcite.domain.Track;
 import com.calcite.domain.TrackPoint;
 import com.calcite.repository.TrackPointRepository;
@@ -18,7 +17,6 @@ import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Point;
 import org.locationtech.jts.geom.PrecisionModel;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -66,20 +64,38 @@ public class ImportService {
     /** 替换某条轨迹后要清它自己的停留点缓存 */
     private final StayPointCache stayPointCache;
     /**
-     * 相似度缓存。<b>替换</b>某条轨迹会让别的主线的匹配列表变化 → 必须全清。
+     * 相似度缓存。<b>任何"让库里的轨迹集合或某条轨迹的几何发生变化"的操作都会让它整体失效</b>：
+     * <ul>
+     *   <li><b>替换</b>一条轨迹 → 别的轨迹与它的匹配结果变了 → 全清（见 {@link #replaceInPlace}）</li>
+     *   <li><b>新增</b>一条轨迹 → 所有主线的候选集都多了一条
+     *       （主线 20 原来是"和 197 条比过"，加一条就该是 198 条）→ 同样必须全清</li>
+     * </ul>
      *
-     * <p>（纯"新增一条"目前<b>不清</b>：那是 M2 遗留的欠账，见 {@code SimilarityCache} 的类注释，
-     * 本任务不扩大范围去改它。）
+     * <p>新增那一路的清理点<b>放在 {@link #persist} 里</b>（唯一的"新增入库"漏斗），
+     * 而不是分别写在 {@code importUpload} 与 {@code importBytes} 两处 —— 后者容易只改一处，
+     * 将来再加导入入口也会自动覆盖。
+     *
+     * <p><b>{@link StayPointCache} 则不需要为"新增"做任何事</b>：新轨迹在它里面本来就没有条目，
+     * 下次请求自然算出来。
      */
     private final SimilarityCache similarityCache;
 
     /**
-     * 生产用构造器（Spring 注入）。
+     * 唯一的构造器（Spring 注入；只有一个构造器时 Spring 会自动用它，不必标 {@code @Autowired}）。
      *
-     * <p><b>为什么这里要显式标 {@code @Autowired}</b>：本类还有下面那个 6 参构造器，
-     * 一个类有多个构造器时 Spring 不再自动挑，必须指明用哪个。
+     * <p><b>⚠️ 为什么本类【只允许存在这一个】构造器</b>：
+     * 这里曾经有一个"6 参兼容构造器"（为了不改单测而存在），它在类<b>内部</b>自己
+     * {@code new StayPointCache()} / {@code new SimilarityCache()} / {@code new TrackEditService(...)}
+     * —— 那几个实例和 Spring 容器里管理的<b>根本不是同一个对象</b>。
+     * 后果非常隐蔽：一旦有代码路径走到那个构造器，就会"<b>清了缓存，但清的不是真的那个</b>"，
+     * 界面继续显示已经被删掉/被替换掉的旧数据，<b>而且不报任何错、日志里也没有痕迹</b>，
+     * 只能靠肉眼发现数据不对。所以它不是一个"方便测试"的小技巧，而是一颗<b>静默的数据正确性地雷</b>。
+     *
+     * <p>正确做法就是现在这样：<b>依赖全部从外面传进来</b> ——
+     * 生产由容器注入真 Bean，测试注入 mock。
+     * 单测需要新的依赖时，<b>改单测</b>（{@code ImportServiceTest} 就是这么改的），
+     * 而不是在生产类里留一个自己拼依赖的后门。
      */
-    @Autowired
     public ImportService(TrackRepository trackRepository,
                          TrackPointRepository trackPointRepository,
                          TrackCleaner cleaner,
@@ -98,27 +114,6 @@ public class ImportService {
         this.trackEditService = trackEditService;
         this.stayPointCache = stayPointCache;
         this.similarityCache = similarityCache;
-    }
-
-    /**
-     * 6 参构造器：<b>只为让现有的 {@code ImportServiceTest} 不改一行</b>（本任务限定只改三个文件）。
-     *
-     * <p><b>为什么不用 {@code null} 顶替那三个新依赖</b>：那样单测里一旦走到
-     * "同名检测 / 替换"就会 NPE —— 一个只在测试里存在的空指针地雷，比多一个构造器糟糕得多。
-     * 这里 new 的是<b>真实可用</b>的协作者（缓存是各自独立的新实例，对单测来说正是想要的语义），
-     * 所以拿这个构造器造出来的对象在任何路径上都是完整可用的。
-     */
-    public ImportService(TrackRepository trackRepository,
-                         TrackPointRepository trackPointRepository,
-                         TrackCleaner cleaner,
-                         GpxImporter gpxImporter,
-                         GeoLifeImporter geoLifeImporter,
-                         PlatformTransactionManager txManager) {
-        this(trackRepository, trackPointRepository, cleaner, gpxImporter, geoLifeImporter, txManager,
-                new TrackEditService(trackRepository, trackPointRepository,
-                        new TrackExporter(new DataProperties()),
-                        new StayPointCache(), new SimilarityCache(), new DataProperties()),
-                new StayPointCache(), new SimilarityCache());
     }
 
     /**
@@ -161,7 +156,7 @@ public class ImportService {
      *
      * <p><b>⚠️ 为什么替换模式下【不查】同名</b>：重名在设计上就是允许的（用户可以故意留两个同名版本），
      * 替换时用户已经明确指定了"替换哪一条"，此时再拦一次同名只会让人没法操作。
-     * 改名的唯一性同理，不校验。
+     * （替换本身<b>不改名</b>，名字永远是库里原来那个 —— 见 {@link #replaceInPlace}。）
      *
      * @param mode           {@code append}（默认，新增）或 {@code replace}（替换已有的）
      * @param replaceTrackId 当 {@code mode=replace} 时，要替换哪一条
@@ -191,7 +186,8 @@ public class ImportService {
 
         Parsed parsed = parse(content, fallbackName);
 
-        // ④ 哈希是新的、但名字已存在 → 409 SAME_NAME（把"要替换的那条"排除掉，否则改名成自己会误报）
+        // ④ 哈希是新的、但名字已存在 → 409 SAME_NAME
+        //    （把"要替换的那条"排除掉：它是本次操作的目标，不该被当成"抢了别人的名字"）
         Optional<Long> conflict = trackEditService.findNameConflict(parsed.name(), replaceTrackId);
         if (conflict.isPresent() && !replace) {
             Track existing = trackRepository.findById(conflict.get()).orElseThrow();
@@ -295,6 +291,15 @@ public class ImportService {
         Track saved = trackRepository.save(track);
 
         savePoints(saved.getId(), cleaned);
+
+        // ⚠️ 新增一条轨迹会让【所有主线】的相似度结果失效 —— 候选集从 N 变成 N+1，
+        // 旧缓存里的 compared / 名次全是过期的（SimilarityCache 的类注释里本来就写着
+        // "导入新轨迹之后应该调用 invalidateAll()"，这条欠账在这里兑现）。
+        // 放在 persist 里而不是 importUpload 的"纯新增"分支：persist 是唯一的"新增入库"出口，
+        // 网页上传的 append 与 importBytes（含 GeoLife 目录批量导入）都从这里过，一处覆盖全部。
+        // 注意：StayPointCache 不用清 —— 新轨迹在缓存里本来就没有条目，下次请求自然会算。
+        similarityCache.invalidateAll();
+
         return summarize(saved.getId(), saved.getName(), cleaned, false, "导入成功");
     }
 
@@ -309,6 +314,9 @@ public class ImportService {
      *
      * <p><b>为什么要校验来源一致</b>：GPX（个人采集）和 GeoLife（公开数据集）语义不同，
      * 允许互相替换会让 {@code source} 这个筛选维度失去意义。
+     *
+     * <p><b>⚠️ 替换不改名字</b>：更新的是数据（geom / 点数 / 时长 / external_id / 时间范围，
+     * 见设计文档 §2.3），名字保持库里原样 —— 详见方法体里的注释。
      *
      * <p><b>⚠️ 为什么删旧点、写新点必须在同一个事务里</b>：中间任何一步失败都要整体回滚，
      * 否则会留下一条<b>没有点的轨迹</b>（列表里还在、点开是空的）。
@@ -329,7 +337,10 @@ public class ImportService {
         // 一条 SQL 删掉旧点（不是把几万个实体查出来逐个删 —— 见 TrackPointRepository.deleteByTrackId）
         trackPointRepository.deleteByTrackId(trackId);
 
-        track.setName(parsed.name());
+        // ⚠️ 这里【故意不 setName】—— 替换是"换数据"，不是"改名字"。
+        // 设计文档 §2.3 规定替换更新的字段是：geom、点数、时长、external_id、时间范围，【没有 name】。
+        // 反例：拿「资料三.gpx」去替换「资料二」，名字必须仍然是「资料二」，
+        // 否则用户只是想把内容换掉，却连带把名字改了（前端选中态还停在这条 id 上，看不出改名）。
         track.setExternalId(externalId);
         track.setStartTime(pts.get(0).recordedAt());
         track.setEndTime(pts.get(pts.size() - 1).recordedAt());
@@ -339,11 +350,12 @@ public class ImportService {
         savePoints(trackId, cleaned);
 
         // 数据变了 → 两个缓存都要清：停留点是"这条轨迹的点"的函数，
-        // 而相似度结果里也带着这条轨迹的名字与几何
+        // 而相似度结果里也带着这条轨迹的几何
         stayPointCache.invalidate(trackId);
         similarityCache.invalidateAll();
 
-        return summarize(trackId, parsed.name(), cleaned, false, "替换成功");
+        // 名字用【库里原有的】，与上面"不改名"保持一致（返回给前端的摘要不能报出一个并不存在的名字）
+        return summarize(trackId, track.getName(), cleaned, false, "替换成功");
     }
 
     /** 把清洗结果写进 track 的派生字段与几何（新增与替换<b>共用</b>，免得两处各写一遍还漏字段） */
