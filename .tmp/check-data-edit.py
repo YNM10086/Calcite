@@ -51,6 +51,9 @@ BASE = "http://localhost:8080"
 URL_TMPL = "http://localhost:5173/?track={tid}"
 VIEW_W, VIEW_H = 1600, 900
 results = []
+# 异常兜底用：一旦改了名就先登记在这里，正常改回去之后再清空。
+# 这样即使脚本在"改名之后、改回之前"因为任何原因中断，收尾也能把名字恢复。
+PENDING = {}
 
 
 def check(name, ok, detail=""):
@@ -253,6 +256,8 @@ async def main():
             await inp.press("Enter")
 
         await try_(f"界面改名为 {NEW_NAME!r}", lambda: do_rename(NEW_NAME))
+        # 从这里到"改回原名"之间，库里那条轨迹的名字是临时值 —— 先登记，异常时兜底恢复
+        PENDING.update(id=entry["id"], orig=entry["name"])
 
         # 保存后 DataManager 只 emit('changed')，由 App 重拉列表 —— 所以这里轮询等新名字进 DOM
         dom_ok = False
@@ -297,6 +302,8 @@ async def main():
               reverted and back_ok,
               f"界面回原名={reverted}；接口 name={None if api_back is None else api_back['name']!r}"
               f"（期望 {entry['name']!r}）")
+        if back_ok:
+            PENDING.clear()          # 名字已经回到原样，异常兜底不再需要
 
         # ---------- 7. 点删除弹确认框，文案含接口给的真实点数（⚠️ 不点确认）----------
         rows_before = await page.eval_on_selector_all('[data-testid="dm-row"]', "els => els.length")
@@ -395,6 +402,14 @@ except Exception as e:
     # 不静默：异常也要把已经跑出来的判据打出来，否则调试时只看到一句 traceback
     traceback.print_exc()
     print(f"\n⚠️ 脚本异常中止：{type(e).__name__}: {e}")
-    print("   （改名的清理现场逻辑在正常路径里；若在这里中断，请用")
-    print("     .tmp/verify-data-edit-api.py 的改名用例核对库里那条轨迹的名字）")
+
+# 收尾兜底：万一是在"改名之后、改回之前"中断的，这里把库里那条轨迹的名字恢复。
+if PENDING.get("id"):
+    try:
+        patch_name(PENDING["id"], PENDING["orig"])
+        print(f'   ↳ 兜底：已把 track {PENDING["id"]} 的名字改回 {PENDING["orig"]!r}')
+    except Exception as e2:
+        print(f'   ↳ ⚠️ 兜底改回名字也失败：{type(e2).__name__}: {e2}')
+        print(f'     请手工核对 track {PENDING["id"]} 的名字是否还是 {PENDING["orig"]!r}')
+
 sys.exit(report())
