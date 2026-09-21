@@ -17,6 +17,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import date
 
 BASE = "http://localhost:8080"
 PSQL = r"E:\PostgreSQL\bin\psql.exe"
@@ -83,17 +84,28 @@ def main():
 
     # ================= A. 对称性（Review Focus 第 4 条）=================
     print("=== A. 对称性 ===")
-    for a, b in [(20, 39), (6, 18), (20, 35)]:
+    # ⚠️ 配对**当场从接口取**，不写死 trackId。
+    # 旧版写死了 track 39，而 39 后来被"数据编辑"功能删掉了 —— 于是 `sa` 和 `sb`
+    # 双双是 None、`None == None` 为真，**对称性这一项直接假绿**；
+    # 紧接着的 `if sa is not None` 又让第二项整段静默跳过。
+    # 写死具体轨迹 id 和写死条数是同一类错误：把"某一次的数据"当判据。
+    # 现在改成：从主线自己的结果里取前两名当对拍对象（必然存在、必然非零），
+    # 而且加"取不到就判红"的护栏 —— 不是取不到就跳过。
+    for a in (20, 6):
         ra = get(f"/api/analysis/similarity?trackId={a}&limit=500")
-        rb = get(f"/api/analysis/similarity?trackId={b}&limit=500")
-        sa = next((m["similarity"] for m in ra["matches"] if m["trackId"] == b), None)
-        sb = next((m["similarity"] for m in rb["matches"] if m["trackId"] == a), None)
-        check(f"similarity({a},{b}) == similarity({b},{a})", sa == sb,
-              f"{sa} vs {sb}")
-        if sa is not None:
-            fa = next(m["forwardPct"] for m in ra["matches"] if m["trackId"] == b)
-            rbv = next(m["reversePct"] for m in rb["matches"] if m["trackId"] == a)
-            check(f"fwd({a},{b}) == rev({b},{a})", fa == rbv, f"{fa} vs {rbv}")
+        pairs = [m["trackId"] for m in ra["matches"][:2]]
+        check(f"主线 {a} 至少有 2 个非零匹配（对称性才有对象可比）",
+              len(pairs) == 2, f"matches={len(ra['matches'])} 前两名={pairs}")
+        for b in pairs:
+            ma = next(m for m in ra["matches"] if m["trackId"] == b)
+            rb = get(f"/api/analysis/similarity?trackId={b}&limit=500")
+            mb = next((m for m in rb["matches"] if m["trackId"] == a), None)
+            check(f"similarity({a},{b}) == similarity({b},{a})",
+                  mb is not None and ma["similarity"] == mb["similarity"],
+                  f"{ma['similarity']} vs {None if mb is None else mb['similarity']}")
+            check(f"fwd({a},{b}) == rev({b},{a})",
+                  mb is not None and ma["forwardPct"] == mb["reversePct"],
+                  f"{ma['forwardPct']} vs {None if mb is None else mb['reversePct']}")
 
     # ================= B. 「被包含」不能被误判 =================
     print("\n=== B. 被包含的一小段（设计文档 2.3 节的坑）===")
@@ -196,8 +208,18 @@ def main():
 
     # ================= E. compared / limit / 排序 =================
     print("\n=== E. compared / limit / 排序 ===")
-    check("compared 是分母，不受 limit 影响", r["compared"] > 50,
-          f"compared={r['compared']}")
+    # ⚠️ 原来写死的是「compared 必须大于一个人为挑的地板值」（当时有近 200 条候选，
+    # 就随手拿 50 当了地板）。那种判据既说明不了问题，数据一变又照样红。
+    # 换成**同样强、而且与数据量无关**的三条：
+    #   ① compared 就是"全量候选数" —— 完整 matches 的条数必须等于它（limit 没参与它的计算）
+    #   ② 它不可能超过"除主线以外的轨迹总数"（物理上界）
+    #   ③ 换 limit=3 时它一个字都不许变，而 matches 恰好被截到 3 条（下一项）
+    total_tracks = get("/api/tracks?limit=1")["total"]
+    check("compared 是分母（= 全量候选数），且不超过「其它轨迹」的总数",
+          len(r["matches"]) == min(r["compared"], 500)
+          and 1 <= r["compared"] <= total_tracks - 1,
+          f'compared={r["compared"]} / 返回 matches={len(r["matches"])}（查询上限 500）'
+          f' / 库内轨迹总数={total_tracks}')
     small = get("/api/analysis/similarity?trackId=20&limit=3")
     check("limit=3 只截返回条数", len(small["matches"]) == 3 and small["compared"] == r["compared"],
           f"matches={len(small['matches'])} compared={small['compared']}")
@@ -213,9 +235,15 @@ def main():
     wide = get("/api/analysis/similarity?trackId=20&toleranceM=200&limit=500")
     check("容差 200 米时 compared 不少于 50 米的",
           wide["compared"] >= r["compared"], f"200m={wide['compared']} 50m={r['compared']}")
-    top50 = next((m["similarity"] for m in r["matches"] if m["trackId"] == 39), 0)
-    top200 = next((m["similarity"] for m in wide["matches"] if m["trackId"] == 39), 0)
-    check("容差变大后第一名相似度不会下降", top200 >= top50, f"50m={top50} 200m={top200}")
+    top50 = r["matches"][0]                     # 50 米下的第一名（接口已按相似度降序）
+    top200 = next((m for m in wide["matches"] if m["trackId"] == top50["trackId"]), None)
+    # ⚠️ 这里原来写死了 track 39，而 39 已被删除 → 两个 `next(..., 0)` 都拿到 0 →
+    # `0 >= 0` 恒真，这条判据**形同虚设**。现在拿"50 米下的第一名"去 200 米的结果里找它，
+    # **找不到就判红**（容差变大反而丢掉一个相似轨迹，那才是真的回归）。
+    check("容差变大后原先的第一名相似度不会下降",
+          top200 is not None and top200["similarity"] >= top50["similarity"],
+          f'track {top50["trackId"]}：50m={top50["similarity"]} '
+          f'200m={None if top200 is None else top200["similarity"]}')
 
     # ================= G. 边界与错误 =================
     print("\n=== G. 边界与错误 ===")
@@ -237,11 +265,14 @@ def main():
     #   ① /api/tracks 返回的是 {total, items}，不是 {tracks} —— 键名写错会让这一项
     #      **静默跳过**（输出看着像无害的 info，实际覆盖为 0）。
     #   ② 不能断言"GPX 轨迹必然孤立" —— 3 条 GPX 是同一场地跑的，它们**互相之间是相似的**。
-    #   ③ 实测当前 246 条轨迹**每一条都至少有 1 个邻居**，把容差压到 1 米才有个别孤立的。
+    #   ③ 实测容差 50 米下**每一条都至少有 1 个邻居**，把容差压到 1 米才有个别孤立的。
     #      所以断言要写成"扫描几条、至少有一条返回空数组"，而不是指定某一条。
-    listing = get("/api/tracks?limit=200")
+    # ⚠️ 顺带把 limit 也改成从总数算：旧版写死 `limit=200`，而库里有近 250 条时
+    #    它只会看到前 200 条 —— **静默**少看，正是上面第 ① 条警告的那类坑。
+    listing = get(f"/api/tracks?limit={min(total_tracks, 500)}")
     items = listing.get("items", [])
-    check("能取到轨迹列表（键名必须是 items）", len(items) > 0,
+    check("能取到轨迹列表（键名必须是 items），且看到的就是全库",
+          len(items) > 0 and len(items) == min(total_tracks, 500),
           f"拿到 {len(items)} 条（total={listing.get('total')}）")
     probe = items[:6]
     empty_n, ok_n = 0, 0
@@ -266,10 +297,33 @@ def main():
               f"trackId={items[0]['id']} compared={g2['compared']}")
     # ================= H. daysAway =================
     print("\n=== H. daysAway ===")
-    m39 = next((m for m in r["matches"] if m["trackId"] == 39), None)
-    if m39:
-        check("track 20 vs 39 相差 19 天", m39["daysAway"] == 19, str(m39["daysAway"]))
-        check("startTime 是 ISO-8601 UTC", m39["startTime"].endswith("Z"), m39["startTime"])
+    # ⚠️ 原来写死"track 20 vs 39 相差 19 天"，而 track 39 已被删除 →
+    # `next(..., None)` 拿到 None → **整个 H 段被静默跳过**（正是 G 段警告过的那类坑：
+    # 输出看着像没事，其实这一段一个判据都没跑）。
+    # 现在改成**独立重算**：daysAway 的定义就是"两条轨迹的 startTime 按 UTC 日期相差几天"
+    # （`SimilarityMath.daysBetween` = `|DAYS.between(a.toLocalDate(), b.toLocalDate())|`），
+    # 于是对返回的**每一条**匹配都重算一遍再比对 —— 比原来那一条数据指纹强得多，且与数据无关。
+    base = next((it for it in items if it["id"] == 20), None)
+    check("能从列表接口取到主线 20 的 startTime（独立重算的前提）",
+          base is not None and bool(base.get("startTime")),
+          f'startTime={None if base is None else base.get("startTime")}')
+    bad_days, bad_iso = 0, 0
+    for m in r["matches"]:
+        if not (m["startTime"] or "").endswith("Z"):
+            bad_iso += 1
+            continue
+        if base is not None and base.get("startTime"):
+            want = abs((date.fromisoformat(m["startTime"][:10])
+                        - date.fromisoformat(base["startTime"][:10])).days)
+            if m["daysAway"] != want:
+                bad_days += 1
+                print(f"    info: track {m['trackId']} daysAway={m['daysAway']} 重算={want}"
+                      f'（{base["startTime"][:10]} vs {m["startTime"][:10]}）')
+    check("每条匹配的 daysAway 都等于独立重算的 UTC 日期差",
+          base is not None and len(r["matches"]) > 0 and bad_days == 0,
+          f"{len(r['matches'])} 条里 {bad_days} 条对不上")
+    check("所有 startTime 都是 ISO-8601 UTC（以 Z 结尾）",
+          len(r["matches"]) > 0 and bad_iso == 0, f"{bad_iso} 条格式不对")
 
     print(f"\n{'全部通过' if not fails else str(len(fails)) + ' 项失败: ' + ', '.join(fails)}")
     if fails:

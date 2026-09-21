@@ -43,7 +43,14 @@ def main():
     # ---- 1. 独立算一遍 ----
     stays = []
     track_ids = []
-    for t in get("/api/tracks?limit=500")["items"]:
+    # ⚠️ 列表接口的 limit 上限是 500（TrackController 里 `Math.min(limit, 500)`），
+    # 而且**没有 offset 分页** —— 所以先问一次总数，再显式断言"总数没超过上限"。
+    # 否则数据涨过 500 之后，这个脚本会**静默地只算一部分轨迹**，
+    # 算出来的热点数当然对不上，而且看不出是脚本自己看不到全库。
+    total_tracks = get("/api/tracks?limit=1")["total"]
+    check("轨迹总数未超过列表接口上限 500（否则本脚本只能看到一部分）",
+          total_tracks <= 500, f"total={total_tracks}")
+    for t in get(f"/api/tracks?limit={min(total_tracks, 500)}")["items"]:
         track_ids.append(t["id"])
         for s in get(f"/api/tracks/{t['id']}/stay-points").get("stays", []):
             stays.append({
@@ -121,7 +128,7 @@ def main():
 
     # ---- 4. 孤立点个数能自证 ----
     # ⚠️ 这里原来写死的是 `== 1`（旧数据下恰好只有 1 个孤立停留点）。
-    # 2026-09-17 数据从 25 条扩到 246 条后，孤立点变成 33 个 —— 判据直接假红。
+    # 2026-09-17 数据扩充之后孤立点变成几十个 —— 判据直接假红。
     # 注意：上一轮的"清理写死数字"扫描（模式是 == 3 / 共 25 / 正好 3）**没扫到 == 1**，
     # 所以这条漏网了。教训：**扫描写死数字的模式不能只列已知的那几个**，
     # 要按"数字字面量出现在比较里"这种形态去找。

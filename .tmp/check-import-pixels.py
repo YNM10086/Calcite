@@ -6,8 +6,8 @@ Cesium 的几何体在 web worker 里异步生成，虚拟时钟会让截图提�
 
 ⚠️ 数据管理改版后本脚本相应调整（2026-09-21），**断言一条没减**，只是换了入口和读取位置：
   1. 上传入口搬进了「数据编辑」视图 —— 先点 data-testid="open-data-manager" 进管理视图，
-     再看管理视图里的 `<input type="file">`（testid 仍然是 import-input）；
-  2. 导入结果不再是页面上的 `.import-ok` 那一行（那个类已经删掉了），
+     再看管理视图里那个 `<input type="file">`（它自己的 testid 没变，见下面的选择器）；
+  2. 导入结果不再是列表下方那一行文字（承载它的旧 class 已经删掉了），
      改成 ConfirmDialog 弹窗（data-testid="confirm-dialog"，正文在 `.line` 里）；
   3. 导入成功后 App 只重拉列表（@changed → resetAnalysisState），**不再自动选中**那条轨迹。
      所以这里要显式去管理视图里点一下刚导入的那一行 —— 否则后面两条断言
@@ -61,7 +61,7 @@ async def main():
 
         # --- 2. 上传真实 GPX（2342 点，之前已导入过，所以会走幂等分支）---
         await page.set_input_files('[data-testid="import-input"]', GPX)
-        # 导入结果的正文原来在 .import-ok，现在在弹窗的 .line 里
+        # 导入结果的正文以前是列表下方那一行文字，现在改在弹窗的 .line 里
         await page.wait_for_selector('[data-testid="confirm-dialog"] .line', timeout=60000)
         lines = await page.eval_on_selector_all(
             '[data-testid="confirm-dialog"] .line', "els => els.map(e => e.textContent.trim())"

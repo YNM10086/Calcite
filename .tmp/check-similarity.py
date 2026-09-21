@@ -23,7 +23,7 @@ r"""轨迹相似度（M2 第四阶段）的浏览器验收。
 ① 空态有两支，testid 不同（`SimilarityList.vue`）：
      matches 为空            → `similarity-empty`          （一个邻居都没有）
      matches 非空但被筛光    → `similarity-none-in-filter` （有匹配，只是没到阈值）
-   `similarity-empty` 在当前真实数据上**不可达** —— 实测 246 条轨迹在容差 50 米下
+   `similarity-empty` 在当前真实数据上**不可达** —— 实测容差 50 米下
    **每一条都至少有一个邻居**（把容差压到 1 米才有个别孤立的），所以**不写那条注定红的断言**，
    只用 note() 说明。第二种空态则**真的造出来**：先从接口找一条「matches 非空、但最高相似度 < 90%」
    的主线，用 `?track=<aux>` 打开它，再把筛选切到 90% —— 这时列表里一条都不显示，
@@ -446,7 +446,7 @@ async def main():
                   f"｜empty={aux_dom['hasEmpty']}｜条数={aux_dom['items']}"
                   f"｜提示「{aux_dom['noneText'][:44]}」")
         note("另一支 similarity-empty（一个邻居都没有）在真实数据上不可达：容差 50 米下"
-             "246 条轨迹每条至少 1 个邻居（要压到 1 米才有个别孤立的），"
+             "每条轨迹至少 1 个邻居（要压到 1 米才有个别孤立的），"
              "而前端固定不传 toleranceM —— 所以它只在第二阶段的接口级脚本里被覆盖，"
              "这里不写注定红的断言。")
 
