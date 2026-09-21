@@ -22,6 +22,16 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
     long countByTrackId(Long trackId);
 
     /**
+     * 删掉某条轨迹的全部点（"替换"时先清空旧的）。
+     *
+     * <p>派生删除：Spring Data 按方法名翻译出 {@code WHERE track_id = ?} 的删除条件。
+     *
+     * <p><b>⚠️ 必须在一个事务里调用</b>（调用它的 {@code ImportService.replaceInPlace}
+     * 上已经有 {@code @Transactional}）—— 删除类方法没有事务会直接抛异常。
+     */
+    void deleteByTrackId(Long trackId);
+
+    /**
      * 一次查出多条轨迹的全部点（热点分析用）。
      *
      * <p><b>⚠️ {@code ORDER BY p.trackId ASC, p.seq ASC} 不能省。</b>

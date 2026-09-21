@@ -26,6 +26,13 @@ public interface TrackRepository extends JpaRepository<Track, Long> {
     Optional<Track> findByExternalId(String externalId);
 
     /**
+     * 按名字找一条轨迹（同名检测用）。
+     *
+     * <p>Spring Data 的派生查询 —— 方法名翻译成 SQL 的 {@code WHERE name = ? LIMIT 1}。
+     */
+    Optional<Track> findFirstByName(String name);
+
+    /**
      * 按开始时间倒序取一批（最新的在前）。
      *
      * <p>为什么这里用 {@code @Query} 而不是靠方法名派生：方法名里同时写 {@code OrderBy}
