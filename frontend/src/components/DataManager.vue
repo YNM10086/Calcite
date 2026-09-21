@@ -218,9 +218,15 @@ const uploading = ref(false)
 /**
  * 上一次"因为同名被拦下来"的身份（轨 id + 文件指纹）。
  *
- * ⚠️ 这是**防死循环的护栏**，不是业务逻辑，理由见 submitUpload 里那段注释：
- * 后端 `mode=append` 每次都会重新撞同一个同名检测，所以「新增为另一条」
- * 再提交一次**必然**还是 409 —— 不拦一下，用户就会在同一个弹窗上无限循环。
+ * ⚠️ 这是**防死循环的兜底**，不是业务逻辑。
+ * 「新增为另一条」现在已经会带 `allowSameName=true` 重新提交、后端必然放行
+ * （见 submitUpload 的注释），所以同一个冲突**不会出现第二次**、这段护栏正常打不到。
+ * 但它仍然留着，有两个理由：
+ *   ① 它不影响正确路径 —— 第一次撞 409 时判据不相等，三个按钮照样齐；
+ *   ② 万一连的是**没带 allowSameName 的旧版后端**，它还能把用户从死循环里捞出来
+ *      （顶多少一个按钮、并说明原因，比"点了没反应"好）。
+ * 另外 `.tmp/check-data-manager-sfc.mjs` §4b 用源码扫描钉住了这段结构，
+ * 要删就得同时改那个脚本 —— 不在本次改动的文件范围内，故保持原样。
  */
 let lastConflictKey = ''
 
@@ -239,8 +245,20 @@ async function onUpload(ev) {
  *
  * ⚠️ 用户选「替换它」时**不需要重新选文件** —— pendingFile 还在内存里，
  * 拿同一个 File 对象再提交一次即可（File 是不可变的，重发不会"用掉"它）。
+ *
+ * @param mode          'append'（新增）| 'replace'（替换）
+ * @param replaceTrackId mode=replace 时要替换哪一条
+ * @param allowSameName 用户是否**已经明确表态**"就要新增一条同名的"（默认 false）。
+ *
+ *   ⚠️ 这个参数是「新增为另一条」能走通的唯一开关，理由要说清楚：
+ *   同名冲突是**两段式**交互 —— 第一次上传（false）后端返回 409 让用户选；
+ *   用户看过那个 409、点「新增为另一条」之后重新提交时**必须**带 true。
+ *   两次提交的 mode 都是 'append'、replaceTrackId 都是 null，
+ *   后端只靠这两个值分不出"要不要拦"，于是每次都会返回同一个 409 ——
+ *   用户就会在同一个弹窗里无限打转（曾经的真实 bug）。
+ *   所以由前端在这里**显式声明意图**：首次上传 false、点过「新增为另一条」true。
  */
-async function submitUpload(mode, replaceTrackId) {
+async function submitUpload(mode, replaceTrackId, allowSameName = false) {
   const file = pendingFile.value
   if (!file) return
 
@@ -250,6 +268,8 @@ async function submitUpload(mode, replaceTrackId) {
     fd.append('file', file)
     const params = new URLSearchParams({ mode })
     if (replaceTrackId != null) params.set('replaceTrackId', String(replaceTrackId))
+    // 只有用户明确选过「新增为另一条」才带上；不带时后端按 false 处理（首次上传照旧拦 409）
+    if (allowSameName) params.set('allowSameName', 'true')
 
     const res = await fetch(`/api/tracks/import?${params}`, { method: 'POST', body: fd })
     const data = await res.json().catch(() => ({}))
@@ -263,19 +283,19 @@ async function submitUpload(mode, replaceTrackId) {
       const sameContent = data.conflictType === 'SAME_CONTENT'
 
       /*
-       * ⚠️ 死循环护栏（临时措施，等后端补上"允许同名新增"就该删掉）：
+       * ⚠️ 死循环兜底（正常路径打不到，见 lastConflictKey 的注释）：
        *
-       * 设计文档 2.2 第 ⑤ 条写的是「"新增" → 重新提交，带 mode=append」，
-       * 但后端 `ImportService.importUpload` 里那句同名检测是
-       * `if (conflict.isPresent() && !replace) throw 409` ——
-       * mode=append 时 `replace` 恒为 false、`replaceTrackId` 恒为 null
-       * （`findNameConflict(name, null)` 谁也排除不掉），
-       * 所以**同名 + 新增这条组合永远拿不到 200**，只会再返回一次一模一样的 409。
+       * 历史 bug 的成因写在这里，免得以后有人把 allowSameName 又删了：
+       * 后端同名检测原来是 `if (conflict.isPresent() && !replace) throw 409`，
+       * 而 mode=append 时 `replace` 恒为 false、`replaceTrackId` 恒为 null
+       * （`findNameConflict(name, null)` 谁也排除不掉）——
+       * 于是**同名 + 新增这条组合永远拿不到 200**，只会再返回一次一模一样的 409，
+       * 用户点「新增为另一条」→ 弹窗关掉又原样弹回来，界面上也没说"这条路走不通"。
        *
-       * 后果：用户点「新增为另一条」→ 弹窗关掉又原样弹回来，点几次都一样，
-       * 而界面上没有任何东西告诉他"这条路走不通"。
+       * 现在的正路是：点「新增为另一条」→ `submitUpload('append', null, true)`
+       * → 后端拿到 allowSameName=true 放行 → 真的插进第二条同名轨迹。
        *
-       * 这里认出来是同一个冲突，就把第三个按钮撤掉并说明原因 ——
+       * 万一（旧的 / 没更新的服务端）又撞回同一个冲突，就把第三个按钮撤掉并说明原因 ——
        * 但**仍然保留「替换它 / 取消」**：路可以少一条，不能把用户关在弹窗里。
        * （判据带上文件指纹：用户换了个文件重新上传时，要允许他再试一次。）
        */
@@ -343,10 +363,16 @@ async function resolveConflict() {
   await submitUpload('replace', body.existingTrackId)
 }
 
-/** 冲突弹窗上点「新增为另一条」（第三个按钮，不是 cancel） */
+/**
+ * 冲突弹窗上点「新增为另一条」（第三个按钮，不是 cancel）。
+ *
+ * ⚠️ 必须传 allowSameName=true：这是**用户本人的明确表态**（他已经看过 409、
+ * 知道库里有一条同名的，仍然要保留两份）。不传的话后端只能按"首次上传"处理，
+ * 又返回同一个 409 —— 弹窗关了又原样弹回来，点几次都一样。
+ */
 async function resolveKeepBoth() {
   closeDialog()
-  await submitUpload('append', null)
+  await submitUpload('append', null, true)
 }
 
 /* ==================== 弹窗按钮分发 ==================== */

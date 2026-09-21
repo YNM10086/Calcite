@@ -40,11 +40,25 @@ public class ImportController {
         this.properties = properties;
     }
 
-    /** 网页上传单个文件（{@code mode=append} 新增 / {@code mode=replace} 替换） */
+    /**
+     * 网页上传单个文件（{@code mode=append} 新增 / {@code mode=replace} 替换）。
+     *
+     * <p><b>⚠️ {@code allowSameName} 为什么必须存在</b>：同名冲突是<b>两段式</b>交互 ——
+     * 前端第一次上传（{@code allowSameName=false}）撞同名拿到 <b>409</b>，弹窗让用户选；
+     * 用户点「新增为另一条」后<b>重新提交同一个文件</b>，这时要带 {@code allowSameName=true}，
+     * 后端才放行、真的插进第二条同名轨迹。
+     *
+     * <p>只靠 {@code mode} 是<b>分不出</b>这两次的：两次都是 {@code mode=append}、
+     * {@code replaceTrackId} 都是空，所以后端永远重复返回同一个 409 ——
+     * 用户会在同一个弹窗里无限打转（这正是这个参数要修的死循环）。
+     * 让前端<b>显式声明"我已经看过冲突提示了，就要同名新增"</b>是最省事也最不容易误判的做法：
+     * 默认 false 保证"没表态 = 按老规矩拦"，不会被别的调用方误放行。
+     */
     @PostMapping("/api/tracks/import")
     public ImportResult upload(@RequestParam("file") MultipartFile file,
                                @RequestParam(defaultValue = "append") String mode,
-                               @RequestParam(required = false) Long replaceTrackId)
+                               @RequestParam(required = false) Long replaceTrackId,
+                               @RequestParam(defaultValue = "false") boolean allowSameName)
             throws IOException {
         if (file == null || file.isEmpty()) {
             throw new IllegalArgumentException("上传的文件是空的");
@@ -52,7 +66,7 @@ public class ImportController {
         // 名字兜底必须用【去掉扩展名】的文件名：同名检测就是拿这个名字去和库里比，
         // 带着 ".gpx" 后缀反而永远比不上已有的「资料一」→ 409 那条路就废了
         return importService.importUpload(file.getBytes(),
-                stripExtension(file.getOriginalFilename()), mode, replaceTrackId);
+                stripExtension(file.getOriginalFilename()), mode, replaceTrackId, allowSameName);
     }
 
     /** 批量导入本地 GeoLife 目录 */

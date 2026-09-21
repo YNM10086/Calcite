@@ -144,10 +144,19 @@ public class ImportService {
      * <p><b>三种结果</b>：
      * <ol>
      *   <li>内容哈希已存在 → <b>跳过</b>（幂等，原有行为不变）
-     *   <li>哈希是新的、但<b>名字已存在</b> → 抛 {@link TrackConflictException}（409，SAME_NAME）
+     *   <li>哈希是新的、但<b>名字已存在</b>且没带"放行开关" → 抛 {@link TrackConflictException}（409，SAME_NAME）
      *   <li>{@code mode=replace} 且新内容的哈希<b>已属于另一条轨迹</b>
      *       → 抛 {@link TrackConflictException}（409，SAME_CONTENT）</li>
      * </ol>
+     *
+     * <p><b>⚠️ 为什么必须有 {@code allowSameName} 这个显式开关</b>：
+     * 同名冲突是<b>两段式</b>交互 —— 第一次上传要拦（返回 409 让用户选），
+     * 用户看过 409、明确点了「新增为另一条」之后再提交，就<b>必须放行</b>。
+     * 只靠 {@code mode} 分不出这两种情况：两者都是 {@code mode=append}、
+     * {@code replaceTrackId} 都是 {@code null}，而 {@code findNameConflict(name, null)}
+     * <b>谁也排除不掉</b> → 又返回一模一样的 409 → 用户点多少次「新增为另一条」都出不来，
+     * 界面上也没有任何东西告诉他"这条路走不通"（这就是曾经的死循环）。
+     * 所以由前端<b>显式声明意图</b>：首次上传 false、点过「新增为另一条」true。
      *
      * <p><b>⚠️ 第 ③ 条是自查时发现的边界</b>：先导入「资料一」（hash A），
      * 再拿同一个文件去"替换"「资料二」→ 新的 {@code external_id} 也是 A，
@@ -160,10 +169,13 @@ public class ImportService {
      *
      * @param mode           {@code append}（默认，新增）或 {@code replace}（替换已有的）
      * @param replaceTrackId 当 {@code mode=replace} 时，要替换哪一条
+     * @param allowSameName  用户是否已经明确选择"就要新增一条同名的"（见上面的说明）：
+     *                       {@code false} = 首次上传，撞同名就返回 409；
+     *                       {@code true}  = 放行，真的再插一条同名轨迹
      */
     @Transactional
     public ImportResult importUpload(byte[] content, String fallbackName,
-                                     String mode, Long replaceTrackId) {
+                                     String mode, Long replaceTrackId, boolean allowSameName) {
         requireNotEmpty(content);
 
         String externalId = sha256Hex(content);
@@ -186,14 +198,19 @@ public class ImportService {
 
         Parsed parsed = parse(content, fallbackName);
 
-        // ④ 哈希是新的、但名字已存在 → 409 SAME_NAME
-        //    （把"要替换的那条"排除掉：它是本次操作的目标，不该被当成"抢了别人的名字"）
-        Optional<Long> conflict = trackEditService.findNameConflict(parsed.name(), replaceTrackId);
-        if (conflict.isPresent() && !replace) {
-            Track existing = trackRepository.findById(conflict.get()).orElseThrow();
-            throw new TrackConflictException(TrackConflictResponse.sameName(
-                    existing.getId(), existing.getName(),
-                    existing.getPointCount(), parsed.points().size()));
+        // ④ 哈希是新的、但名字已存在 → 409 SAME_NAME（除非用户已经明确放行）
+        if (!replace) {
+            // 把"要替换的那条"排除掉：它是本次操作的目标，不该被当成"抢了别人的名字"。
+            //
+            // ⚠️ 这个查询【只在非替换分支里做】：替换模式下重名本来就是允许的
+            // （见方法注释），以前这里在替换分支也查一次、然后把结果丢掉 —— 白查一次库。
+            Optional<Long> conflict = trackEditService.findNameConflict(parsed.name(), replaceTrackId);
+            if (conflict.isPresent() && !allowSameName) {
+                Track existing = trackRepository.findById(conflict.get()).orElseThrow();
+                throw new TrackConflictException(TrackConflictResponse.sameName(
+                        existing.getId(), existing.getName(),
+                        existing.getPointCount(), parsed.points().size()));
+            }
         }
 
         if (replace) {
