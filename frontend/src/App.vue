@@ -1124,6 +1124,64 @@ async function selectTrack(id) {
   .panel .subtitle {
     display: none;
   }
+
+  /* ⭐ 第五档「圈选」在矮窗口的整体瘦身（2026-09-25 最终审查修复轮 2，实测驱动）。
+     因果链：`.within-stats` 是 `overflow: visible`，它内部**不可再收缩**的几块
+     （统计卡 / 来源行 / 提示行 / `.items` 的 min-height: 40）加上面板里这些
+     `flex: 0 0 auto` 的固定块，一旦总高超过面板可用高度，溢出部分照样算进
+     `.panel` 的 scrollHeight —— 而 `.panel` 是 `overflow: hidden`，于是被裁掉、用户点不到。
+     实测（3 条命中、白名单已生效、flex-shrink 实测为 1）：
+       1366×660 → 面板 clientHeight 455、scrollHeight **554**（溢出 99px）
+       1600×600 → 面板 clientHeight 395、scrollHeight **554**（溢出 159px）
+     清空面板后两个视口都是 0px —— 所以差别全在"有结果时多出来的内容"，必须真的变小。
+     这里收的是外边距 / 内边距 / 字号：**信息一个不删**（列表与统计数字都还在）。 */
+  .panel h2 {
+    margin: 6px 0 3px;
+  }
+
+  .panel .mode-switch {
+    margin: 6px 0 0;
+  }
+
+  .panel .mode-switch button {
+    padding: 3px 0;
+  }
+
+  .panel .health-line {
+    margin: 2px 0 0;
+  }
+
+  .panel .status {
+    margin-top: 6px;
+    padding-top: 6px;
+  }
+}
+
+/* 更矮（1600×600 这类投影视口）：面板内边距与状态条再收一点，给列表让出空间。
+   这一层是"保险"：660 那一层已经按估算够用，这层保证估算偏小时也不会溢出。 */
+@media (max-height: 620px) {
+  .panel {
+    padding: 12px 14px;
+  }
+
+  .panel h2 {
+    margin: 4px 0 2px;
+    font-size: 12px;
+  }
+
+  .panel .mode-switch button {
+    padding: 2px 0;
+    font-size: 11px;
+  }
+
+  .panel .health-line {
+    font-size: 10px;
+  }
+
+  .panel .status {
+    margin-top: 5px;
+    padding-top: 5px;
+  }
 }
 
 .panel {

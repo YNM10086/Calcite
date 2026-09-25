@@ -62,7 +62,19 @@ const overDraw = computed(() => props.items.length > DRAW_LIMIT)
 </template>
 
 <style scoped>
-.within-stats { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+/* ⚠️ 布局契约（2026-09-25 最终审查修复轮 2，实测驱动）：
+   ① `flex: 1 1 0` 与 `min-height: 0` **缺一不可**：
+      · `flex-basis: 0` 让它在面板里只占**剩余空间**（而不是"内容多高就多高"）；
+      · `min-height: 0` 覆盖 flex 子项的自动最小尺寸（min-content）—— 少了它，
+        即使 `flex-shrink: 1` 也收缩不到内容高度以下。
+   ② 它仍然是 `overflow: visible`：内部那几块**不可再收缩**的内容（统计卡 / 来源行 /
+      提示行 / `.items` 的 `min-height`）一旦超出分到的空间，溢出部分照样算进
+      `.panel` 的 `scrollHeight`，而 `.panel` 是 `overflow: hidden` → 被裁掉、用户点不到。
+   ③ 实测（G 段"有结果"测量，3 条命中）：1366×660 溢出 **99px**、1600×600 溢出 **159px**，
+      而清空面板后是 **0px** —— 说明差别全在"有结果时多出来的内容"，且与白名单无关
+      （`.within-stats` 的 `flex-shrink` 实测一直是 `1`）。所以矮窗口下**必须让内容真的变小**，
+      见下面的 media query。 */
+.within-stats { display: flex; flex-direction: column; gap: 6px; flex: 1 1 0; min-height: 0; }
 .empty { margin: 4px 0; font-size: 12px; color: #f0b48a; }
 .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .card {
@@ -85,4 +97,25 @@ const overDraw = computed(() => props.items.length > DRAW_LIMIT)
 .name { font-size: 12px; color: #cfe3f5; }
 .meta { font-size: 10px; color: #8aa4bb; }
 .meta em { font-style: normal; color: #7ee0a6; }
+
+/* 矮窗口（1366×660 笔记本 / 1600×600 投影）：统计卡压紧、来源行让位给列表。
+   ⚠️ 四个统计数字（条数 / 区域内点数 / 累计里程 / 时间跨度）一个不少，只是更紧凑；
+     让位的是**来源分布**那一行（规格 6.5 的第五项，矮窗口下由列表里的 source 字段承担）。 */
+@media (max-height: 660px) {
+  .within-stats { gap: 4px; }
+  .cards { gap: 3px; }
+  .card { padding: 2px 5px; }
+  .card b { font-size: 12px; line-height: 1.25; }
+  .card span { font-size: 9px; line-height: 1.2; }
+  .sources { display: none; }
+  .tip { font-size: 10px; line-height: 1.35; }
+  .items li { padding: 3px 6px; }
+}
+
+/* 更矮（1600×600 这类投影视口）：统计卡改成"数字 + 标签"同一行，再省一层行高。
+   列表的 min-height 保持 40px 不动 —— 它是"至少能滚到一条"的底线，不靠压列表来凑零溢出。 */
+@media (max-height: 620px) {
+  .card { flex-direction: row; align-items: baseline; gap: 4px; }
+  .card b { font-size: 11px; }
+}
 </style>

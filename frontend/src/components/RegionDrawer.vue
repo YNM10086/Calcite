@@ -99,4 +99,18 @@ function onBufferInput(e) {
   align-self: flex-start; padding: 2px 8px; font-size: 11px; cursor: pointer;
   border: 1px solid #6b4a3a; background: #2b1f18; color: #f0b48a; border-radius: 4px;
 }
+
+/* 矮窗口（1366×660 / 1600×600）：绘制器整体收一圈。
+   ⚠️ 这些块在面板里都是 `flex: 0 0 auto`（不可收缩），它们和 `.within-stats` 的
+   最小高度加起来一旦超过面板可用高度，面板就会溢出、被 `overflow: hidden` 裁掉
+   （2026-09-25 实测：1366×660 溢出 99px / 1600×600 溢出 159px）。
+   收的是内边距 / 字号 / 行高：按钮一个不少、提示语不删（只是行高更紧）。 */
+@media (max-height: 660px) {
+  .region-drawer { gap: 4px; }
+  .shapes button { padding: 3px 6px; font-size: 11px; }
+  .radius input { width: 60px; padding: 2px 4px; font-size: 11px; }
+  .radius .preset { padding: 1px 5px; font-size: 10px; }
+  .radius .go { padding: 2px 8px; font-size: 11px; }
+  .hint { font-size: 10px; line-height: 1.35; }
+}
 </style>

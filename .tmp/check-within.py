@@ -397,6 +397,12 @@ def within_stats_flex_shrink(page):
     这条契约在 0 条 / 3 条 / 232 条命中下**都成立**，正好补上
     "232 条时列表被裁"那个场景用真实数据不好构造的缺口。
     返回 '1' / '0'（字符串）或 None（元素不在 / 取不到）。
+
+    ⚠️ 修复轮 7 的实测结论：白名单**早就生效**了 —— 两个矮视口 ×（有结果 / 无结果）
+    四种组合实测 flex-shrink 都是 `'1'`。所以修复轮 6 挖出来的那两条
+    "有结果溢出 99px / 159px"**与白名单无关**，不要再往那个方向修；
+    真正的原因是 `.within-stats` 内部不可收缩的内容 + 圈选档的固定块
+    超过了矮视口的面板可用高度 —— 分块数字由 `panel_breakdown()` 打印。
     """
     try:
         return page.evaluate("""() => {
@@ -407,6 +413,61 @@ def within_stats_flex_shrink(page):
     except Exception as e:                      # noqa: BLE001
         note(f"读 .within-stats 的 flex-shrink 失败：{type(e).__name__}: {e}")
         return None
+
+
+def panel_breakdown(page):
+    """把「面板为什么溢出」拆成可读的分块数字（**诊断用，不判通过/失败**）。
+
+    ⭐ 修复轮 7 新增：只报一句"溢出 99px"没法定位，必须知道它花在哪几个块上。
+    返回 {panel:{sh,ch,padTop,padBottom}, stats:{minHeight,height,flexBasis,flexShrink,
+    offsetHeight,scrollHeight}, children:[{tag,cls,h,flex,minH}, ...]}；取不到返回 None。
+    """
+    try:
+        return page.evaluate("""() => {
+            const p = document.querySelector('.panel');
+            if (!p) return null;
+            const cs = getComputedStyle(p);
+            const out = {
+              panel: { sh: p.scrollHeight, ch: p.clientHeight,
+                       padTop: cs.paddingTop, padBottom: cs.paddingBottom },
+              stats: null, children: [],
+            };
+            const st = document.querySelector('.within-stats');
+            if (st) {
+              const s = getComputedStyle(st);
+              out.stats = { minHeight: s.minHeight, height: s.height, flexBasis: s.flexBasis,
+                            flexShrink: s.flexShrink, offsetHeight: st.offsetHeight,
+                            scrollHeight: st.scrollHeight };
+            }
+            for (const c of p.children) {
+              const s = getComputedStyle(c);
+              out.children.push({
+                tag: c.tagName.toLowerCase(),
+                cls: (c.className && typeof c.className === 'string') ? c.className : '',
+                h: c.offsetHeight, flex: s.flex, minH: s.minHeight,
+              });
+            }
+            return out;
+        }""")
+    except Exception as e:                      # noqa: BLE001
+        note(f"读面板分块高度失败：{type(e).__name__}: {e}")
+        return None
+
+
+def _fmt_breakdown(bd):
+    """把 panel_breakdown() 压成一两行诊断文本（报告与失败明细直接抄它）。"""
+    if not bd:
+        return "面板分块：取不到（.panel 不在？）"
+    parts = [f"{c['tag']}.{c['cls'] or '-'}={c['h']}px(flex:{c['flex']},minH:{c['minH']})"
+             for c in bd["children"]]
+    st = bd.get("stats")
+    st_txt = ("取不到 .within-stats" if not st else
+              f".within-stats offsetHeight={st['offsetHeight']} height={st['height']} "
+              f"flexBasis={st['flexBasis']} flexShrink={st['flexShrink']} "
+              f"minHeight={st['minHeight']} scrollHeight={st['scrollHeight']}")
+    return (f"面板 scrollHeight={bd['panel']['sh']} clientHeight={bd['panel']['ch']} "
+            f"(padding {bd['panel']['padTop']}/{bd['panel']['padBottom']})；{st_txt}；"
+            f"直接子块：{' | '.join(parts)}")
 
 
 def list_item_track_ids(page):
@@ -1806,15 +1867,24 @@ def main():
         # ------------------------------------------------ G) 面板零溢出（有结果 / 无结果）+ CSS 契约
         # ⭐ 修复轮 6 修两个漏洞：
         #   ① 旧脚本在 F 段「清除」**之后**才量溢出 → 量到的是**空面板**；
-        #      而 Task 8 评审专门警告的那个场景（命中多条时列表被裁，修法是把 `.within-stats`
-        #      加进 `App.vue` 的 `.panel > div:not(...)` 白名单链）**从来没有被布局验证过**。
         #      现在两个状态都量：**有结果**（列表里真的有条目）+ **无结果**。
         #   ② 新增一条与命中条数无关的 **CSS 契约** 断言：`.within-stats` 的 `flex-shrink` 必须
-        #      是 `1`。为什么是它：那条规则给面板里"非白名单"的 div 设 `flex: 0 0 auto`
-        #      （`flex-shrink: 0` = 不可收缩），把 `.within-stats` 加进 `:not(...)` 链之后它
-        #      拿回默认的 `flex-shrink: 1`（可收缩，内部 `.items` 才能滚动而不是把面板撑高）。
-        #      这条在 0 条 / 3 条 / 232 条命中下**都成立** —— 正好补上"232 条时列表被裁"
-        #      那个场景用真实数据不好构造的缺口。
+        #      是 `1`（原来 Task 8 的修法就是把它加进 `.panel > div:not(...)` 白名单链，
+        #      拿回"可收缩"）。
+        #
+        # ⭐⭐ 修复轮 7（主控代跑这次新增断言的结果）—— **这条断言抓到了一个真缺陷**：
+        #      有结果时 1366×660 溢出 **99px**、1600×600 溢出 **159px**；无结果时两个都是 **0px**。
+        #      而 flex-shrink 四种组合实测**都是 '1'** → 白名单早就生效了，**不是**"没加白名单"。
+        #      真正的原因（CSS 推断 + 下面的分块数字可证实）：
+        #        · `.within-stats` 是 `overflow: visible`，它内部**不可再收缩**的内容
+        #          （统计卡 2 行 / 来源行 / 提示行 / `.items` 的 min-height: 40）超出分到的空间后，
+        #          溢出部分照样算进 `.panel` 的 scrollHeight；
+        #        · 而 `.panel` 是 `overflow: hidden` → 超出的那 99/159px 被**裁掉、用户点不到**。
+        #      修法（已落地，产品代码）：
+        #        · `.within-stats { flex: 1 1 0; min-height: 0 }`（只占剩余空间 + 真能收缩）
+        #        · 矮窗口瘦身：WithinStats / RegionDrawer / App 三处 @media (max-height: 660px/620px)
+        #      所以下面除了断言，还打印**面板分块高度**（panel_breakdown）——
+        #      再红的话，一眼就能看出超出的 px 花在哪个块上。
         print("=== G) 面板零溢出（有结果 / 无结果 × 两个矮视口）+ flex-shrink 契约 ===")
         for w, h in SHORT_VIEWPORTS:
             page.set_viewport_size({"width": w, "height": h})
@@ -1837,9 +1907,11 @@ def main():
             else:
                 box = page.locator(".panel").bounding_box()
                 over_res = ov_res["sh"] - ov_res["ch"]
+                bd_res = _fmt_breakdown(panel_breakdown(page))
                 note(f"{w}x{h} 有结果：列表条目 {items_g} 条；"
                      f"面板 scrollHeight={ov_res['sh']} clientHeight={ov_res['ch']} "
                      f"溢出={over_res}px box={box}")
+                note(f"{w}x{h} 有结果分块：{bd_res}")
                 if items_g == 0:
                     skip(f"{w}x{h} 面板零溢出（有结果）",
                          f"这次缓冲区没查出条目（状态={state_g} 文本={diag_g}）—— 量到的还是空面板，"
@@ -1848,9 +1920,11 @@ def main():
                     check(f"{w}x{h} 面板零溢出（有结果：列表 {items_g} 条）",
                           ov_res["sh"] <= ov_res["ch"] + 2,
                           f"scrollHeight={ov_res['sh']} > clientHeight={ov_res['ch']} + 2"
-                          f"（溢出 {over_res}px）；列表条目 {items_g} 条 box={box}"
-                          "—— 命中多条时列表被裁（Task 8 评审警告的那个场景，"
-                          "修法 = .within-stats 加进 .panel > div:not(...) 白名单链）")
+                          f"（溢出 {over_res}px）；列表条目 {items_g} 条 box={box}；"
+                          f"分块：{bd_res}"
+                          " —— ⚠️ 成因见 G 段顶部注释：**不是**白名单（flex-shrink 实测为 '1'），"
+                          "是 .within-stats 内部不可收缩的内容 + 圈选档固定块超过面板可用高度，"
+                          "被 .panel 的 overflow: hidden 裁掉")
             fs_res = within_stats_flex_shrink(page)
             if fs_res is None:
                 skip(f"{w}x{h} .within-stats 的 flex-shrink == '1'（有结果时）",
@@ -1859,8 +1933,9 @@ def main():
                 check(f"{w}x{h} .within-stats 的 flex-shrink == '1'（有结果时，CSS 契约）",
                       fs_res == "1",
                       f"getComputedStyle('.within-stats').flexShrink = {fs_res!r}（期望 '1'）；"
-                      "为 '0' 说明它落进了 .panel > div 的 flex: 0 0 auto 规则、不可收缩 → "
-                      "命中多条时会被撑高、裁掉列表（白名单链里必须带上 .within-stats）")
+                      "为 '0' 说明它落进了 .panel > div 的 flex: 0 0 auto 规则、不可收缩"
+                      "（白名单链里必须带上 .within-stats）——"
+                      "⚠️ 修复轮 7 实测它一直是 '1'，所以「有结果溢出」那条的成因**不是**白名单")
 
             # --- ② 无结果：清除后再量一次（这一条就是旧脚本原来那条断言，保留）
             cleared_g = click_clear(page)
@@ -1873,6 +1948,7 @@ def main():
                 note(f"{w}x{h} 无结果：stat-tracks={count_of(page, '[data-testid=\"stat-tracks\"]')}；"
                      f"面板 scrollHeight={ov_empty['sh']} clientHeight={ov_empty['ch']} "
                      f"溢出={over_empty}px")
+                note(f"{w}x{h} 无结果分块：{_fmt_breakdown(panel_breakdown(page))}")
                 check(f"{w}x{h} 面板零溢出（无结果）", ov_empty["sh"] <= ov_empty["ch"] + 2,
                       f"scrollHeight={ov_empty['sh']} > clientHeight={ov_empty['ch']} + 2"
                       f"（溢出 {over_empty}px）"
