@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
   Cartesian3,
+  Cartographic,
   ClockRange,
   ClockStep,
   Color,
@@ -10,8 +11,12 @@ import {
   JulianDate,
   // Cesium 的 Math 别名：相机包围盒给的是弧度，往外传要换成度
   Math as CesiumMath,
+  PolygonHierarchy,
   Rectangle,
   SampledPositionProperty,
+  // 圈选的鼠标事件：Cesium 的输入不是 Vue 事件，必须自己注册、自己注销
+  ScreenSpaceEventHandler,
+  ScreenSpaceEventType,
   TileMapServiceImageryProvider,
   VERSION,
   Viewer,
@@ -24,6 +29,8 @@ import { hotspotColor, hotspotPixelSize } from '../lib/hotspot.js'
 import { cellRect, densityRatio, rampColor } from '../lib/density.js'
 // 相似度的「颜色」同样是纯函数，组件不自己算
 import { simColor } from '../lib/similarity.js'
+// 圈选区域的轮廓：把后端回显的 GeoJSON 取成最外环。同样是纯函数，组件不自己算
+import { ringOf } from '../lib/region.js'
 // Cesium 自带的控件样式，必须引入，否则地球上的控件会散架
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -52,12 +59,31 @@ const props = defineProps({
   // 相似档：主线（单独画，要醒目）+ 匹配到的轨迹（按相似度上色）
   similarBaseline: { type: Object, default: null },
   similarTracks: { type: Array, default: () => [] },
+  // 圈选档：后端回显的区域几何（GeoJSON Polygon / MultiPolygon）。null = 不画
+  region: { type: Object, default: null },
+  // 圈选档：命中轨迹，已经由 App 切成最多 DRAW_LIMIT 条 —— 地球不再自己截断
+  withinTracks: { type: Array, default: () => [] },
+  // 绘制模式：idle | rect | polygon | buffer。
+  // 只认这个 prop、自己不切状态：ESC / 切档 / 取消三条退出路径都由 App 收口，
+  // 否则"地球以为还在画、App 以为已经结束"这种状态分叉迟早出现
+  drawingMode: { type: String, default: 'idle' },
 })
 
 // 往外报当前时刻（毫秒时间戳），App 用它更新播放条；
 // camera-move-end 是把 Cesium 的相机事件转出来的（见 onMounted），
 // App 靠它决定"相机停稳了，按新视野重新查密度"
-const emit = defineEmits(['time-change', 'camera-move-end'])
+//
+// draw-* 三个是绘制模式的结果（App 收到后就发起查询、并把 drawingMode 收回 idle）：
+//   draw-rect    { west, south, east, north }
+//   draw-polygon [{ lon, lat }, ...]
+//   draw-buffer  { lon, lat }
+const emit = defineEmits([
+  'time-change',
+  'camera-move-end',
+  'draw-rect',
+  'draw-polygon',
+  'draw-buffer',
+])
 
 // 地球容器：Cesium 会接管这个 div
 const container = ref(null)
@@ -313,6 +339,156 @@ function drawSimilarity(baseline, tracks) {
   }
 }
 
+/* ============ 绘制模式（第五档「圈选」）============
+ *
+ * ⚠️ 最关键的一条：Cesium 默认【左键拖动 = 旋转地球】。
+ * 不关掉的话，用户拉一个框的同时地球会跟着转，框就画歪了。
+ * 所以进入绘制模式时 enableRotate = false，退出/取消/切档/卸载时必须恢复 true ——
+ * 忘了恢复的表现是"地图坏了"（用户以为 bug，其实是状态泄漏）。
+ *
+ * 状态方向仍然是「父 → 子」：App 通过 drawingMode prop 决定画不画、画哪种，
+ * 地球只负责注册/注销鼠标事件。这样 ESC、切档、取消三条退出路径在 App 侧收口，
+ * 不需要在两边各写一遍 —— 那种写法必漏其一。
+ */
+
+const drawHandler = ref(null)      // ScreenSpaceEventHandler；null = 当前没在绘制
+const drawPoints = ref([])         // 多边形已加的点
+let rectStart = null               // 拉框起点（屏幕坐标）
+
+/** 统一开关「左键拖动旋转地球」。
+ *  为什么包一层：所有恢复动作都走这一个出口，"漏掉某条退出路径"就只剩"忘了调用"一种可能 */
+function rotateEnabled(on) {
+  const v = viewer.value
+  if (v && !v.isDestroyed()) v.screenSpaceCameraController.enableRotate = on
+}
+
+/** 屏幕坐标 → 经纬度；点在地球之外返回 null（否则会算出 NaN 坐标，一路传到后端） */
+function pickLonLat(windowPosition) {
+  const v = viewer.value
+  if (!v) return null
+  const cartesian = v.camera.pickEllipsoid(windowPosition, v.scene.globe.ellipsoid)
+  if (!cartesian) return null
+  const c = Cartographic.fromCartesian(cartesian)
+  return { lon: CesiumMath.toDegrees(c.longitude), lat: CesiumMath.toDegrees(c.latitude) }
+}
+
+/** 注销鼠标事件。
+ *  destroy() 会连同它注册的全部动作一起注销，所以重复进入绘制模式不会叠加注册
+ *  —— 前提是每次进入前都先 clear（setDrawingMode 开头就调它） */
+function clearDrawHandler() {
+  if (drawHandler.value) {
+    drawHandler.value.destroy()
+    drawHandler.value = null
+  }
+  rectStart = null
+  drawPoints.value = []
+}
+
+/** 切换绘制模式。idle / 空值 / 地球还没就绪 → 只做收尾（关掉事件 + 恢复左键旋转） */
+function setDrawingMode(mode) {
+  // 先收尾旧的：既防重复注册，也保证切档（rect → polygon）时不会两套事件同时活着
+  clearDrawHandler()
+  const v = viewer.value
+  if (!v || v.isDestroyed() || !mode || mode === 'idle') {
+    rotateEnabled(true) // 出口 ①：退出 / 取消 / 切档 / 无效值（幂等，从没关过也没关系）
+    return
+  }
+  rotateEnabled(false) // ⭐ 画之前先关掉左键旋转，否则拉框时地球跟着转
+
+  const h = new ScreenSpaceEventHandler(v.scene.canvas)
+
+  if (mode === 'rect') {
+    h.setInputAction((m) => { rectStart = m.position }, ScreenSpaceEventType.LEFT_DOWN)
+    h.setInputAction((m) => {
+      if (!rectStart) return // 没按下就动鼠标 = 只是在看地图，不产生框
+      // 两端都拾取；任一端落在地球外就整次忽略，不要用半个合法值凑出一个框
+      const a = pickLonLat(rectStart)
+      const b = pickLonLat(m.endPosition)
+      if (!a || !b) return
+      emit('draw-rect', {
+        west: Math.min(a.lon, b.lon), east: Math.max(a.lon, b.lon),
+        south: Math.min(a.lat, b.lat), north: Math.max(a.lat, b.lat),
+      })
+    }, ScreenSpaceEventType.MOUSE_MOVE)
+    h.setInputAction(() => { rectStart = null }, ScreenSpaceEventType.LEFT_UP)
+  }
+
+  if (mode === 'polygon') {
+    h.setInputAction((m) => {
+      const p = pickLonLat(m.position)
+      if (!p) return // 点到地球之外 → 忽略这次点击（不要往点列里塞 NaN）
+      drawPoints.value = [...drawPoints.value, p]
+    }, ScreenSpaceEventType.LEFT_CLICK)
+    h.setInputAction(() => {
+      // 少于 3 个点围不成面：不发事件，由 App 侧提示
+      if (drawPoints.value.length >= 3) emit('draw-polygon', drawPoints.value)
+      drawPoints.value = []
+    }, ScreenSpaceEventType.LEFT_DOUBLE_CLICK)
+  }
+
+  if (mode === 'buffer') {
+    h.setInputAction((m) => {
+      const p = pickLonLat(m.position)
+      if (p) emit('draw-buffer', p)
+    }, ScreenSpaceEventType.LEFT_CLICK)
+  }
+
+  drawHandler.value = h
+}
+
+/** 区域轮廓：画【后端回显的几何】而不是本地画的形状 ——
+ *  这样"看到的圈 = 查的范围"对三种形状都成立（缓冲区尤其重要：
+ *  本地只有一个中心点，真正的圆是后端按米算出来的 33 边形）。
+ *
+ * 和热点/密度/相似一样，它【不】进 clearTrack() 的清理范围：
+ * 圈选是跨轨迹的结果，而 clearTrack() 是由"轨迹点变了"触发的，会被误清。 */
+function drawRegion(region) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  // 用固定 id + removeById：区域每次都是整个换掉，不需要数组记账
+  v.entities.removeById('within-region')
+  v.entities.removeById('within-region-outline')
+  if (!region) return
+  const ring = ringOf(region)
+  if (ring.length < 3) return // 退化几何（点/线）画不出面，直接跳过
+  const positions = Cartesian3.fromDegreesArray(ring.flat())
+  // 半透明面 + 实线边：面太实会把底下的轨迹线糊住，边线负责让轮廓一眼可见
+  v.entities.add({
+    id: 'within-region',
+    polygon: {
+      hierarchy: new PolygonHierarchy(positions),
+      material: Color.fromCssColorString('#ffd166').withAlpha(0.12),
+    },
+  })
+  v.entities.add({
+    id: 'within-region-outline',
+    polyline: { positions, width: 2, material: Color.fromCssColorString('#ffd166') },
+  })
+}
+
+/** 命中轨迹：最多 DRAW_LIMIT 条（由调用方切好），橙色半透明，和"选中轨迹"的蓝色区分 */
+function drawWithinTracks(tracks) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  // 数量不固定（列表里点一条就多一条），所以不用固定 id，按前缀清一遍
+  for (const e of [...v.entities.values]) {
+    if (typeof e.id === 'string' && e.id.startsWith('within-track-')) v.entities.remove(e)
+  }
+  for (const t of tracks) {
+    if (!t.points || t.points.length < 2) continue // 少于 2 个点连不成线
+    const positions = Cartesian3.fromDegreesArray(
+      t.points.flatMap((p) => [p.lon, p.lat]))
+    v.entities.add({
+      id: `within-track-${t.trackId}`,
+      polyline: {
+        positions,
+        width: 2,
+        material: Color.fromCssColorString('#ff9f45').withAlpha(0.9),
+      },
+    })
+  }
+}
+
 /**
  * 把轨迹点画到地球上
  * @param {Array} points 轨迹点
@@ -475,6 +651,21 @@ watch(
   { deep: true },
 )
 
+// 绘制模式变化 → 注册/注销鼠标事件 + 开关左键旋转。
+// ⚠️ 这是"画完地球转不动了"那个 bug 的唯一防线：App 每一次把模式收回 'idle'
+// （松手画完 / 取消 / ESC / 切档 / 请求失败）都会走到这里，没有第二条出口
+watch(() => props.drawingMode, (m) => setDrawingMode(m))
+
+// 区域回显 → 重画轮廓（画的是后端给的几何，不是本地画的形状）
+watch(() => props.region, () => {
+  if (ready.value) drawRegion(props.region)
+})
+
+// 命中轨迹变化 → 重画橙线（App 每次都以"当前该画的全部"给过来，drawWithinTracks 自己先清）
+watch(() => props.withinTracks, () => {
+  if (ready.value) drawWithinTracks(props.withinTracks)
+})
+
 onMounted(() => {
   // 1) 底图：Cesium 自带的离线世界地图 NaturalEarthII
   //    不需要联网、不需要任何 access token，打开就有画面
@@ -530,6 +721,9 @@ onMounted(() => {
   drawDensity(props.densityCells, props.densityMax, props.densityCellSize)
   // 相似叠画同理：父组件可能在地球建好之前就已经把数据给了
   drawSimilarity(props.similarBaseline, props.similarTracks)
+  // 圈选的两个图层同理：区域与命中结果都可能在挂载前就已经拿到了
+  drawRegion(props.region)
+  drawWithinTracks(props.withinTracks)
 })
 
 onBeforeUnmount(() => {
@@ -545,6 +739,13 @@ onBeforeUnmount(() => {
     removeTickListener()
     removeTickListener = null
   }
+  // ⚠️ 绘制模式的两步收尾也必须排在 destroy() 之前：
+  // 1) 事件处理器挂在 scene.canvas 上 —— viewer 没了就再没人能注销它
+  // 2) 恢复左键旋转 —— 此时 screenSpaceCameraController 还活着；
+  //    漏了这一条，用户在绘制中途切走页面（切档、热更新、路由离开）再回来，
+  //    地球就再也拖不动了，看着像"地图坏了"
+  clearDrawHandler()
+  rotateEnabled(true) // 出口 ②：组件卸载
   if (viewer.value && !viewer.value.isDestroyed()) viewer.value.destroy()
   viewer.value = null
 })
@@ -653,7 +854,7 @@ function getViewBbox() {
 }
 
 /**
- * 暴露给父组件的六个方法。
+ * 暴露给父组件的七个方法。
  * 父组件通过 ref 调用，例如：globe.value.play()
  */
 defineExpose({
@@ -662,6 +863,8 @@ defineExpose({
   fitBounds,
   /** 取当前视野包围盒（密度模式用） */
   getViewBbox,
+  /** 切换绘制模式（'idle' 关闭）。绘制期间左键旋转被关掉，收尾一律走这里 */
+  setDrawingMode,
   /** 开始播放 */
   play() {
     const v = viewer.value
