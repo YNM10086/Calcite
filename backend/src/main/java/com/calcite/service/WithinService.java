@@ -23,7 +23,14 @@ import java.util.Map;
  *
  * <p><b>为什么"区域内没有轨迹"要提前返回</b>：没有命中轨迹时，那条最贵的点统计
  * （180~456 ms）必然返回 0 —— 直接跳过它，空区域就变成一次几乎不花时间的请求。
- * 这个推理成立的前提是：点落在区域内 ⇒ 它所在的轨迹线必然穿过该区域 ⇒ 该轨迹一定在命中集合里。
+ *
+ * <p>这个推理成立的<b>完整前提</b>是（⭐ 前提写全，别漏时间窗那条）：
+ * 点落在区域内、<b>且它的 recorded_at 在时间窗内</b> ⇒ 它所在轨迹的 {@code [start_time, end_time]}
+ * 必然与 {@code [from, to]} 重叠（点的时刻就在这条轨迹的时段里）⇒ 该轨迹一定被
+ * {@code findIdsIntersecting} 选进 ids 里。
+ * ⚠️ 漏掉"且它的 recorded_at 在时间窗内"就是错的：点统计和 id 过滤用的时间窗一旦不一致，
+ * 就会出现「0 条轨迹穿过、却有 18 万个点」——这正是评审抓到的缺陷，裁定见设计文档 11.12。
+ * 所以 {@code countPointsInsideGrouped} 也必须带同一个时间窗（与 {@code findIdsIntersecting} 共用哨兵）。
  */
 @Service
 public class WithinService {
@@ -73,11 +80,12 @@ public class WithinService {
 
         WithinResponse.Params params = new WithinResponse.Params(req.bufferM(), req.from(), req.to(), limit);
 
+        // 时间窗的哨兵只算一次，两处查询共用 —— 两处用不同的窗口会让统计卡自相矛盾（设计文档 11.12）
+        OffsetDateTime fromBound = req.from() == null ? MIN_TIME : req.from();
+        OffsetDateTime toBound = req.to() == null ? MAX_TIME : req.to();
+
         // ── 3. 命中轨迹 id ──────────────────────────────────────────────
-        List<Long> ids = trackRepository.findIdsIntersecting(
-                queryWkt,
-                req.from() == null ? MIN_TIME : req.from(),
-                req.to() == null ? MAX_TIME : req.to());
+        List<Long> ids = trackRepository.findIdsIntersecting(queryWkt, fromBound, toBound);
 
         if (ids.isEmpty()) {
             return new WithinResponse(regionNode,
@@ -88,7 +96,7 @@ public class WithinService {
         // ── 4. 区域内点数（总数与每条，同一个查询，必然自洽）────────────────
         Map<Long, Long> insideByTrack = new HashMap<>();
         long pointCount = 0;
-        for (Object[] r : trackPointRepository.countPointsInsideGrouped(queryWkt)) {
+        for (Object[] r : trackPointRepository.countPointsInsideGrouped(queryWkt, fromBound, toBound)) {
             long trackId = ((Number) r[0]).longValue();
             long inside = ((Number) r[1]).longValue();
             insideByTrack.put(trackId, inside);

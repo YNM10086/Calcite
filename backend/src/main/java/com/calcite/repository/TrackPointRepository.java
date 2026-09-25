@@ -180,6 +180,16 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
      * <p>⚠️ <b>不要</b>改成"只统计返回的那 50 条轨迹"：实测更慢（1153 ms），
      * 因为优化器仍从空间索引扫完全部 18 万点，还叠了一个 855 万次比较的嵌套循环。
      *
+     * <p>⭐ <b>时间窗条件不能省</b>（设计文档 5.6 / 5.7 / 11.12）：统计卡上的每个数字都必须回答
+     * "**这段时间内**这个区域里有什么"。少了 {@code p.recorded_at BETWEEN :from AND :to} 就会出现
+     * 「0 条轨迹穿过、却有 18 万个点」这种自相矛盾的显示（用户圈一块区域 + 选一个把所有命中轨迹
+     * 都排除的时间窗）。加上它之后，"`ids` 为空 ⇒ 区域内没有点"这条短路才重新可证明：
+     * 点落在区域内且时间戳在窗内 ⇒ 它所属轨迹的 {@code [start,end]} 必然与窗口重叠 ⇒ 该轨迹必在 ids 里。
+     *
+     * <p>⚠️ 调用方必须把 null 的 from/to 换成<b>无限宽的边界值</b>，与
+     * {@code TrackRepository.findIdsIntersecting} 用<b>同一套</b>哨兵 —— native query 里不写
+     * {@code IS NULL} 判断（可空参数的类型推断会出问题，见 {@code aggregateDensity} 的注释）。
+     *
      * @return 每行 {@code [Long trackId, Long inside]}
      */
     @Query(value = """
@@ -187,7 +197,10 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
             FROM track_point p
             WHERE p.geom && ST_GeomFromText(:wkt, 4326)
               AND ST_Intersects(ST_GeomFromText(:wkt, 4326), p.geom)
+              AND p.recorded_at BETWEEN :from AND :to
             GROUP BY p.track_id
             """, nativeQuery = true)
-    List<Object[]> countPointsInsideGrouped(@Param("wkt") String wkt);
+    List<Object[]> countPointsInsideGrouped(@Param("wkt") String wkt,
+                                            @Param("from") OffsetDateTime from,
+                                            @Param("to") OffsetDateTime to);
 }

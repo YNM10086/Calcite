@@ -64,6 +64,10 @@ class WithinServiceTest {
 
         when(tracks.prepareRegion(anyString())).thenReturn(prepared());
         when(tracks.prepareBufferRegion(anyString(), anyDouble())).thenReturn(prepared());
+
+        // 区域内点数查询现在也带时间窗（设计文档 11.12）；默认打桩成"无点"，
+        // 个别用例要非空时必须覆盖这个打桩 —— 否则 Mockito 对未打桩的三参重载返回 null，for-each 直接 NPE
+        when(points.countPointsInsideGrouped(anyString(), any(), any())).thenReturn(List.of());
     }
 
     private WithinRequest req(Integer limit, OffsetDateTime from, OffsetDateTime to) {
@@ -85,7 +89,7 @@ class WithinServiceTest {
         assertTrue(r.stats().sourceCounts().isEmpty());
 
         // ⭐ 关键：没有命中就不该再跑那条最贵的点统计（180~456 ms）
-        verify(points, never()).countPointsInsideGrouped(anyString());
+        verify(points, never()).countPointsInsideGrouped(anyString(), any(), any());
         verify(tracks, never()).aggregateWithinStats(any());
         verify(tracks, never()).findWithinSummariesByIds(any());
     }
@@ -93,7 +97,7 @@ class WithinServiceTest {
     @Test
     void 按来源分组汇总出五个统计数字() {
         when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of(1L, 2L, 3L));
-        when(points.countPointsInsideGrouped(anyString()))
+        when(points.countPointsInsideGrouped(anyString(), any(), any()))
                 .thenReturn(List.of(new Object[]{1L, 10L}, new Object[]{2L, 20L}));
         when(tracks.aggregateWithinStats(any())).thenReturn(List.<Object[]>of(
                 new Object[]{"geolife", 2L, 3000.0, "2008-11-15T01:01:33Z", "2008-11-15T02:00:00Z"},
@@ -117,7 +121,7 @@ class WithinServiceTest {
     @Test
     void items按区域内点数降序再按id升序() {
         when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of(9L, 3L, 7L));
-        when(points.countPointsInsideGrouped(anyString())).thenReturn(List.of(
+        when(points.countPointsInsideGrouped(anyString(), any(), any())).thenReturn(List.of(
                 new Object[]{9L, 5L}, new Object[]{3L, 5L}, new Object[]{7L, 1L}));
         when(tracks.aggregateWithinStats(any())).thenReturn(List.<Object[]>of(
                 new Object[]{"geolife", 3L, 0.0, "2008-11-15T01:01:33Z", "2008-11-15T01:01:33Z"}));
@@ -134,7 +138,7 @@ class WithinServiceTest {
     @Test
     void 没有区域内点数的轨迹算0而不是报错() {
         when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of(1L));
-        when(points.countPointsInsideGrouped(anyString())).thenReturn(List.of()); // 一条都没匹配到点
+        when(points.countPointsInsideGrouped(anyString(), any(), any())).thenReturn(List.of()); // 一条都没匹配到点
         when(tracks.aggregateWithinStats(any())).thenReturn(List.<Object[]>of(
                 new Object[]{"geolife", 1L, 10.0, "2008-11-15T01:01:33Z", "2008-11-15T01:01:33Z"}));
         when(tracks.findWithinSummariesByIds(any()))
@@ -149,7 +153,7 @@ class WithinServiceTest {
     @Test
     void limit截断生效且统计仍是全量() {
         when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of(1L, 2L, 3L));
-        when(points.countPointsInsideGrouped(anyString())).thenReturn(List.of(
+        when(points.countPointsInsideGrouped(anyString(), any(), any())).thenReturn(List.of(
                 new Object[]{1L, 30L}, new Object[]{2L, 20L}, new Object[]{3L, 10L}));
         when(tracks.aggregateWithinStats(any())).thenReturn(List.<Object[]>of(
                 new Object[]{"geolife", 3L, 60.0, "2008-11-15T01:01:33Z", "2008-11-15T01:01:33Z"}));
@@ -178,7 +182,12 @@ class WithinServiceTest {
 
     @Test
     void 时间窗为空时传无限宽边界() {
-        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of());
+        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of(1L));
+        // 这条用例要走到点统计，才能验证两处查询用的是<b>同一套</b>哨兵（评审 finding 的核心）
+        when(tracks.findWithinSummariesByIds(any()))
+                .thenReturn(new ArrayList<>(List.<Object[]>of(summary(1L, 1.0))));
+        when(tracks.aggregateWithinStats(any())).thenReturn(List.<Object[]>of(
+                new Object[]{"geolife", 1L, 1.0, "2008-11-15T01:01:33Z", "2008-11-15T01:01:33Z"}));
 
         service.within(req(null, null, null));
 
@@ -188,6 +197,12 @@ class WithinServiceTest {
         assertEquals(2, vals.size());
         assertTrue(vals.get(0).getYear() < 2000, "from 应该是无限宽的下界，实际 " + vals.get(0));
         assertTrue(vals.get(1).getYear() > 2500, "to 应该是无限宽的上界，实际 " + vals.get(1));
+
+        // ⭐ 点统计必须收到<b>同一对</b>哨兵：两处窗口一旦不一致，就会出现
+        //    「0 条轨迹穿过、却有 18 万个点」（设计文档 11.12）
+        var ptCap = org.mockito.ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(points).countPointsInsideGrouped(anyString(), ptCap.capture(), ptCap.capture());
+        assertEquals(vals, ptCap.getAllValues(), "点统计的时间窗必须与 id 过滤的完全一致");
     }
 
     @Test
@@ -205,9 +220,77 @@ class WithinServiceTest {
         var pointReq = new WithinRequest(
                 M.readTree("{\"type\":\"Point\",\"coordinates\":[116.32,40.00]}"), 500.0, null, null, null);
 
-        service.within(pointReq);
+        WithinResponse r = service.within(pointReq);
 
         verify(tracks).prepareBufferRegion(anyString(), eq(500.0));
         verify(tracks, never()).prepareRegion(anyString());
+        // params 回显 bufferM（缓冲区场景的 500.0）
+        assertEquals(500.0, r.params().bufferM());
+    }
+
+    /**
+     * ⭐ 契约：三条查询都必须用<b>仓储 row[2] 返回的 WKT</b>，而不是 {@code region.wkt()}。
+     *
+     * <p>为什么值得一条专门的测试：两者在"缓冲区"路径上必然不同（一个是 POINT，一个是
+     * PostGIS 算出来的 33 顶点圆多边形）。如果哪天误把 {@code region.wkt()} 传下去，
+     * 别的测试全都还是绿的，而查出来的范围完全不对 —— 这正是设计文档 5.5 要防的那类静默错误。
+     */
+    @Test
+    void 查询用的是仓储返回的WKT而不是region的WKT() {
+        String 查询WKT = "POLYGON((116.3 39.9,116.4 39.9,116.4 40,116.3 40,116.3 39.9))";
+        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of());
+
+        service.within(req(null, null, null));
+
+        // prepared() 的 row[2] 就是这个 WKT；region.wkt() 是由 JSON 现拼的另一个字符串
+        verify(tracks).findIdsIntersecting(eq(查询WKT), any(), any());
+        verify(tracks, never()).findIdsIntersecting(argThat(w -> !查询WKT.equals(w)), any(), any());
+    }
+
+    @Test
+    void 命中条数正好等于limit时不算截断() {
+        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of(1L, 2L));
+        when(points.countPointsInsideGrouped(anyString(), any(), any())).thenReturn(List.of(
+                new Object[]{1L, 10L}, new Object[]{2L, 20L}));
+        when(tracks.aggregateWithinStats(any())).thenReturn(List.<Object[]>of(
+                new Object[]{"geolife", 2L, 30.0, "2008-11-15T01:01:33Z", "2008-11-15T01:01:33Z"}));
+        when(tracks.findWithinSummariesByIds(any())).thenReturn(new ArrayList<>(List.of(
+                summary(1L, 10.0), summary(2L, 20.0))));
+
+        WithinResponse r = service.within(req(2, null, null));
+
+        // 边界：2 条命中、limit=2 —— 没有东西被砍掉，truncated 必须是 false（判据是 >，不是 >=）
+        assertEquals(2, r.items().size());
+        assertFalse(r.truncated());
+        assertEquals(2, r.total());
+    }
+
+    @Test
+    void limit未给时用默认50() {
+        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of());
+
+        WithinResponse r = service.within(req(null, null, null));
+
+        assertEquals(50, r.params().limit()); // WithinProperties.defaultLimit 的默认值
+    }
+
+    @Test
+    void 非空时间窗原样透传且params回显() {
+        OffsetDateTime 窗起 = OffsetDateTime.parse("2009-01-01T00:00:00Z");
+        OffsetDateTime 窗止 = OffsetDateTime.parse("2009-06-01T00:00:00Z");
+        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of());
+
+        WithinResponse r = service.within(req(null, 窗起, 窗止));
+
+        // 有值时既不能被换成哨兵，也不能被改写
+        var cap = org.mockito.ArgumentCaptor.forClass(OffsetDateTime.class);
+        verify(tracks).findIdsIntersecting(anyString(), cap.capture(), cap.capture());
+        assertEquals(List.of(窗起, 窗止), cap.getAllValues());
+
+        // params 回显：limit 未给 → defaultLimit=50；bufferM 本次为 null；时间窗原样
+        assertEquals(50, r.params().limit());
+        assertNull(r.params().bufferM());
+        assertEquals(窗起, r.params().from());
+        assertEquals(窗止, r.params().to());
     }
 }
