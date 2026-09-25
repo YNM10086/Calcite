@@ -15,6 +15,11 @@
   轮 5：⭐ 补多边形交互 + ESC 出口；D/E 段的"有没有出结果"改成**数网络请求**（理由见下）
   轮 6：⭐ 补「区域轮廓 + 命中轨迹画在地球上」与「列表↔地图联动」的**实体**证据；
         造出「命中 > DRAW_LIMIT」的真实场景；零溢出改成有结果 / 无结果都量 + CSS 契约
+  轮 7：⭐ 用户实测「多边形选框只能是三角形」——E2 段补两条硬判据：
+        ①「点完 4 个顶点还没闭合」（第 4 点离起点 44px ≫ CLOSE_PX=12，请求数必须不变）；
+        ②「请求体去重顶点数 = 4」（四边形）。根因是 Cesium 的鼠标事件对象是模块级单例、
+        组件存了引用（见 CesiumGlobe.vue 的 screenCopy 注释）；旧判据只看"有没有查出数字"，
+        三角形照样能通过 —— 这就是它溜过去的原因。
 
 == 修复轮 6：实体证据（规格 9.5）+ 零溢出只在空面板量过 + 一条恒真断言 ==
 
@@ -161,6 +166,7 @@
 靠数据的断言在失败明细里带**实测值**；靠"页面有没有暴露 Cesium / 组件实例"的判据能降级就降级，
 真正的功能判据（旋转开关、绘制中不旋转、零溢出、零报错）一条不少。
 """
+import json
 import math
 import os
 import sys
@@ -213,6 +219,7 @@ errors = []        # pageerror + console.error 合起来（"控制台零报错"�
 page_errors = []   # 只记 pageerror，单独看（切档断言用它）
 console_errors = []
 http_log = []      # 页面发出的每个请求 [(method, url)]（修复轮 5：数圈选请求，见 req_count）
+within_bodies = []  # 每次 POST /api/analysis/within 的请求体（修复轮 7：断言多边形真的是四边形）
 
 
 # ---------------------------------------------------------------- 断言基础设施
@@ -294,8 +301,29 @@ def on_request(req):
     """`page.on("request")` 的回调：只记账，**绝不抛异常**（事件回调里抛异常会打断验收）"""
     try:
         http_log.append((req.method, req.url))
+        if req.method == "POST" and "/api/analysis/within" in req.url:
+            within_bodies.append(req.post_data)
     except Exception:                           # noqa: BLE001
         pass
+
+
+def within_ring_distinct(body):
+    """最近一次圈选请求体里，多边形外环**去重后**的顶点数；不是多边形 / 解析失败返回 None。
+
+    ⚠️ 为什么要去重：`polygonGeometry()` 会把环闭合（末点 = 首点），而 Cesium 的一次 `dblclick`
+    会额外产生两次 LEFT_CLICK（见 E2 段注释），所以原始坐标数总是比"用户点了几下"多。
+    判据只关心**用户真的画出了几个不同的顶点** —— 三角形 3、四边形 4。
+    """
+    if not body:
+        return None
+    try:
+        geom = (json.loads(body) or {}).get("geometry") or {}
+    except Exception:                           # noqa: BLE001
+        return None
+    if geom.get("type") != "Polygon":
+        return None
+    ring = (geom.get("coordinates") or [[]])[0]
+    return len({(round(float(x), 9), round(float(y), 9)) for x, y in ring})
 
 
 def req_count(method=None, contains=None):
@@ -1795,6 +1823,14 @@ def main():
                 page.mouse.click(qx, qy)
                 page.wait_for_timeout(120)
                 note(f"多边形第 {i + 1} 个点：( {qx:.0f},{qy:.0f} )")
+            # ⭐ 修复轮 7（2026-09-25 用户实测「多边形选框只能是三角形」）：
+            #    第 4 个顶点离起点 44px（≫ CLOSE_PX=12）⇒ **绝不能**在这里就闭合。
+            #    缺陷版本正是把第 4 次点击判成"点回起点"，于是只能画出三角形。
+            req_after4_p = within_post_count()
+            check("⭐E2) 点完 4 个顶点还没闭合（请求数不变）—— 第 4 点离起点 44px ≫ CLOSE_PX=12",
+                  req_after4_p == req_before_p,
+                  f"绘制前请求数={req_before_p}，点完 4 个顶点后={req_after4_p}"
+                  f"（期望相等；多了说明第 4 次点击被当成了闭合）。{req_summary()}")
             # 双击闭合。⚠️ Cesium 会把一次 dblclick 拆成**两次 LEFT_CLICK + 一次
             # LEFT_DOUBLE_CLICK**（LEFT_CLICK 在 mouseup 里发、dblclick 另发），所以末尾会多一个
             # **与第 4 点重合**的顶点。实测无害：PostGIS 3.6 对重复顶点
@@ -1825,6 +1861,14 @@ def main():
                   f"闭合方式=在第 4 点 ({quad[3][0]:.0f},{quad[3][1]:.0f}) 处 dblclick；"
                   f"请求计数 {req_before_p} → {req_after_p}"
                   f"（新增 {req_after_p - req_before_p}，期望 ≥1）；{req_summary()}")
+            # 断言 1b（⭐ 修复轮 7）：请求体必须是**四边形**，不是三角形。
+            #   这是"多边形能画出多于 3 个顶点"的**端到端硬证据**：只看 stat-tracks 有没有数字
+            #   是抓不住这个缺陷的 —— 三角形照样能查出数、照样让断言 1 通过（实测就是这样溜过去的）。
+            distinct_p = within_ring_distinct(within_bodies[-1]) if within_bodies else None
+            check("⭐E2) 多边形请求体的去重顶点数 = 4（四边形，不是三角形）",
+                  distinct_p == 4,
+                  f"去重顶点数={distinct_p}（期望 4；3 = 又只剩三角形）。"
+                  f"请求体={within_bodies[-1] if within_bodies else None}")
             # 断言 2：闭合后必须已经退出绘制态
             n_cancel_p = count_of(page, '[data-testid="draw-cancel"]')
             check("多边形闭合后已退出绘制态（draw-cancel 消失）", n_cancel_p == 0,

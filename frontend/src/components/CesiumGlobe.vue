@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
+  Cartesian2,
   Cartesian3,
   Cartographic,
   ClockRange,
@@ -424,6 +425,29 @@ function clearDrawPreview() {
   v.entities.removeById(PREVIEW_POLY_ID)
 }
 
+/** 屏幕坐标 → **副本**。
+ *
+ *  ⚠️⚠️ 绝不允许把 `m.position` / `m.endPosition` 本身存起来（`rectStart`、`drawScreenPoints` 都算），
+ *  必须经这个函数复制一份。原因是 Cesium 的鼠标事件对象是**模块级单例**
+ *  （`CesiumUnminified/index.js:237297-237302` 的 `mouseUpEvent` / `mouseClickEvent` 等，
+ *  `cancelMouseEvent()` 在 :237320 用 `Cartesian2.clone(position, mouseClickEvent.position)`
+ *  把新位置写进**同一个对象**再交给 handler），所以 handler 每次收到的 `m.position`
+ *  是**同一个 Cartesian2 实例**，只是里面的 x/y 被改写。
+ *
+ *  踩过的坑（2026-09-25 用户实测：「多边形选框只能是三角形」）：`drawScreenPoints` 存的是引用，
+ *  数组里每一项都指向那个单例 ⇒ 全都等于"最后一次点击的位置"
+ *  ⇒ `screenDistance(本次点击, drawScreenPoints[0])` **恒为 0**
+ *  ⇒ 第 4 次点击（哪怕离起点 566px）被判成"点回起点"而闭合，多边形永远只能是三角形
+ *  （浏览器探针实测：点 4 个顶点只发出外环 4 个坐标的三角形请求）。
+ *  同一处缺陷还让"鼠标回到起点高亮"比对的是**最后一个顶点**而不是起点。
+ *
+ *  复制用 `new Cartesian2`（与 Cesium 传进来的类型一致）：`pickEllipsoid` / `screenDistance`
+ *  都只读 x/y，但保持类型一致可以避免将来换成别的 Cesium API 时出现"鸭子类型不够用"的问题。
+ */
+function screenCopy(p) {
+  return new Cartesian2(p.x, p.y)
+}
+
 /** 两个屏幕点的距离（像素）—— 判断"鼠标回到起点了"用 */
 function screenDistance(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y)
@@ -510,7 +534,9 @@ function setDrawingMode(mode) {
 
   if (mode === 'rect') {
     h.setInputAction((m) => {
-      rectStart = m.position
+      // ⚠️ 必须存副本：`m.position` 是 Cesium 的模块级单例，直接存引用会让
+      //    "回到起点"的距离恒为 0（见 screenCopy 的注释）
+      rectStart = screenCopy(m.position)
       clearDrawPreview() // 上一笔理论上已被清；这里保险起见，保证新的一次拖动从干净状态开始
     }, ScreenSpaceEventType.LEFT_DOWN)
     // 拖动中【只画本地预览、绝不 emit】—— 父组件一收到就会把模式收回 idle（见本节顶部注释）
@@ -550,7 +576,9 @@ function setDrawingMode(mode) {
         return
       }
       drawPoints.value = [...drawPoints.value, p]
-      drawScreenPoints = [...drawScreenPoints, m.position]
+      // ⚠️ 屏幕坐标存【副本】：`m.position` 每次都是同一个单例对象，存引用会让
+      //    "点回起点"的判断恒真 → 多边形只能画出三角形（见 screenCopy 的注释）
+      drawScreenPoints = [...drawScreenPoints, screenCopy(m.position)]
       drawPreviewPolygon() // 本地预览：把已画的折线显示出来（不 emit）
     }, ScreenSpaceEventType.LEFT_CLICK)
     // 鼠标移动：橡皮筋 + 回到起点时高亮，同样是纯本地表现，不 emit

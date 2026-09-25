@@ -407,11 +407,14 @@ PowerShell 只负责启动和查错，不显示图形。
   改成**让 PostGIS 把圆算成多边形**：`ST_Intersects(t.geom, ST_Buffer(点::geography, r)::geometry)`
   → **7.9 ms（约 38 倍）**；后端因此**只剩一条判定路径**（圆多边形与手画多边形走同一段代码）
 - ⚠️ **平面 vs 球面的分歧**：全库有 **3 条**轨迹（id **121/161/166**）各含一段 >1000 km 的跳跃记录，
-  平面解释与球面解释在这 3 条上**最大差 11.7 km**。实测 `(118.95, 35.66)` + 1.5 km 缓冲区：
+  平面解释与球面解释在这 3 条上**最大差 13.4 km**（id 161；121 是 11.7 km、166 是 12.2 km）。
+  实测 `(118.95, 35.66)` + 1.5 km 缓冲区：
   **平面（圆多边形）3 条 / 球面（`ST_DWithin`）0 条**。**有意不修** ——
   修它就得放弃索引（回到 303 ms）；已用**测试 + 验收**钉住（设计文档 3.4）
 - ⚠️ **非法几何会"静默出错"**：自交（蝴蝶结）多边形 `ST_IsValid = false`，
-  但 `ST_Intersects` **不报错**，而是返回 **237 条** —— 比它的外接矩形（232 条）**还多**，用户无从察觉。
+  但 `ST_Intersects` **不报错**，而是返回 **237 条** —— 这个数字与任何有意义的区域都不对应，用户无从察觉。
+  （⚠️ 2026-09-25 更正：原写"比它的外接矩形（232 条）还多"是**拿两个不同区域的数字作比较** ——
+  那个蝴蝶结**自己的**外接矩形同样是 237，232 是更小的北京框。论据改掉，结论不变。）
   所以加了 `ST_IsValid` 守卫：一律 **400 + 中文原因**（"区域有交叉，请重画"），**不自动修复**
   （这是**拓扑**问题，`RegionGeometry` 的结构校验管不到；环未闭合之类的**结构**问题在那一层就被挡成 400）
 - ⚠️ **绑定变量会换执行计划**：区域内点数统计用**字面量**实测约 **180 ms**（顺序扫描 + 聚合）；
@@ -419,6 +422,28 @@ PowerShell 只负责启动和查错，不显示图形。
   本轮**接受 180~456 ms 区间**（接口总耗时实测 **203~628 ms**，远低于 1000 ms 红线），**未优化**
 - ⚠️ **`pointCount` 必须也受时间窗约束**（计划评审时抓到的**真缺陷**，设计文档 11.12）——
   否则会出现"**0 条轨迹穿过、却有 18 万个点**"这种统计卡。时间窗口径与 `trackCount` 一致
+- ⭐⭐ **修复轮 7（2026-09-25，用户手工实测「多边形选框只能是三角形」）—— M3 唯一一个"四层验收全绿却仍漏掉"的功能缺陷**：
+  - **现象**：自由多边形**只能画出三角形** —— 点 3 个顶点后，第 4 次点击（哪怕离起点 566 px）直接被当成
+    "点回起点"而闭合；"鼠标回到起点高亮"也跟着失效（比对的是**最后一个**顶点）
+  - **根因**：Cesium 的**鼠标事件对象是模块级单例**（`Build/CesiumUnminified/index.js:237297-237320`：
+    `mouseUpEvent` / `mouseClickEvent`，`cancelMouseEvent()` 每次用 `Cartesian2.clone(position, …)`
+    **写进同一个对象**）⇒ handler 每次收到的 `m.position` 是**同一个 `Cartesian2` 实例**。
+    组件把 `m.position` 原样存进 `drawScreenPoints` ⇒ 数组每一项都是同一个引用
+    ⇒ `screenDistance(本次点击, drawScreenPoints[0])` **恒为 0** ⇒ 第 4 次点击必然"闭合"
+  - **实测证据**（探针 `.tmp/probe-polygon-triangle.py`，判据 = `POST /api/analysis/within` 请求体）：
+    修复前"点 4 个顶点"→ 第 4 次点击就发请求、外环 **4 个坐标 = 3 个顶点**；
+    修复后"点 4 个顶点"→ **一个请求都不发**，闭合后外环 7 个坐标 / **去重 4 个顶点**
+  - **解法**：`screenCopy(p) = new Cartesian2(p.x, p.y)`，`rectStart` 与 `drawScreenPoints` **只存副本**
+    （已加进 `frontend/src/components/CesiumGlobe.vue`，规格 2.7 第二处更正 / 11.13）
+  - **为什么四层验收都没抓住**：① 判据问的是"**有没有结果**"而不是"结果对不对"——
+    三角形照样能查出数字，`stat-tracks` 照样有值；② 组件级桩测试**自己造 `{position:{x,y}}` 字面量**
+    （每次都是新对象），替身比运行时**更宽容** ⇒ 这类缺陷在夹具里永远不红（**与上一次 enableRotate
+    Critical 是同一个病根**）。两处都补上了：`.tmp/cesium-stub.mjs` 新增
+    `clickAt/moveTo/downAt/upAt/dblClickAt`（复用同一对象），`check-within.py` 新增两条硬判据
+  - **修复后的全量回归（2026-09-25 实测全绿）**：后端 `mvn test` **162** / 前端 node **157** /
+    浏览器 8 脚本 **123**（stay 7、chart-pixels 10、import-pixels 6、filter 7、hotspots 17、
+    density 15、similarity 17、**within 44**）/ 组件级桩 `.tmp/check-runtime-task9.mjs` **67** /
+    `vite build` **1506 modules**
 - **回归基线（2026-09-25 实测，全绿）**：
   - 后端 `mvn test` **162**（基线 133 → 162 = +`RegionGeometryTest 16` +`WithinServiceTest 13`）
     ⚠️ 任务书里写的"期望 163"是**陈旧值** —— 163→162 是 Task 4 修复轮**有意合并**了一条
@@ -426,8 +451,11 @@ PowerShell 只负责启动和查错，不显示图形。
   - 前端 node **7 个套件 157 项**（playback 17 / chart 37 / hotspot 25 / density 25 /
     similarity 19 / data-edit 11 / **region 23**）
   - **浏览器 8 个脚本全绿**：stay **7** / chart-pixels **10** / import-pixels **6** / filter **7** /
-    hotspots **17** / density **15** / similarity **17** / **within 42**（最终审查修复波后从 31 升到 42，
-    含"有结果时面板零溢出"四种组合、区域/命中轨迹实体断言、列表↔地图高亮）
+    hotspots **17** / density **15** / similarity **17** / **within 44**（最终审查修复波后从 31 升到 42；
+    修复轮 7 再 +2 条多边形硬判据 → **44**，含"有结果时面板零溢出"四种组合、区域/命中轨迹实体断言、
+    列表↔地图高亮）
+  - 组件级桩测试（`.tmp/check-runtime-task9.mjs`，不属基线计数但每次改地球都要跑）：**67 项 0 失败**
+    （修复轮 7 前是 64/3 —— 3 条红的正是这个缺陷）
   - **接口对拍 5 个全绿**：`verify-within-api` **105** / `verify-hotspot-api` **375** /
     `verify-density-api` **51** / `verify-similarity-api` **45** / `verify-data-edit-api`（提权下全绿）
   - ⚠️ `verify-data-edit-api.py` / `check-data-edit.py` **必须提权**才能跑（读写回收站目录），
@@ -439,6 +467,12 @@ PowerShell 只负责启动和查错，不显示图形。
   —— 模板仍在用该类（`:class="{ live: trackPoints.length > 0 }"`），所以状态行"已载入轨迹"时的蓝色高亮没了。
   **纯视觉、无功能影响**，**一行即可恢复**（放回 `.status` 基础规则之后、`@media` 之前）。
 - 📌 **明确未做**：保存 / 命名区域、区域导出、多区域叠加、区域内的深度指标（限速 / 爬升）
+- 📌 **M3 的 Word 报告还没生成**（用户 2026-09-25 确认过"规则"但没说时间）——
+  规则：**先写 `.md`**，再在**仓库根目录**跑 `python scripts/tools/md2docx.py <md> <docx>`，
+  输出到 `D:\Calcite-note\`（与本目录既有报告同处）；结构参考
+  `docs/superpowers/plans/2026-09-17-m2-similarity.md` 的 **Task 11**（Step 3 给了逐节结构，
+  以及"哪一节要写得最详细"的写法），配图走 `docs/learning/figs/` 里的脚本；
+  ⚠️ **绝不用 officecli 写 docx**（本机写不进、还假报通过）
 
 ### ▶ 下次接着做（2026-09-25 M3 收工时的状态）
 - ✅ **M2 全部完成**（四个阶段：停留点识别 → 停留热点 → 网格密度 → 轨迹相似度）；
@@ -457,9 +491,14 @@ PowerShell 只负责启动和查错，不显示图形。
     完整结论在设计文档**第 12 节**，调研底稿另存 `docs/map-matching-assessment.md`；
     将来若要轻量替代（点到最近道路距离 / 路网可视化 / 一次性离线演示）见 12.3，各约 1 天
 - **下一步 = M4 收尾**：**README + 架构图 + 部署文档 + 演示数据集**（M3 之后不再加新的分析功能）
+  —— 出处是**总设计文档** `docs/superpowers/specs/2026-09-08-calcite-trajectory-analysis-design.md`
+  第 142 行「M4 收尾（第 12 周）」那一行，**不是**这里新造的阶段
+  ⚠️ **用户 2026-09-25 明确：写 Word 文档不算 M4** —— Word 报告是"阶段交付物"这一既有惯例
+  （见本文件「文档工具决策」与计划里的 Task 11），与 M4 的四项是两回事
 - ✅ **合并已完成**（2026-09-25）：`feat/m3-within` 已**快进合并回 `main`**（`55f8a3a..301d686`，28 文件 / +5974 −137），
-  特性分支已删除。合并 = 分支 = `301d686`，**工作区干净**。
-- ⚠️ **推送未做（用户 2026-09-25 明确选择"先不推"）**：`main` **领先 `origin/main` 59 个提交**。
+  特性分支已删除。合并后又在 `main` 上做了**修复轮 7**（多边形三角形缺陷）+ 文档同步。
+- ⚠️ **推送未做（用户 2026-09-25 明确选择"先不推"）**：`main` **领先 `origin/main` 61 个提交**
+  （已经含本轮多边形修复 `84ae80a`；数字每次以 `git rev-list --count origin/main..main` 为准）。
   下次推送时走 `git push`（沙箱内需提权 `danger-full-access`，SSH 在沙箱里必崩）。
 
 - ✅ **用户点名的 Word 交付物已交**（2026-09-21）——
@@ -535,7 +574,7 @@ PowerShell 只负责启动和查错，不显示图形。
    现在 400/500 的**中文原因**都能进响应体（`verify-data-edit-api.py` 里那次 500 已能看到
    `导出到回收站失败，未执行`）。
 
-### M3 · 空间范围查询（2026-09-25，四条）
+### M3 · 空间范围查询（2026-09-25，五条）
 
 1. **Cesium 的 `screenSpaceCameraController` 挂在 `viewer.scene` 上，不在 `viewer` 上** ——
    **现象**：只在浏览器里炸 —— `Cannot set properties of undefined (setting 'enableRotate')`，
@@ -573,6 +612,26 @@ PowerShell 只负责启动和查错，不显示图形。
    ③ ⚠️ **不要在"准备交付 / 做数据库快照 / 主控要审查"之前顺手跑它**，
    它会让你刚固定好的基线数字当场失效（本次就是这么把 `verify-similarity-api.py` 弄红的）；
    ④ 它还需要**提权**（要写回收站目录 `D:\Calcite-note\backups\deleted`）。
+5. **⚠️ 第三方库的"事件对象"可能是**模块级单例** —— 存引用 = 只剩最后一次的值**（用户手工用出来的缺陷）——
+   **现象**：自由多边形**只能画出三角形**（点 3 个顶点后，第 4 次点击直接闭合，且丢掉了那一下的位置）。
+   浏览器探针实测：修复前"点 4 个顶点"→ 第 4 次点击就发请求、`geometry` 外环只有 **4 个坐标 = 3 个顶点**。
+   **根因**：Cesium 的 `mouseClickEvent` / `mouseUpEvent` / `mouseMoveEvent` 都是**模块级对象**，
+   `cancelMouseEvent()` 每次 `Cartesian2.clone(position, mouseClickEvent.position)` ——
+   **写进同一个对象**再交给 handler。组件把 `m.position` 存进 `drawScreenPoints`，
+   于是数组里每一项都指向同一个实例 ⇒ 全都等于"最后一次点击的位置"
+   ⇒ `screenDistance(本次点击, drawScreenPoints[0])` **恒为 0** ⇒ 第 4 次点击必被判成"点回起点"。
+   **解法**：`screenCopy(p) = new Cartesian2(p.x, p.y)`，凡是要留住的位置**只存副本**
+   （`rectStart`、`drawScreenPoints`；规格 11.13）。
+   ⭐ **教训（三条，都值得推广）**：
+   ① **签名对 ≠ 语义对** —— `m.position` 的类型写着 `Cartesian2`、用起来也没错，
+   但"每次都是同一个实例"是**实现细节，`.d.ts` 里根本看不出来**（上一次 enableRotate 的教训是
+   "类型声明证明不了属性挂在哪个对象上"，这次更进一步）；
+   ② **替身比运行时宽容 = 夹具只证明"在假环境里能跑"** —— 桩测试自己写 `{position:{x,y}}` 字面量，
+   每次都是新对象，于是这类缺陷**永远不会红**；替身必须**照抄运行时的形状**（已加
+   `clickAt/moveTo/...` 复用同一对象）；
+   ③ **判据要问"结果对不对"，不能只问"有没有结果"** —— M3 四层验收全绿却漏掉它，
+   因为每条断言都只要求"查出了数字"（三角形照样有数字）。**用户手工用一次就发现了**：
+   ⭐ **自动化验收要盯住"用户能做什么"，而不是"接口回了什么"**。
 
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
