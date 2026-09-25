@@ -32,6 +32,12 @@ spring:
 
 server:
   port: 8080
+  # 让 ResponseStatusException 的 reason（"区域有交叉，请重画"这类给人看的原因）
+  # 出现在 4xx/5xx 的响应体里。Spring Boot 3 默认 never，会把 message 字段整条丢掉，
+  # 于是 M3 承诺的「400 + 人能看懂的原因」到不了用户眼前（只有一句 Bad Request）。
+  # 前端（如 DataManager.vue）本来就是按 data.message || data.error 读取的，天然受益。
+  error:
+    include-message: always
 
 # 轨迹导入
 calcite:
