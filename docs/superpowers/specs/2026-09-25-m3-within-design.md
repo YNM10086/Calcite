@@ -376,7 +376,7 @@ POST 的 body 天然适合放 GeoJSON。（对比：密度接口只需要 `bbox`
 | `web/dto/WithinResponse`（record） | 响应：`region` / `stats` / `items` / `total` / `truncated` / `params`；内嵌 `Stats` / `Item` / `Params` | 沿用 `HotspotResponse.Params` 的嵌套 record 风格 |
 | `service/RegionGeometry`（纯计算，零依赖） | GeoJSON → **结构**校验（类型白名单 / 环闭合 / 最少点数 / 顶点数 / 坐标越界）→ WKT 字符串。⚠️ **不做拓扑校验**（自交、面积为 0 要靠 PostGIS 的 `ST_IsValid`，见 5.3） | **纯函数，可以直接用 JUnit 测**（对齐 `SimilarityMath` / `DensityGrid` 的做法） |
 | `service/WithinService` | 编排：算 region → 查 id → 查 items → 算统计 → 截断 | 碰数据库的都在这层 |
-| `service/WithinProperties`（`@ConfigurationProperties`） | `calcite.within.*` 配置 | ⚠️ **YAML 列表/嵌套必须用 `@ConfigurationProperties`**，`@Value` 绑不了（既有教训） |
+| `config/WithinProperties`（`@ConfigurationProperties`） | `calcite.within.*` 配置 | ⚠️ **YAML 列表/嵌套必须用 `@ConfigurationProperties`**，`@Value` 绑不了（既有教训）；放在 `config/` 包与 `DensityProperties` / `SimilarityProperties` 一致 |
 | `web/AnalysisController.within()` | 收 HTTP、参数校验、400/200 的取舍 | 不写 SQL |
 
 **为什么不新建 `WithinController`**：`AnalysisController` 的类注释已经写明"跨轨迹的分析接口都放这里"，
@@ -929,7 +929,7 @@ backend/src/main/java/com/calcite/
 ├── web/dto/WithinResponse.java           响应（record，内嵌 Stats / Item / Params）
 ├── service/RegionGeometry.java           ⭐ 纯计算：GeoJSON 校验 → WKT、顶点数、越界
 ├── service/WithinService.java            编排：region → id → items → 统计 → 截断
-└── service/WithinProperties.java         calcite.within.* 配置
+└── config/WithinProperties.java         calcite.within.* 配置（放 config/ 与 DensityProperties 一致）
 ```
 
 **后端（改动）**
