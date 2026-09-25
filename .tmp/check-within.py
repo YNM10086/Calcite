@@ -38,6 +38,7 @@
 import math
 import os
 import sys
+import time
 import traceback
 
 from playwright.sync_api import sync_playwright
@@ -53,6 +54,16 @@ D_RECT_W = 140                         # D 段（绘制中拖拽）的幅度
 D_RECT_H = 0
 FLY_WAIT_MS = 3500                     # flyTo duration 1.5s + 余量（真实等待，不用虚拟时钟）
 FLIGHT_HEIGHT_DROP_RATIO = 0.5         # 相机高度降到原来一半以下才算"真的飞过去了"
+
+# ⭐ 修复轮 3：测"视野包围盒"之前必须先等相机稳定。
+#    原因是 Cesium 拖拽松手后有**惯性余摆（inertiaSpin）**还会衰减几百毫秒，
+#    在余摆中读到的"拖拽前包围盒"是假的 —— 修复轮 2 就是这样让 D 段读到 16.11% 的假位移
+#    （同一时刻相机自身只动了 0.000097 弧度 ≈ 10 米，恰好证明旋转确实被关掉了）。
+#    所以：**每个测量点都先用 wait_view_stable() 等停稳，再读那个基准值。**
+STABLE_TIMEOUT_MS = 5000               # 等稳定的上限；超时就记一条诊断并继续（不判失败）
+STABLE_POLL_MS = 200
+STABLE_REL_EPS = 0.001                 # 连续两次读数位移 ÷ 视野跨度 < 0.1% 算"没动"
+STABLE_NEED = 3                        # 连续 3 次稳定才算停稳（过滤单次抖动）
 
 VIEWPORT = {"width": 1600, "height": 900}
 SHORT_VIEWPORTS = ((1366, 660), (1600, 600))
@@ -360,6 +371,73 @@ def bbox_shift_ratio(b0, b1):
     return max(r_lon, r_lat), r_lon, r_lat
 
 
+def view_bbox(page):
+    """轻量地只取一次 `getViewBbox()`（轮询用；失败返回 None，绝不抛异常）"""
+    try:
+        return page.evaluate(r"""() => {
+            %s
+            const g = globeApi(findGlobeInst());
+            if (!g || typeof g.getViewBbox !== 'function') return null;
+            try { return g.getViewBbox(); } catch (e) { return null; }
+        }""" % GL_JS)
+    except Exception:                           # noqa: BLE001
+        return None
+
+
+def _bbox_short(bbox):
+    """一行的包围盒摘要（诊断用，别把整串小数全打出来）"""
+    if not bbox:
+        return "null"
+    try:
+        return (f"[{bbox['west']:.5f},{bbox['east']:.5f}]x"
+                f"[{bbox['south']:.5f},{bbox['north']:.5f}]")
+    except (KeyError, TypeError):
+        return "非法"
+
+
+def wait_view_stable(page, label, timeout_ms=STABLE_TIMEOUT_MS):
+    """等相机/视野**停稳**再测量，返回 (bbox, waited_ms, stable)。
+
+    ⭐ 为什么必须有这一步（修复轮 3）：
+      Cesium 拖拽松手后左键旋转有**惯性余摆（inertiaSpin）**，会继续衰减几百毫秒。
+      若在余摆过程中读"拖拽前"的包围盒，它就是个**运动中的值** —— 等会儿再读"拖拽后"
+      就会凭空多出一段位移。修复轮 2 的 D 段失败（16.11% vs 阈值 3%）就是这么来的：
+      同一时刻**相机自身**只动了 0.000097 弧度（≈10 米），证明左键旋转确实被关掉了，
+      动的是"上一段 C 拖拽留下的余摆"。
+
+    判据：连续 STABLE_NEED 次读数两两之间 `位移 ÷ 视野跨度 < STABLE_REL_EPS`（0.1%）。
+    超时不算失败 —— 只把"等了多少毫秒 / 是否稳定"打进诊断（调用方各自决定怎么办）。
+    """
+    t0 = time.time()
+    last = None
+    hits = 0
+    readings = []
+    while True:
+        b = view_bbox(page)
+        readings.append(b)
+        if len(readings) > 8:
+            readings.pop(0)
+        if b and last:
+            r = bbox_shift_ratio(last, b)
+            if r is not None and r[0] < STABLE_REL_EPS:
+                hits += 1
+                if hits >= STABLE_NEED - 1:
+                    waited = int((time.time() - t0) * 1000)
+                    note(f"视野稳定：{label} 等了 {waited} ms，"
+                         f"末次读数 {_bbox_short(b)}")
+                    return b, waited, True
+            else:
+                hits = 0
+        last = b
+        if (time.time() - t0) * 1000 >= timeout_ms:
+            waited = int((time.time() - t0) * 1000)
+            note(f"⚠️ 视野未在 {waited} ms 内稳定：{label}；"
+                 f"最后几次读数 = {[ _bbox_short(x) for x in readings[-4:] ]}"
+                 f"（若后续位移断言红了，先看这里 —— 可能是惯性还没停，也可能是真被转了）")
+            return last, waited, False
+        page.wait_for_timeout(STABLE_POLL_MS)
+
+
 def _screen_of(page, lon, lat):
     """（尽力而为）经纬度 → 窗口坐标。拿不到 Viewer 时返回 None（只用于诊断输出）。"""
     try:
@@ -597,6 +675,8 @@ def main():
             if n_items > 0:
                 page.locator(".track-list .item").first.click()
                 page.wait_for_timeout(FLY_WAIT_MS)   # flyTo duration 1.5s，真实等待
+                # ⭐ 修复轮 3 采集点①：flyTo 动画结束后等停稳，再读相机高度与实体投影点
+                wait_view_stable(page, "点完第一条轨迹（flyTo 后）")
                 pr_fly = globe_probe(page)
                 cam_after_fly = pr_fly["cam"]
                 note(f"点第一条轨迹后：相机 {_fmt_cam(cam_after_fly)}；"
@@ -681,8 +761,9 @@ def main():
         c_ratio_bbox = None        # C 段实测的"位移 ÷ 视野跨度"（D 段的阈值要用它）
         shot_c_before = os.path.join(".tmp", "shot-within-c-before.png")
         shot_c_after = os.path.join(".tmp", "shot-within-c-after.png")
+        # ⭐ 修复轮 3 采集点②：C 段拖拽前的基准 —— 先等视野停稳再读
+        bbox_c_before, _, _ = wait_view_stable(page, "C 段拖拽前")
         pr_c_before = globe_probe(page)
-        bbox_c_before = pr_c_before["bbox"]
         page.screenshot(path=shot_c_before)
         img_before = Image.open(shot_c_before).convert("RGB")
         page.mouse.move(canvas["x"] + canvas["width"] * 0.70,
@@ -692,10 +773,15 @@ def main():
                         canvas["y"] + canvas["height"] * 0.60, steps=10)
         page.mouse.up()
         page.wait_for_timeout(2500)            # 真实等待惯性 / 重绘结束
+        # ⭐ 修复轮 3 采集点③：C 段拖拽后也要等停稳 —— 否则"拖拽后"读的是余摆中的值，
+        #    会把惯性算成位移（修复轮 2 的 D 段假红就是这么来的）
+        bbox_c_after, c_waited, c_stable = wait_view_stable(page, "C 段拖拽后（等余摆停）")
         page.screenshot(path=shot_c_after)
         img_after = Image.open(shot_c_after).convert("RGB")
         pr_c_after = globe_probe(page)
-        bbox_c_after = pr_c_after["bbox"]
+        note(f"C 段测量点：拖拽前 {_bbox_short(bbox_c_before)} → "
+             f"拖拽后 {_bbox_short(bbox_c_after)}"
+             f"（后一次等了 {c_waited} ms，稳定={c_stable}）")
 
         # ⭐ 修复轮 2：C 段的判据换成「视野包围盒中心是否移动」——
         #    与缩放无关，是"地球转没转"的硬证据。
@@ -715,8 +801,8 @@ def main():
                   c_ratio_bbox >= C_MIN_SHIFT,
                   f"中心位移 = {c_ratio_bbox:.1%} 视野跨度"
                   f"（经度向 {c_shift[1]:.1%} / 纬度向 {c_shift[2]:.1%}），"
-                  f"阈值 {C_MIN_SHIFT:.0%}；拖拽前 {_bbox_txt(bbox_c_before)} → "
-                  f"拖拽后 {_bbox_txt(bbox_c_after)}")
+                  f"阈值 {C_MIN_SHIFT:.0%}；两个测量点都已等稳定（后一次 {c_waited}ms/"
+                  f"{c_stable}）；{_bbox_txt(bbox_c_before)} → {_bbox_txt(bbox_c_after)}")
             note(f"C 段视野包围盒中心位移 = {c_ratio_bbox:.1%} 视野跨度"
                  f"（经度向 {c_shift[1]:.1%} / 纬度向 {c_shift[2]:.1%}）；"
                  f"{_bbox_txt(bbox_c_before)} → {_bbox_txt(bbox_c_after)}")
@@ -750,7 +836,9 @@ def main():
 
             pr_d_before = globe_probe(page)
             cam_before = pr_d_before["cam"]
-            bbox_d_before = pr_d_before["bbox"]
+            # ⭐ 修复轮 3 采集点④：D 段拖拽前的基准 —— 等 C 段的余摆彻底停稳再读
+            bbox_d_before, d_pre_waited, d_pre_stable = wait_view_stable(
+                page, "D 段拖拽前（等 C 段余摆停）")
             page.screenshot(path=SHOT)
             img_a = Image.open(SHOT).convert("RGB")
 
@@ -764,12 +852,14 @@ def main():
             note(f"D 段拉框：( {dx0},{dy0} ) → ( {dx1},{dy1} )")
             drag(page, dx0, dy0, dx1, dy1, steps=10)
             page.wait_for_timeout(500)
+            # ⭐ 修复轮 3 采集点⑤：D 段拖拽后同样等停稳（理论上没有余摆，等一下更可比）
+            bbox_d_after, d_post_waited, d_post_stable = wait_view_stable(
+                page, "D 段拖拽后（等稳定）")
             # ⚠️ 读探针要放在"等待查询结果"**之前**：查询一落地，App 就把 drawingMode 收回
             #    'idle'、地球的 watcher 立刻把 enableRotate 恢复成 true —— 之后再读
             #    getRotateEnabled 只会读到 true，那是**竞态假红**，不是 bug。
             pr_d_after = globe_probe(page)
             cam_after = pr_d_after["cam"]
-            bbox_d_after = pr_d_after["bbox"]
             rot_d2 = pr_d_after["rotate"]   # 只用诊断（松手后可能已退出绘制态）
 
             # ⭐ 修复轮 2 判据 A：绘制中的拖拽**不该让视野包围盒移动**。
@@ -788,11 +878,16 @@ def main():
                       d_ratio_bbox < bound,
                       f"中心位移 = {d_ratio_bbox:.2%} 视野跨度，阈值 {bound:.2%}"
                       f"（= min(3%, C 段实测 {0 if c_ratio_bbox is None else c_ratio_bbox:.1%} ÷ 3)）；"
-                      f"{_bbox_txt(bbox_d_before)} → {_bbox_txt(bbox_d_after)}"
-                      "（非绘制态同样量级的拖拽会让它移动几十个百分点）")
+                      f"{_bbox_txt(bbox_d_before)} → {_bbox_txt(bbox_d_after)}；"
+                      f"两个测量点都已等稳定（前 {d_pre_waited}ms/{d_pre_stable}，"
+                      f"后 {d_post_waited}ms/{d_post_stable}）—— "
+                      "若这两个 stable 都是 True 而位移仍然大，那就是真被转了，"
+                      "请把上面「视野稳定」两行与 D 段相机 Δ经/Δ纬一起交给主控查 CesiumGlobe")
                 note(f"D 段视野包围盒中心位移 = {d_ratio_bbox:.2%} 视野跨度"
                      f"（C 段非绘制态是 {('拿不到' if c_ratio_bbox is None else f'{c_ratio_bbox:.1%}')}）；"
-                     f"{_bbox_txt(bbox_d_before)} → {_bbox_txt(bbox_d_after)}")
+                     f"测量点稳定：前 {d_pre_waited}ms/{d_pre_stable}、"
+                     f"后 {d_post_waited}ms/{d_post_stable}；"
+                     f"{_bbox_short(bbox_d_before)} → {_bbox_short(bbox_d_after)}")
 
             # ⭐ 修复轮 2 判据 B：相机**位置**没被带动（整段 C+D 手势后比较）。
             #    修复轮 2 修好 findViewer 后这条应当能变成真断言。
