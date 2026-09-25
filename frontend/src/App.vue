@@ -525,20 +525,6 @@ const withinDetail = ref([])              // [{trackId, points:[{lon,lat}...]}]
  */
 const withinSelectedId = ref(null)
 
-function resetWithin() {
-  withinStats.value = null
-  withinItems.value = []
-  withinTotal.value = 0
-  withinTruncated.value = false
-  withinRegion.value = null
-  withinTrackIds.value = []
-  withinDetail.value = []
-  withinError.value = ''
-  withinSelectedId.value = null   // 清除/切档时选中高亮一并复位（规格 6.7）
-  drawingMode.value = 'idle'
-  bufferCenter.value = null
-}
-
 /*
  * 乱序请求防护：圈选的结果是**整块替换**的（区域 + 统计 + 列表），
  * 所以"旧请求后回来"的破坏力比别的档更大 —— 用户点了「清除」或切走之后，
@@ -546,6 +532,51 @@ function resetWithin() {
  * 只认最后一次请求（和 densitySeq / similaritySeq 同一套写法）。
  */
 let withinSeq = 0
+
+/*
+ * 清空圈选的界面状态（统计 / 列表 / 区域 / 要画的轨迹 / 选中高亮 / 绘制模式 / 缓冲区中心）。
+ *
+ * ⚠️ 这个函数**故意不碰 withinSeq**，因为有两个用途，语义不同：
+ *   · 用户主动清除 / 切档 / 数据变更（resetWithin 包装）→ 必须**推进**序号让在途请求作废；
+ *   · 查询失败（queryWithin 的 catch）→ 用同一个序号，推进了反而会把这次失败自身
+ *     变成"过期请求"，错误消息与 withinBusy 都收不了尾。
+ * 所以"推进序号"只放在 resetWithin 里，这里只管字段。
+ *
+ * `keepError = true` 是给失败路径用的：后端那句"区域有交叉，请重画"必须留在界面上，
+ * 所以清状态时不能把 withinError 一起抹掉（调用方在自己设消息之前调它）。
+ *
+ * ⚠️ withinBusy 必须在这里一起清：清除/切档会让在途请求变成"过期请求"，
+ * 而关掉转圈的那句在 finally 里、带着 `mine === withinSeq` 的判断 —— 它永远不会执行了。
+ * 不在这里清的话，清除之后 RegionDrawer 的提示会一直停在"查询中…"、查询按钮永久置灰。
+ */
+function clearWithinState(keepError = false) {
+  withinStats.value = null
+  withinItems.value = []
+  withinTotal.value = 0
+  withinTruncated.value = false
+  withinRegion.value = null
+  withinTrackIds.value = []
+  withinDetail.value = []
+  if (!keepError) withinError.value = ''
+  withinSelectedId.value = null   // 清除/切档时选中高亮一并复位（规格 6.7）
+  withinBusy.value = false        // 转圈也要收，否则 finally 的守卫会把它永久留在 true
+  drawingMode.value = 'idle'
+  bufferCenter.value = null
+}
+
+function resetWithin() {
+  /*
+   * ⚠️ 这一行是上面那套防护能生效的关键：**推进序号 = 让所有在途请求作废**。
+   *
+   * 「清除」/ 切档 / 数据变更都走这里（`:969` / `:211` / `:719`），若不推进，
+   * queryWithin 里那句 `mine !== withinSeq` 在清除之后**依然不成立**，
+   * 挂起的响应回来时照样会把 region / 统计 / 列表整块写回去 ——
+   * 表现就是"清除没生效"、切走再切回还能看到上一次的区域与列表。
+   * 既有相似档在完全相同的处境就是这么做的（similaritySeq++）。
+   */
+  withinSeq++
+  clearWithinState()
+}
 
 /** 拉框 / 多边形 / 缓冲区三种形状，最终都走这一个请求 */
 async function queryWithin(geometry, extra = {}) {
@@ -576,10 +607,18 @@ async function queryWithin(geometry, extra = {}) {
     // 地图只画前 DRAW_LIMIT 条（visibleItems 就是"列表最前面 N 条"的纯函数），
     // 其余的在列表里点一条加一条
     withinTrackIds.value = visibleItems(data.items).map((i) => i.trackId)
-    await loadWithinDetail(withinTrackIds.value)
+    await loadWithinDetail(withinTrackIds.value, mine)
   } catch (e) {
+    // 已经有更新的请求 / 用户清除了 → 这次失败与当前界面无关，直接丢弃（连错误都不该显示）
     if (mine !== withinSeq) return
-    resetWithin()
+    /*
+     * ⚠️ 这里**不能**用 resetWithin()（任务书 Step 1 的原文写法）：它开头就是 `withinSeq++`，
+     * 序号一被顶掉，这次失败立刻变成"过期请求" → 下面 finally 里 `mine === withinSeq` 不成立，
+     * withinBusy 就永远卡在 true、错误消息也留不下来。
+     * 所以失败路径用不推进序号的 clearWithinState(true)：清掉半套结果，但**保留**错误消息
+     * （后端那句"区域有交叉，请重画"正是要给人看的）。
+     */
+    clearWithinState(true)
     withinError.value = e.message || String(e)
   } finally {
     // 只有最后一次请求才有资格关掉转圈（同密度档）
@@ -587,8 +626,15 @@ async function queryWithin(geometry, extra = {}) {
   }
 }
 
-/** 按需拉取要画的轨迹点（复用已有的轨迹详情接口） */
-async function loadWithinDetail(ids) {
+/**
+ * 按需拉取要画的轨迹点（复用已有的轨迹详情接口）。
+ *
+ * ⚠️ `mine` 必须传进来并判两次：连画两笔时，**先发的那批 `/api/tracks/{id}` 可能晚到**，
+ * 落地就会把上一批轨迹写进 withinDetail —— 地图上多画不属于当前结果的橙线，
+ * 破坏"只画当前结果的前 20 条"。和 loadSimilarityTracks 里 `seq !== similaritySeq` 同一个问题。
+ */
+async function loadWithinDetail(ids, mine) {
+  if (mine !== withinSeq) return   // 进入前先判：本次请求已被更新的查询 / 清除顶掉
   const need = ids.filter((id) => !withinDetail.value.some((d) => d.trackId === id))
   if (!need.length) {
     withinDetail.value = withinDetail.value.filter((d) => ids.includes(d.trackId))
@@ -600,6 +646,7 @@ async function loadWithinDetail(ids) {
     const d = await r.json()
     return { trackId: id, points: d.points }
   }))
+  if (mine !== withinSeq) return   // 等点的时候用户又画了一笔 / 清除了，这批点作废
   const keep = withinDetail.value.filter((d) => ids.includes(d.trackId))
   withinDetail.value = [...keep, ...fetched.filter(Boolean)]
 }
