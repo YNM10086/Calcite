@@ -1424,39 +1424,72 @@ def main():
                       "就是 0af523b 那类「统计对、地图上什么都没画」的断链")
 
             # 列表点选 → 地球高亮（与命中条数无关，只要地球上画了至少一条就能验）
-            drawn_b = [int(x) for x in ent_b["track_ids"] if str(x).lstrip("-").isdigit()]
-            if not drawn_b:
+            #
+            # ⭐⭐ 修复轮 8：**目标必须从"当前列表 ∩ 当前实体"推导**，不能只拿实体 id。
+            #   踩到的真实情况（主控第八轮代跑）：点了一个列表里根本不存在的
+            #   `within-item-<id>` → Playwright 等到 30 秒超时 → 按设计记 skip（不是断言）。
+            #   为什么两者会不同步：`queryWithin` **同步**刷新列表（`withinItems`），
+            #   而画线要等 `loadWithinDetail` **异步**拉完轨迹点（`withinDetail`）——
+            #   中间那一小段窗口里，列表已经是新查询的、地球上的实体还是上一次的。
+            #   做法：先等"实体集合 ⊆ 列表条目"（最多 6 秒），再取交集里的第一条；
+            #   只有确实拿不到可点条目时才 skip，并把两边集合都打印出来。
+            drawn_ids = {str(x) for x in ent_b["track_ids"]}
+            list_ids = [str(x) for x in list_item_track_ids(page)]
+            synced = False
+            for _ in range(15):                  # 最多 6 秒（每轮 400ms）
+                if drawn_ids and drawn_ids.issubset(set(list_ids)):
+                    synced = True
+                    break
+                page.wait_for_timeout(400)
+                ent_b = within_entities(page)
+                drawn_ids = {str(x) for x in ent_b["track_ids"]}
+                list_ids = [str(x) for x in list_item_track_ids(page)]
+            cand_b = [i for i in list_ids if i in drawn_ids]
+            note(f"B2 段：地球上的实体 id={sorted(drawn_ids, key=lambda s: int(s) if s.lstrip('-').isdigit() else 0)}；"
+                 f"列表条目 id={list_ids}；两者交集（可点且已画）={cand_b}；同步完成={synced}")
+            if not cand_b:
                 skip("B2) 点列表里已画的那条 → 地图上变选中样式",
-                     "地球上一条 within-track-* 实体都没有，没有可验的高亮对象")
+                     f"找不到「列表里有、地球上又画了」的条目（实体 {sorted(drawn_ids)} / 列表 {list_ids}）"
+                     "—— 没有可点的对象，故跳过（原因已打印在上面那行）")
             else:
-                target_b = drawn_b[0]
-                st0 = within_track_style(page, target_b)
-                click_err_b = ""
-                try:
-                    page.click(f'[data-testid="within-item-{target_b}"]')
-                    page.wait_for_timeout(800)
-                except Exception as e:          # noqa: BLE001
-                    click_err_b = f"{type(e).__name__}: {e}"
-                st1 = within_track_style(page, target_b)
-                note(f"B2 段：点 within-item-{target_b} 前后，within-track-{target_b} 的样式 "
-                     f"width {st0.get('width')} → {st1.get('width')}；"
-                     f"rgb {st0.get('rgb')} → {st1.get('rgb')}；"
-                     f"ok={st0.get('ok')}/{st1.get('ok')}；点击异常={click_err_b or '无'}")
-                if click_err_b:
+                target_b = None
+                for cand in cand_b[:5]:          # 前几条里挑第一条真的在 DOM 里的
+                    if count_of(page, f'[data-testid="within-item-{cand}"]') == 1:
+                        target_b = cand
+                        break
+                if target_b is None:
                     skip("B2) 点列表里已画的那条 → 地图上变选中样式",
-                         f"点 within-item-{target_b} 时抛异常（{click_err_b}）—— 脚本没点到，故跳过")
-                elif not st0.get("ok") or not st1.get("ok"):
-                    skip("B2) 点列表里已画的那条 → 地图上变选中样式",
-                         f"读不到实体样式（点前 {st0.get('why')} / 点后 {st1.get('why')}）"
-                         "—— Cesium 的属性读不出来时一律 skip，不假红")
+                         f"交集 {cand_b[:5]} 在 DOM 里都找不到对应条目（列表可能刚被刷新）")
                 else:
-                    check("B2) 点列表里已画的那条 → 地图上该条变选中样式（线宽 2→3 / 颜色变亮蓝）",
-                          _is_selected_style(st1) and not _is_selected_style(st0),
-                          f"within-item-{target_b} → within-track-{target_b}："
-                          f"点前 width={st0.get('width')} rgb={st0.get('rgb')}"
-                          "（未选中应为宽 2 / 橙 #ff9f45≈[1.0,0.624,0.271]）→ "
-                          f"点后 width={st1.get('width')} rgb={st1.get('rgb')}"
-                          "（选中应为宽 3 / 亮蓝 #7fd1ff≈[0.498,0.820,1.0]）"
+                    st0 = within_track_style(page, target_b)
+                    click_err_b = ""
+                    try:
+                        # ⚠️ 用短超时：这里点不到大多是"状态刚变、条目已不在"，
+                        #    默认 30 秒会把整段验收挂住；短超时 → 快速 skip + 打印原因
+                        page.click(f'[data-testid="within-item-{target_b}"]', timeout=5000)
+                        page.wait_for_timeout(800)
+                    except Exception as e:      # noqa: BLE001
+                        click_err_b = f"{type(e).__name__}: {e}"
+                    st1 = within_track_style(page, target_b)
+                    note(f"B2 段：点 within-item-{target_b} 前后，within-track-{target_b} 的样式 "
+                         f"width {st0.get('width')} → {st1.get('width')}；"
+                         f"rgb {st0.get('rgb')} → {st1.get('rgb')}；"
+                         f"ok={st0.get('ok')}/{st1.get('ok')}；点击异常={click_err_b or '无'}")
+                    if click_err_b:
+                        skip("B2) 点列表里已画的那条 → 地图上变选中样式",
+                             f"点 within-item-{target_b} 时抛异常（{click_err_b}）—— 脚本没点到，故跳过")
+                    elif not st0.get("ok") or not st1.get("ok"):
+                        skip("B2) 点列表里已画的那条 → 地图上变选中样式",
+                             f"读不到实体样式（点前 {st0.get('why')} / 点后 {st1.get('why')}）"
+                             "—— Cesium 的属性读不出来时一律 skip，不假红")
+                    else:
+                        check("B2) 点列表里已画的那条 → 地图上该条变选中样式（线宽 2→3 / 颜色变亮蓝）",
+                              _is_selected_style(st1) and not _is_selected_style(st0),
+                              f"within-item-{target_b} → within-track-{target_b}："
+                              f"点前 width={st0.get('width')} rgb={st0.get('rgb')}"
+                              "（未选中应为宽 2 / 橙 #ff9f45≈[1.0,0.624,0.271]）→ "
+                              f"点后 width={st1.get('width')} rgb={st1.get('rgb')}"
+                              "（选中应为宽 3 / 亮蓝 #7fd1ff≈[0.498,0.820,1.0]）"
                           "；样式没变 = 列表点选没传到地球（withinTracksForGlobe 的 selected 没生效）")
 
         # ------------------------------------------------ C) 拉框之后左键旋转恢复

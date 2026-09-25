@@ -62,19 +62,28 @@ const overDraw = computed(() => props.items.length > DRAW_LIMIT)
 </template>
 
 <style scoped>
-/* ⚠️ 布局契约（2026-09-25 最终审查修复轮 2，实测驱动）：
+/* ⚠️ 布局契约（2026-09-25 最终审查修复轮 2 + 轮 8，实测驱动）：
    ① `flex: 1 1 0` 与 `min-height: 0` **缺一不可**：
       · `flex-basis: 0` 让它在面板里只占**剩余空间**（而不是"内容多高就多高"）；
       · `min-height: 0` 覆盖 flex 子项的自动最小尺寸（min-content）—— 少了它，
         即使 `flex-shrink: 1` 也收缩不到内容高度以下。
-   ② 它仍然是 `overflow: visible`：内部那几块**不可再收缩**的内容（统计卡 / 来源行 /
-      提示行 / `.items` 的 `min-height`）一旦超出分到的空间，溢出部分照样算进
-      `.panel` 的 `scrollHeight`，而 `.panel` 是 `overflow: hidden` → 被裁掉、用户点不到。
-   ③ 实测（G 段"有结果"测量，3 条命中）：1366×660 溢出 **99px**、1600×600 溢出 **159px**，
-      而清空面板后是 **0px** —— 说明差别全在"有结果时多出来的内容"，且与白名单无关
-      （`.within-stats` 的 `flex-shrink` 实测一直是 `1`）。所以矮窗口下**必须让内容真的变小**，
-      见下面的 media query。 */
-.within-stats { display: flex; flex-direction: column; gap: 6px; flex: 1 1 0; min-height: 0; }
+   ② ⭐ `overflow-y: auto` 是**结构性**的那一半（轮 8 补）：它是 `overflow: visible` 时，
+      内部那几块不可再收缩的内容（统计卡 / 来源行 / 提示行 / `.items` 的 `min-height`）
+      一旦超出分到的空间，**溢出部分照样算进 `.panel` 的 `scrollHeight`** →
+      而 `.panel` 是 `overflow: hidden`，于是既看不见、又滚不到。
+      改成滚动容器后，超出部分被**自己收住**（变成块内可滚），`.panel` 的高度只由
+      flex 布局决定（各子项 ≤ 自己的盒子）→ 面板**按构造**不再溢出，
+      用户也真的能滚到那部分内容，而不是被裁掉。
+      `overflow-x: hidden` 是防呆：只写 `overflow-y` 时 `overflow-x` 会被算成 `auto`，
+      窄面板下可能冒出一条横向滚动条。
+   ③ 实测轨迹：轮 6 溢出 99px / 159px → 轮 7 矮窗口瘦身后降到 8px / 0px →
+      轮 8 加 `overflow-y: auto` 后那 8px 也被收进块内。
+      `.within-stats` 的 `flex-shrink` 实测一直是 `1`（与 `.panel > div:not(...)` 白名单无关）。 */
+.within-stats {
+  display: flex; flex-direction: column; gap: 6px;
+  flex: 1 1 0; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+}
 .empty { margin: 4px 0; font-size: 12px; color: #f0b48a; }
 .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .card {
