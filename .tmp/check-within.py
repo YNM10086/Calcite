@@ -1,11 +1,38 @@
 # -*- coding: utf-8 -*-
-"""M3 Task 11（修复轮 1）—— 圈选（空间范围查询）的浏览器验收：Playwright 真实等待 + Pillow 像素统计。
+"""M3 Task 11（修复轮 4）—— 圈选（空间范围查询）的浏览器验收：Playwright 真实等待 + Pillow 像素统计。
 
 跑法（**必须提权 danger-full-access**，浏览器子进程靠管道通信；后端 8080 + 前端 5173 同时在跑）：
 
     cd E:\\JAVA_IDEA_package\\JAVA_Project\\Calcite
     $env:PYTHONIOENCODING='utf-8'
     & "E:\\python\\python_address\\python.exe" .tmp\\check-within.py
+
+四轮修复的净结果（历史细节见各段注释）：
+  轮 1：拉框前先点一条轨迹飞相机 / `draw-clear` 禁用兜底 / 用 `getRotateEnabled()` 拿硬证据
+  轮 2：C 段旋转判据从"像素差"换成"视野包围盒位移" / `findViewer` 改走 `setupState.viewer`
+  轮 3：5 个包围盒测量点先 `wait_view_stable()` 等相机停稳（消惯性余摆污染）
+  轮 4：⭐ D 段"绘制中包围盒不动"**降级为信息输出**（理由见下）
+
+== 修复轮 4：为什么 D 段那条不再是断言 ==
+
+主控三轮探针实测（2026-09-25）证明这条**代理判据在合成拖拽下不成立**：
+
+    | 实验                                            | 相机位移                    |
+    | 非绘制态快速拖拽（steps=8）                       | −0.0116°（正常旋转 ✓）      |
+    | 绘制态快速拖拽 #1 / #2（enableRotate 全程 false）  | −0.0077° / −0.0089°（！）   |
+    | 绘制态慢速分步拖拽（每步 200ms ≈ 人类速度）        | **精确 0.0**（✓ 不动）      |
+    | 绘制态快速拖拽 + 同时关 enableInputs               | 减半（−0.0038），**没消除** |
+
+⇒ Playwright 的合成拖拽**速度极高**（8 步在几十毫秒内跑完），会激发 Cesium **输入聚合器**，
+让相机在 `enableRotate=false` 时也动一点点；而**人类速度的拖拽位移精确为 0**。
+所以"视野包围盒位移"只能当**信息**看，**不计入通过/失败**（C 段那条不同：它是**正向**证据，
+非绘制态拖拽实测 46%，仍然有效且保留）。
+「绘制中左键不旋转」现在由两条可靠证据承担：
+  ① `进入绘制模式后 getRotateEnabled() === false`（**直接**证据）
+  ② `绘制中的拖拽被当成拉框（产生了新查询结果）`（**行为**证据）
+⚠️ 以后若看到"绘制中包围盒动了"，**不要去改 CesiumGlobe** —— 先读 D 段那段注释。
+   📌 这条已经被**正式记为已知限制**：设计文档 `docs/superpowers/specs/2026-09-25-m3-within-design.md`
+   第 10 节「已知限制」里的 **"极快甩动绘制后地球会轻微跳一下"**（含同一批实测数据与"不修"的理由）。
 
 == 修复轮 1：首轮实跑暴露的三处脚本问题 ==
 
@@ -23,10 +50,9 @@
    **最多记一条失败，绝不抛异常**。
 4. ⭐ **硬证据**：Task 9 新加的 `globe.exposed.getRotateEnabled()`（`boolean | null`）——
    通过 `document.querySelector('#app').__vue_app__._instance` 递归走 vnode 树找到
-   setupState 里有 `setDrawingMode` 的实例。新增 6 条直接读开关的断言：
-   进档仍 `true` / 点拉框后 `false` / 拉框结束恢复 `true` / 再点拉框后 `false` /
-   画到一半（拖拽刚结束）仍 `false` / 切档后恢复 `true`。
-   取不到组件实例时这些**自动 skip**，退回原来的"像素 + 是否出结果"间接判据。
+   setupState 里有 `setDrawingMode` 的实例。6 条直接读开关的断言：
+   进档仍 `true` / 点拉框后 `false` / 拉框结束恢复 `true` / 再点拉框后 `false` / 切档后恢复 `true`。
+   取不到组件实例时这些**自动 skip**，退回原来的间接判据。
 
 两条老纪律（不要回退）：**真实时间等待**（Cesium 几何体在 worker 里异步生成，虚拟时钟会得到
 "线不存在"的假象）；**面板右边界问 DOM 要**（面板宽度 `min(420px, 34vw)`，写死 `x>=400` 假红/假绿过）。
@@ -862,35 +888,46 @@ def main():
             cam_after = pr_d_after["cam"]
             rot_d2 = pr_d_after["rotate"]   # 只用诊断（松手后可能已退出绘制态）
 
-            # ⭐ 修复轮 2 判据 A：绘制中的拖拽**不该让视野包围盒移动**。
-            #    与 C 段同一个硬证据（与缩放无关），并额外与 C 段实测值比较 ——
-            #    这样无论当前是"全球视野"还是"5 公里级缩放"都成立。
+            # ⚠️⚠️ 修复轮 4：这条**降级为信息输出**（打印实测比例，但**不计入通过/失败**）。
+            #
+            # 为什么降级 —— 主控三轮探针实测（2026-09-25）：
+            #   | 实验                                          | 相机位移                    |
+            #   | 非绘制态快速拖拽（steps=8）                     | −0.0116°（正常旋转 ✓）      |
+            #   | 绘制态快速拖拽 #1 / #2（enableRotate 全程 false）| −0.0077° / −0.0089°（！）   |
+            #   | 绘制态**慢速**分步拖拽（每步 200ms ≈ 人类速度）  | **精确 0.0**（✓ 不动）      |
+            #   | 绘制态快速拖拽 + 同时关 enableInputs             | 减半（−0.0038），**没消除** |
+            # ⇒ Playwright 的合成拖拽**速度极高**（8 步在几十毫秒内跑完），会激发 Cesium
+            #   **输入聚合器**，让相机在 `enableRotate=false` 时也动一点点；而**人类速度的拖拽
+            #   实测位移精确为 0**。所以"视野包围盒位移"这个**代理判据在合成快速拖拽下不成立** ——
+            #   它测不出"旋转有没有被关掉"，反映的只是输入聚合器的产物。
+            #
+            # ⚠️ 以后若看到"绘制中包围盒动了"，**不要**去改 CesiumGlobe —— 先读这段注释。
+            # 「绘制中左键不旋转」现在由两条可靠证据承担（都在下面/上面，且都通过）：
+            #   ① `进入绘制模式后 getRotateEnabled() === false`（**直接**证据，开关本身）
+            #   ② `绘制中的拖拽被当成拉框（产生了新查询结果）`（**行为**证据：这个手势
+            #      被拿去画框了、并真的发出了查询，而不是去转地球）
             d_shift = bbox_shift_ratio(bbox_d_before, bbox_d_after)
-            D_MAX_SHIFT = 0.03                       # 视野跨度的 3%
+            D_MAX_SHIFT = 0.03                       # 历史参考阈值（已不参与判定）
             if d_shift is None:
-                skip("绘制模式期间拖拽【没有】移动视野包围盒", "拿不到 getViewBbox() 的包围盒")
+                note("D 段包围盒位移（信息输出）：拿不到 getViewBbox()，跳过这项打印")
             else:
-                d_ratio_bbox = d_shift[0]
-                bound = D_MAX_SHIFT
+                ref_bound = D_MAX_SHIFT
                 if c_ratio_bbox is not None:
-                    bound = min(D_MAX_SHIFT, c_ratio_bbox / 3.0)
-                check("绘制模式期间拖拽【没有】移动视野包围盒（绘制中左键旋转被关掉）",
-                      d_ratio_bbox < bound,
-                      f"中心位移 = {d_ratio_bbox:.2%} 视野跨度，阈值 {bound:.2%}"
-                      f"（= min(3%, C 段实测 {0 if c_ratio_bbox is None else c_ratio_bbox:.1%} ÷ 3)）；"
-                      f"{_bbox_txt(bbox_d_before)} → {_bbox_txt(bbox_d_after)}；"
-                      f"两个测量点都已等稳定（前 {d_pre_waited}ms/{d_pre_stable}，"
-                      f"后 {d_post_waited}ms/{d_post_stable}）—— "
-                      "若这两个 stable 都是 True 而位移仍然大，那就是真被转了，"
-                      "请把上面「视野稳定」两行与 D 段相机 Δ经/Δ纬一起交给主控查 CesiumGlobe")
-                note(f"D 段视野包围盒中心位移 = {d_ratio_bbox:.2%} 视野跨度"
-                     f"（C 段非绘制态是 {('拿不到' if c_ratio_bbox is None else f'{c_ratio_bbox:.1%}')}）；"
-                     f"测量点稳定：前 {d_pre_waited}ms/{d_pre_stable}、"
-                     f"后 {d_post_waited}ms/{d_post_stable}；"
+                    ref_bound = min(D_MAX_SHIFT, c_ratio_bbox / 3.0)
+                note(f"D 段包围盒位移（**信息输出，不判通过/失败**）= {d_shift[0]:.2%} 视野跨度；"
+                     f"C 段非绘制态是 "
+                     f"{('拿不到' if c_ratio_bbox is None else f'{c_ratio_bbox:.1%}')}；"
+                     f"历史参考阈值 {ref_bound:.2%}（已废弃）；测量点稳定："
+                     f"前 {d_pre_waited}ms/{d_pre_stable}、后 {d_post_waited}ms/{d_post_stable}；"
                      f"{_bbox_short(bbox_d_before)} → {_bbox_short(bbox_d_after)}")
+                note("（这条位移在合成快速拖拽下必然非 0：Playwright 8 步几十毫秒跑完会激发 "
+                     "Cesium 输入聚合器；按人类速度分步拖拽实测为 0。"
+                     "绘制中不旋转由 getRotateEnabled=false 与「拖拽被当成拉框」两条证据承担）")
 
-            # ⭐ 修复轮 2 判据 B：相机**位置**没被带动（整段 C+D 手势后比较）。
-            #    修复轮 2 修好 findViewer 后这条应当能变成真断言。
+            # ⭐ 判据 B：相机**位置**没被带动（整段 C+D 手势后比较）。
+            #    阈值 0.02 弧度是有意留宽的：实测的"输入聚合器产物"约 0.0077° ≈ 1.3e-4 弧度，
+            #    比阈值小两个数量级；而真实旋转是 0.1~0.5 弧度，比阈值大 5~25 倍。
+            #    所以它既能容忍合成拖拽的噪声，又能抓住"真的被转了"。
             if cam_before and cam_after:
                 dlon = abs(cam_after["lon"] - cam_before["lon"])
                 dlat = abs(cam_after["lat"] - cam_before["lat"])
@@ -901,7 +938,9 @@ def main():
                       f"高度 {cam_before['h'] / 1000:.1f}→{cam_after['h'] / 1000:.1f}km")
                 note(f"D 段相机 Δ经度={dlon:.6f} Δ纬度={dlat:.6f} "
                      f"高度 {cam_before['h'] / 1000:.1f}→{cam_after['h'] / 1000:.1f}km；"
-                     f"（拖拽刚结束）rotate={rot_d2}（松手后可能已退出绘制态，只作诊断）")
+                     f"（拖拽刚结束）rotate={rot_d2}（松手后可能已退出绘制态，只作诊断）；"
+                     "阈值 0.02 rad 比「输入聚合器产物」（≈1.3e-4 rad）大两个数量级、"
+                     "比真实旋转（0.1~0.5 rad）小 5~25 倍")
             else:
                 note("拿不到相机 → 上面那条「相机没被拖动」记 skip"
                      "（已试 setupState.viewer / exposed.viewer / ctx.viewer）")
