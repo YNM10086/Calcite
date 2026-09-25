@@ -50,25 +50,57 @@ export function sortItems(items) {
     (b.insidePointCount - a.insidePointCount) || (a.trackId - b.trackId))
 }
 
-/** 地图上该画哪几条：列表最前面的 DRAW_LIMIT 条 */
+/** 地图上该画哪几条：**排序后**最前面的 DRAW_LIMIT 条（先 sortItems，再取前 N） */
 export function visibleItems(items, limit = DRAW_LIMIT) {
   return sortItems(items).slice(0, limit)
 }
 
+/*
+ * 非法值判定（统一的"—"口径）。
+ *
+ * ⚠️ 必须要求 `typeof v === 'number'`：只挡 null/undefined/非有限数的话，
+ * 字符串会走到下面的算术里 —— `formatDistance('')` 得 `'0 m'`、`formatCount('')` 得 `''`，
+ * 把"没有这个数"显示成一个像真数据的值（本项目在 Number(null)===0 上已经踩过一次）。
+ */
 function bad(v) {
-  return v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v))
+  return typeof v !== 'number' || !Number.isFinite(v)
 }
 
 export function formatDistance(m) {
   if (bad(m)) return '—'
-  if (m < 1000) return `${Math.round(m)} m`
-  return `${(m / 1000).toFixed(1)} km`
+  /*
+   * ⚠️ 先取整、再拿取整后的值比阈值。
+   * 只比原始值的话，999.6 会落进"米"档、又被 Math.round 显示成 `1000 m`，
+   * 而 1000 本身显示 `1.0 km` —— 两个相邻的值给出自相矛盾的档位。
+   */
+  const rounded = Math.round(m)
+  if (rounded < 1000) return `${rounded} m`
+  return `${(rounded / 1000).toFixed(1)} km`
 }
 
 /** ⚠️ 不能直接 String(n)：Number(null) === 0 会写出 "0"（项目里踩过这个坑） */
 export function formatCount(n) {
   if (bad(n)) return '—'
   return String(n)
+}
+
+/**
+ * 秒 → 人看的时长（规格 6.5 的"时长"列：名字 / 来源 / 区域内点数 / 里程 / 时长）。
+ *
+ * 分档：< 60 秒 → `N 秒`；< 3600 秒 → `N 分钟`；再往上 → `N 小时` / `N 小时 M 分`。
+ *
+ * ⚠️ 一律**向下取整**（不是四舍五入）：3599 秒四舍五入成 60 分钟、
+ * 59.6 秒四舍五入成 60 秒 —— 都越过了本该进位的那一档，读起来是错的。
+ * ⚠️ 非法值（null / undefined / NaN / Infinity / 负数 / 字符串）沿用 bad() 的「—」口径，
+ * **绝不变成 "0 秒"**。
+ */
+export function formatDuration(s) {
+  if (bad(s) || s < 0) return '—'
+  if (s < 60) return `${Math.floor(s)} 秒`
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return m === 0 ? `${h} 小时` : `${h} 小时 ${m} 分`
 }
 
 export function spanText(earliest, latest) {

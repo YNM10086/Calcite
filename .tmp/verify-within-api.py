@@ -358,8 +358,19 @@ def check_a_section(status, res, wkt, limit_max):
     check("每条 item 的 insidePointCount 都等于 SQL 逐条分组值",
           not wrong_inside_ids(res["items"], truth_map),
           f'不一致 {wrong_inside_ids(res["items"], truth_map)[:5]}')
-    check("items 内 insidePointCount 之和 ≤ pointCount",
-          sum(i["insidePointCount"] for i in res["items"]) <= res["stats"]["pointCount"])
+    # ⭐ 未截断时这条必须**真的相等**，不能只断 ≤（本轮修）：A 段显式 limit=max，
+    # 命中数小于 limit 时 items 就是全量，之和与 pointCount 同源 → 必须严格相等。
+    # ⚠️ 但不能把"未截断"写死成数据假设（重导数据可能让命中数超过 limit，那样就假红了）：
+    # 用 res["truncated"] 门控 —— 截断时 items 被裁过，只能 ≤（那种情况由上面 if/else 里
+    # 那条"sum(items) + 被截掉的点数 == pointCount"负责，它比这条更强）。
+    if not res["truncated"]:
+        check(f"limit={limit_max}（未截断）时 items 内 insidePointCount 之和 == pointCount",
+              sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
+    else:
+        check("items 内 insidePointCount 之和 ≤ pointCount（截断时 items 被裁，只能 ≤）",
+              sum(i["insidePointCount"] for i in res["items"]) <= res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
     check_stats_pointcount("pointCount == SQL 全量逐条分组求和", res, truth_map)
     check("items 按 insidePointCount 降序",
           all(res["items"][i]["insidePointCount"] >= res["items"][i + 1]["insidePointCount"]
@@ -523,12 +534,24 @@ def main():
               res["stats"]["sourceCounts"] == {}, res["stats"]["sourceCounts"])
 
     print("=== E) 400 分支逐条打 ===")
+    # ⭐ 规格 9.4 点名的两条本轮补上（审查 Minor）：
+    #   ① 顶点数超限 —— 必须是一个**结构完好**的多边形（环闭合、每个点在经纬度范围内、
+    #      面积不为 0），否则会先被别的分支挡掉，这条就验不到"顶点数"那个分支。
+    #      所以用一个 2000 段的圆：2000 个不同顶点 + 闭合点 = **2001 个顶点** > max-vertices 2000。
+    #   ② 经度越界 —— lon=181（纬度那一条已有）。
+    BIG_RING_N = 2000
+    big_ring = [(116.4 + 0.01 * math.cos(2 * math.pi * i / BIG_RING_N),
+                 40.0 + 0.01 * math.sin(2 * math.pi * i / BIG_RING_N))
+                for i in range(BIG_RING_N)]
+    big_ring.append(big_ring[0])          # 闭合 → 顶点数 = 2001
     bad_cases = [
         ("缺 geometry", {}),
         ("类型不在白名单", {"geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}),
         ("环未闭合", poly_body([(0, 0), (1, 0), (1, 1), (0, 1)])),
         ("环点数 < 4", poly_body([(0, 0), (1, 0), (0, 0)])),
         ("纬度越界", poly_body([(0, 0), (1, 0), (1, 91), (0, 91), (0, 0)])),
+        ("经度越界（lon=181）", poly_body([(170, 0), (181, 0), (181, 10), (170, 10), (170, 0)])),
+        (f"顶点数超限（{len(big_ring)} 个顶点 > 2000）", poly_body(big_ring)),
         ("Point 没给 bufferM", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}}),
         ("bufferM = 0", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}, "bufferM": 0}),
         ("bufferM 超上限", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}, "bufferM": 99999}),
@@ -555,6 +578,18 @@ def main():
                                      (116.50, 39.90), (116.30, 40.10), (116.30, 39.90)]))
     check("自交多边形的 400 message 等于「区域有交叉或面积为 0，请重画」",
           status == 400 and body_message(res) == OUR_400_HINT,
+          f"status={status} message={body_message(res)!r}")
+
+    # ⭐ 本轮新补的两条 400 也要**指名道姓**：E 段循环只断言"是中文"太弱 ——
+    # 顶点数超限 / 经度越界都可能被**别的分支**先挡下来（消息一样是中文），
+    # 那样"验到了顶点数上限"就是假的。所以再各断言一次原因里的关键词。
+    status, res, _ = post(poly_body(big_ring))
+    check(f"顶点数超限（{len(big_ring)} 个顶点）的 400 原因提到「顶点数」",
+          status == 400 and "顶点数" in (body_message(res) or ""),
+          f"status={status} message={body_message(res)!r}")
+    status, res, _ = post(poly_body([(170, 0), (181, 0), (181, 10), (170, 10), (170, 0)]))
+    check("经度越界（lon=181）的 400 原因提到「经度」",
+          status == 400 and "经度" in (body_message(res) or ""),
           f"status={status} message={body_message(res)!r}")
 
     # ⚠️ 硬要求 2：别把两种 400 混为一谈 —— body 缺失 / JSON 畸形由 Spring 的

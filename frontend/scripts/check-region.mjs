@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import {
   DRAW_LIMIT, rectGeometry, polygonGeometry, pointGeometry, ringOf,
-  sortItems, visibleItems, formatDistance, formatCount, spanText, emptyHint,
+  sortItems, visibleItems, formatDistance, formatCount, formatDuration, spanText, emptyHint,
 } from '../src/lib/region.js'
 
 let ok = 0
@@ -99,16 +99,56 @@ t('formatDistance 在 1km 附近切换单位', () => {
   assert.equal(formatDistance(1234567.8), '1234.6 km')
 })
 
+// ⭐ 先取整再比阈值（本轮修复）：只比原始值时 999.6 落进"米"档、又被 round 成 `1000 m`，
+// 而 1000 本身是 `1.0 km` —— 两个相邻的值给出自相矛盾的档位。
+t('formatDistance 在 1000 附近自洽（先取整再比阈值）', () => {
+  assert.equal(formatDistance(999.6), '1.0 km')
+  assert.equal(formatDistance(1000), '1.0 km')
+  assert.equal(formatDistance(999.4), '999 m')
+  assert.equal(formatDistance(0), '0 m')
+})
+
 t('formatDistance 对 null/NaN 给破折号而不是 0', () => {
   assert.equal(formatDistance(null), '—')
   assert.equal(formatDistance(undefined), '—')
   assert.equal(formatDistance(NaN), '—')
 })
 
+// ⭐ bad() 现在也要求 typeof === 'number'（本轮修复）：字符串不再被算术悄悄用掉
+// （`formatDistance('')` 修前得到 `'0 m'` —— 把"没有这个数"显示成真数据）。
+t('formatDistance / formatCount 对字符串也给破折号（不被 Number() 吃掉）', () => {
+  assert.equal(formatDistance(''), '—')
+  assert.equal(formatDistance('850'), '—')
+  assert.equal(formatCount('232'), '—')
+  assert.equal(formatCount(''), '—')
+})
+
 t('formatCount 对 null 给破折号（Number(null)===0 这个坑）', () => {
   assert.equal(formatCount(232), '232')
+  assert.equal(formatCount(0), '0')
   assert.equal(formatCount(null), '—')
   assert.equal(formatCount(undefined), '—')
+})
+
+// ⭐ 规格 6.5 的"时长"列（本轮新增导出）。分档 + 向下取整。
+t('formatDuration 分档：秒 / 分钟 / 小时（向下取整，不越档）', () => {
+  assert.equal(formatDuration(59), '59 秒')
+  assert.equal(formatDuration(59.9), '59 秒')     // 四舍五入会变成 60 秒 → 越档
+  assert.equal(formatDuration(60), '1 分钟')
+  assert.equal(formatDuration(3599), '59 分钟')   // 四舍五入会变成 60 分钟 → 越档
+  assert.equal(formatDuration(3600), '1 小时')
+  assert.equal(formatDuration(3660), '1 小时 1 分')
+  assert.equal(formatDuration(7320), '2 小时 2 分')
+  assert.equal(formatDuration(0), '0 秒')
+})
+
+t('formatDuration 对非法值给破折号而不是 "0 秒"', () => {
+  assert.equal(formatDuration(null), '—')
+  assert.equal(formatDuration(undefined), '—')
+  assert.equal(formatDuration(NaN), '—')
+  assert.equal(formatDuration(Infinity), '—')
+  assert.equal(formatDuration(-1), '—')
+  assert.equal(formatDuration('3600'), '—')
 })
 
 t('spanText 只取日期部分', () => {

@@ -190,8 +190,12 @@ async function doDelete() {
        * 后端的设计是"导出失败就不删"（fail-safe），所以这时轨迹**原样还在** ——
        * 这句必须说清楚，否则用户会以为"删了一半"。
        *
-       * 后端 500 的响应体里没有 message（Spring 默认 server.error.include-message=never），
-       * 所以具体原因由这里补上，不能只丢一个 HTTP 500 给用户。
+       * ⚠️ 注释曾写"后端 500 的响应体里没有 message（Spring 默认 include-message=never）"——
+       * 这句**从 M3 起已经不成立**：`application.yml` 打开了
+       * `server.error.include-message: always`，所以 500 的响应体里**会带 message**
+       * （验收脚本 verify-within-api.py 专门钉住了这一点：400/500 的原因必须在 message 里，
+       * 否则用户看不到"请重画"这类中文原因）。
+       * 先取 `data.message`，取不到（或它只是框架的英文消息）再用下面这句兜底中文说明。
        */
       throw new Error(data.message
         || `删除失败（HTTP ${res.status}）。服务端把这条轨迹导出到回收站时出错了，`

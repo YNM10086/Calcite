@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
-import { formatCount, formatDistance, spanText, emptyHint, DRAW_LIMIT } from '../lib/region.js'
+import { formatCount, formatDistance, formatDuration, spanText, emptyHint, DRAW_LIMIT }
+  from '../lib/region.js'
 
 const props = defineProps({
   stats: { type: Object, default: null },
@@ -47,9 +48,11 @@ const overDraw = computed(() => props.items.length > DRAW_LIMIT)
             :data-testid="`within-item-${it.trackId}`"
             @click="emit('select', it.trackId)">
           <span class="name">{{ it.name }}</span>
+          <!-- 规格 6.5：名字 / 来源 / 点在区域内多少个 / 里程 / 时长 —— 五项都要有 -->
           <span class="meta">
             <em>{{ it.insidePointCount }}</em> 点 ·
             {{ formatDistance(it.distanceM) }} ·
+            {{ formatDuration(it.durationS) }} ·
             {{ it.source }}
           </span>
         </li>

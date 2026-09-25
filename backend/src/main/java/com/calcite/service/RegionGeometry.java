@@ -49,7 +49,9 @@ public final class RegionGeometry {
 
         if ("Point".equals(type)) {
             double[] p = position(coords);
-            double buf = requireBuffer(bufferM, maxBufferM);
+            // ⚠️ 只为**校验**（缺 bufferM / 非正数 / 超上限都要 400）—— 返回值这里用不上：
+            //    缓冲区真正由 PostgreSQL 的 ST_Buffer 算，几何里不留半径。
+            requireBuffer(bufferM, maxBufferM);
             return new Region("POINT(" + num(p[0]) + " " + num(p[1]) + ")", true, 1);
         }
 

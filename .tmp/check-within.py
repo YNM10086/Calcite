@@ -13,6 +13,47 @@
   轮 3：5 个包围盒测量点先 `wait_view_stable()` 等相机停稳（消惯性余摆污染）
   轮 4：⭐ D 段"绘制中包围盒不动"**降级为信息输出**（理由见下）
   轮 5：⭐ 补多边形交互 + ESC 出口；D/E 段的"有没有出结果"改成**数网络请求**（理由见下）
+  轮 6：⭐ 补「区域轮廓 + 命中轨迹画在地球上」与「列表↔地图联动」的**实体**证据；
+        造出「命中 > DRAW_LIMIT」的真实场景；零溢出改成有结果 / 无结果都量 + CSS 契约
+
+== 修复轮 6：实体证据（规格 9.5）+ 零溢出只在空面板量过 + 一条恒真断言 ==
+
+最终审查的 4 条 finding 逐条：
+
+1) ⭐ **规格 9.5 的「区域轮廓与命中轨迹像素存在」从来没验过** —— 全文只数了底色 (9,20,40)，
+   从没检查 `within-region` / `within-track-*` 实体，也从没点过 `within-item-*`。
+   这条路**真的断过一次**（提交 `0af523b`：点列表一条 → 地图上什么都不画），
+   靠人读代码才发现，测试没抓住。修法（新增 A2 / A2b / B2 段）：
+   · 新增 `within_entities()`：数 id 以 `within-region` / `within-track-` 开头的实体
+     （`v.entities.values`，`String(e.id)`）—— 实体在 ⇔ CesiumGlobe 真把两个 prop 画上了地球；
+   · **B2 段**（B 段拉框成功之后）断言 `within-region*` ≥ 1（轮廓真的画了）、
+     `within-track-*` ≥ 1（命中轨迹真的画了）；
+   · 还加了一条与命中条数无关的**列表↔地图高亮**证据：`within_track_style()` 读那条线的
+     线宽/颜色，点列表里**已画**的条目后必须从「宽 2 / 橙 #ff9f45」变成「宽 3 / 亮蓝 #7fd1ff」
+     （`drawWithinTracks` 的 selected 分支）——这条在 3 条命中时也能验。
+2) ⭐ **「点一个没画出来的条目 → 补画」原来只能 skip**：B 段把相机飞到福建那条轨迹，
+   附近一共只有 3 条，而地图默认画前 20 条（DRAW_LIMIT）→ **没有可点的条目**。
+   修法：**A2 段**在初始相机（12000 公里、正对北京上空，画布中心就是 116.4,39.9）上用
+   50 公里缓冲区（`calcite.within.max-buffer-m`）一次罩住北京全部轨迹 → 命中数远超 DRAW_LIMIT，
+   列表被截断、地图只画 20 条 → **A2b 段**点一个 `within-item-*`（先算出"列表有、地球上没有"的集合），
+   断言 `within-track-*` 实体数**增加**（`onWithinSelect → loadWithinDetail` 的行为证据）。
+   ⚠️ 放在 B 段**之前**是刻意的：B/C/D 段的判据都建立在"相机贴在某条轨迹上"这个尺度上，
+      在它们之后挪相机会污染 C 段那条"拖拽后地球确实动了 ≥8% 视野跨度"。
+   ⚠️ 若 A2 的命中数 ≤ DRAW_LIMIT（数据变了 / 相机尺度不对），A2b **记 skip 并打印
+      「列表 N 条全部已画」，不写成恒真**。
+3) **零溢出只在"面板已被清空"时量过**（旧脚本先 F 段清除、再 G 段量）→ 量的是空面板，
+   而 Task 8 评审警告的"命中多条时列表被裁"那个场景**没有任何布局验证**。修法（G 段重写）：
+   · **有结果**（当前视口下重新查一次最大半径缓冲区、列表里真的有条目）与
+     **无结果**（清除后）**两个状态都量** `scrollHeight <= clientHeight + 2`；
+   · 再加一条**与条数无关的 CSS 契约**：`getComputedStyle('.within-stats').flexShrink === '1'`。
+     为什么是它：`.panel > div:not(...)` 那条规则给"非白名单"的 div 设 `flex: 0 0 auto`
+     （flex-shrink 0 = 不可收缩），把 `.within-stats` 加进 `:not(...)` 链之后它拿回默认的
+     `flex-shrink: 1`（可收缩、能滚动）。这条在 0 / 3 / 232 条命中下都成立，
+     正好补上"232 条时列表被裁"用真实数据不好构造的缺口。实测不是 '1' 就**如实红**。
+4) **一条恒真断言**（旧 B 段 `统计卡出现（within-stats）`）：`WithinStats` 根 div 没有 v-if、
+   `App.vue` 里无条件渲染 → 无论这次拉框有没有生效它都在。删掉，换成与 D/E/E2 段同款的
+   **请求计数**判据：`POST /api/analysis/within` 计数增加 ≥1（并顺手修了 B 段读结果时
+   会被"上一段留在 DOM 里的旧统计卡"骗到的时序问题：先等新请求、再等 `draw-hint` 离开"查询中…"）。
 
 == 修复轮 5：多边形交互补验 + ESC 出口 + "用请求计数代替看 DOM 文本" ==
 
@@ -152,6 +193,15 @@ STABLE_NEED = 3                        # 连续 3 次稳定才算停稳（过滤
 
 VIEWPORT = {"width": 1600, "height": 900}
 SHORT_VIEWPORTS = ((1366, 660), (1600, 600))
+
+# ⭐ 修复轮 6 新增：地图上最多叠画多少条命中轨迹（与 frontend/src/lib/region.js 的 DRAW_LIMIT 一致）。
+#    "列表里有、地图上没画"的条目只有在命中数 > 它时才存在 —— 这是"点列表补画"那条链的前提。
+DRAW_LIMIT = 20
+# 缓冲区半径上限（backend application.yml 的 calcite.within.max-buffer-m）。
+# 用它把北京全部轨迹一次罩住，从而**真实地**造出"命中 > DRAW_LIMIT"的场景。
+BIG_BUFFER_M = 50000
+# 等实体数增加的上限（点列表一条 → GET /api/tracks/{id} → 画线）
+ENTITY_WAIT_MS = 10000
 
 ok = 0
 fail = 0
@@ -335,6 +385,176 @@ def panel_overflow(page):
         if (!p) return null;
         return { sh: p.scrollHeight, ch: p.clientHeight };
     }""")
+
+
+def within_stats_flex_shrink(page):
+    """`.within-stats` 的 flex-shrink（**CSS 契约**，与命中条数无关）。
+
+    ⭐ 为什么断这一条（修复轮 6）：Task 8 评审那个修法是把 `.within-stats` 加进
+    `App.vue` 的 `.panel > div:not(...)` 白名单链 —— 那条规则给面板里**非白名单**的 div 设
+    `flex: 0 0 auto`（即 `flex-shrink: 0`，不可收缩），加进白名单后它拿回默认的
+    `flex-shrink: 1`（可收缩，内部 `.items` 才能滚动而不是把面板撑高）。
+    这条契约在 0 条 / 3 条 / 232 条命中下**都成立**，正好补上
+    "232 条时列表被裁"那个场景用真实数据不好构造的缺口。
+    返回 '1' / '0'（字符串）或 None（元素不在 / 取不到）。
+    """
+    try:
+        return page.evaluate("""() => {
+            const el = document.querySelector('.within-stats');
+            if (!el) return null;
+            return getComputedStyle(el).flexShrink;
+        }""")
+    except Exception as e:                      # noqa: BLE001
+        note(f"读 .within-stats 的 flex-shrink 失败：{type(e).__name__}: {e}")
+        return None
+
+
+def list_item_track_ids(page):
+    """列表里当前有哪些条目（`[data-testid="within-item-<trackId>"]` 的后缀，int 列表）。
+
+    用**界面上实际渲染出来的**条目，而不是"接口返回的前 N 条"：
+    "列表里有、地球上没有"这件事必须按界面事实判定。
+    """
+    try:
+        raw = page.eval_on_selector_all(
+            '[data-testid^="within-item-"]',
+            'els => els.map(e => (e.getAttribute("data-testid") || "").replace("within-item-", ""))')
+        return [int(x) for x in raw if str(x).lstrip("-").isdigit()]
+    except Exception as e:                      # noqa: BLE001
+        note(f"读列表条目失败：{type(e).__name__}: {e}")
+        return []
+
+
+def within_entities(page):
+    """数地球上的圈选实体：区域轮廓（id 以 `within-region` 开头）与命中轨迹（`within-track-` 开头）。
+
+    ⭐ 为什么要有它（修复轮 6）：规格 9.5 要求「区域轮廓与命中轨迹**像素存在**」，
+    而本脚本原来全文只数了底色 `(9,20,40)` 的像素、从没检查过这两类实体。
+    后果是实打实的：提交 `0af523b`（点列表一条 → 地图上什么都不画，画线整条没写进去）
+    **测试没抓住**，靠人读代码才发现。像素判据在 B 段那个尺度（相机贴到 5 公里级、
+    离线底图是一片纯色）上极不敏感，所以这里取更硬的证据 —— **实体**：
+    实体在 ⇔ CesiumGlobe 真的把 `region` / `withinTracks` 两个 prop 画进了地球。
+
+    返回 {region, tracks, track_ids, why}；拿不到 Viewer 时 region/tracks = -1 并给出具体原因
+    （`why` 非空时调用方一律 skip，不假红）。
+    """
+    try:
+        return page.evaluate(r"""() => {
+            %s
+            const out = { region: 0, tracks: 0, track_ids: [], why: null };
+            const inst = findGlobeInst();
+            if (!inst) { out.why = '找不到 CesiumGlobe 组件实例（__vue_app__ 遍历失败）'; return out; }
+            const found = findViewer(inst);
+            const v = found && found.viewer;
+            if (!v) { out.why = '拿不到 Viewer（试过 ' + JSON.stringify((found && found.tried) || [])
+                                + '）'; return out; }
+            let arr = [];
+            try { arr = (v.entities && v.entities.values) ? Array.from(v.entities.values) : []; }
+            catch (e) { out.why = '读 v.entities.values 失败：' + e; return out; }
+            for (const e of arr) {
+              let id = '';
+              try { id = String(e && e.id); } catch (err) { continue; }
+              if (id.indexOf('within-region') === 0) out.region += 1;
+              else if (id.indexOf('within-track-') === 0) {
+                out.tracks += 1;
+                out.track_ids.push(id.slice('within-track-'.length));
+              }
+            }
+            return out;
+        }""" % GL_JS)
+    except Exception as e:                      # noqa: BLE001
+        note(f"圈选实体探针失败：{type(e).__name__}: {e}")
+        return {"region": -1, "tracks": -1, "track_ids": [],
+                "why": f"探针整体失败：{type(e).__name__}: {e}"}
+
+
+def within_track_style(page, track_id):
+    """读某条命中轨迹实体在地球上的**线宽**与**颜色** —— 列表点选 → 地球高亮的证据。
+
+    选中样式由 `CesiumGlobe.drawWithinTracks` 决定：选中 = 宽 3 + `#7fd1ff`（亮蓝），
+    未选中 = 宽 2 + `#ff9f45`（橙）。所以"点列表里的一条 → 地图上那条变亮"是可读的。
+    读不到（实体不存在 / 属性取不出来）时 `ok=False`，调用方 skip 而不是假红。
+    """
+    try:
+        return page.evaluate(r"""([trackId]) => {
+            %s
+            const out = { ok: false, why: null, width: null, rgb: null, found: false };
+            const inst = findGlobeInst();
+            if (!inst) { out.why = '找不到 CesiumGlobe 组件实例'; return out; }
+            const found = findViewer(inst);
+            const v = found && found.viewer;
+            if (!v) { out.why = '拿不到 Viewer'; return out; }
+            let e = null;
+            try { e = v.entities.getById('within-track-' + trackId); } catch (err) {}
+            if (!e) { out.why = '地球上没有 id=within-track-' + trackId + ' 的实体'; return out; }
+            out.found = true;
+            const t = v.clock.currentTime;
+            const read = function (prop) {
+              try {
+                if (prop === undefined || prop === null) return null;
+                if (typeof prop.getValue === 'function') return prop.getValue(t);
+                return prop;
+              } catch (err) { return null; }
+            };
+            const w = read(e.polyline && e.polyline.width);
+            if (typeof w === 'number' && isFinite(w)) out.width = w;
+            const mat = e.polyline && e.polyline.material;
+            const c = read(mat && mat.color);
+            if (c && typeof c.red === 'number') out.rgb = [c.red, c.green, c.blue];
+            out.ok = true;
+            return out;
+        }""" % GL_JS, [str(track_id)])
+    except Exception as e:                      # noqa: BLE001
+        note(f"读 within-track-{track_id} 的样式失败：{type(e).__name__}: {e}")
+        return {"ok": False, "why": f"探针失败：{type(e).__name__}: {e}", "width": None, "rgb": None}
+
+
+def _is_selected_style(st):
+    """这条线是不是"选中样式"：宽 3 或 颜色 = #7fd1ff（≈ [0.498, 0.820, 1.0]）。"""
+    if st.get("width") == 3:
+        return True
+    rgb = st.get("rgb")
+    return bool(rgb) and rgb[2] > 0.9 and rgb[1] > 0.7 and rgb[0] < 0.7
+
+
+def draw_big_buffer(page):
+    """在**当前视口**下用最大半径缓冲区查一次（"有结果且列表里真的有条目"的场景制造器）。
+
+    用途一（A2 段）：初始相机正对北京上空时，50 公里缓冲区罩住北京全部轨迹 →
+    命中数远超 DRAW_LIMIT(20) → 列表里存在"地图上没画出来"的条目，`onWithinSelect`
+    的补画分支才有东西可点。
+    用途二（G 段）：在矮视口下量"有结果时面板零溢出"，而不是只量空面板。
+
+    ⚠️ 画布与面板的几何**每个视口都要重新取**（面板宽度 `min(420px, 34vw)`、画布尺寸都会变），
+    并且中心点要避开底部的速度曲线与播放条 —— 它们是 DOM 浮层，盖在画布上，事件到不了地球。
+    返回 (state, 列表条目数, 诊断文本)；段内异常返回 (None, 0, 原因)，绝不抛。
+    """
+    try:
+        if count_of(page, '[data-testid="draw-buffer"]') != 1:
+            return None, 0, "draw-buffer 按钮不存在"
+        cb = page.locator("canvas").first.bounding_box()
+        pb = page.locator(".panel").bounding_box()
+        if not cb or not pb:
+            return None, 0, "取不到 canvas / .panel 的边界框"
+        pr = pb["x"] + pb["width"]
+        cx = max(cb["x"] + cb["width"] / 2, pr + 40)
+        cy = cb["y"] + min(cb["height"] * 0.45, max(60.0, cb["height"] - 220))
+        page.click('[data-testid="draw-buffer"]')
+        page.wait_for_timeout(300)
+        page.fill('[data-testid="buffer-m"]', str(BIG_BUFFER_M))
+        page.wait_for_timeout(200)
+        req_before = within_post_count()
+        page.mouse.click(cx, cy)
+        page.wait_for_timeout(600)
+        got, waited = wait_new_within_request(page, req_before, timeout_ms=15000)
+        state, txt = wait_result(page, timeout_ms=20000)
+        items = len(list_item_track_ids(page))
+        return state, items, (f"中心 ( {cx:.0f},{cy:.0f} ) / 画布 {cb['width']:.0f}x{cb['height']:.0f} / "
+                              f"面板右 {pr:.0f}；半径 {BIG_BUFFER_M}m；"
+                              f"圈选请求 {req_before} → {within_post_count()}"
+                              f"（等新请求 {waited}ms/{got}）；状态={state} 文本={txt!r}")
+    except Exception as e:                      # noqa: BLE001
+        return None, 0, f"段内异常：{type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------- 页面侧探针
@@ -858,6 +1078,124 @@ def main():
             check("进圈选档时左键旋转仍开启（getRotateEnabled = true）", rot_idle is True,
                   f"getRotateEnabled() = {rot_idle}（还没开始画，应当可以转）")
 
+        # ------------------------------------------------ A2) 全局视野缓冲区：造出「命中 > DRAW_LIMIT」的真实场景
+        # ⭐ 修复轮 6 新增（规格 9.5 的"区域轮廓 + 命中轨迹画在地球上"与"列表↔地图联动"）。
+        #
+        # 为什么必须有这一段：B 段先把相机飞到列表第一条轨迹（**福建，附近一共只有 3 条**），
+        # 那里拉框只能命中 3 条 —— 而地图默认把**前 20 条**（DRAW_LIMIT）全画出来，
+        # 于是"点列表里没画出来的条目 → 补画到地图上"这条链**永远没有可点的条目**，
+        # 只能记 skip（= 等于没验）。而"命中条数超过 DRAW_LIMIT"正是设计里
+        # "列表被裁、需要点列表补画"的真实场景。
+        #
+        # 初始相机（CesiumGlobe onMounted 的 setView）停在 12000 公里、正对北京上空，
+        # 画布中心就是 (116.4, 39.9)：一个 50 公里缓冲区（calcite.within.max-buffer-m）
+        # 足以罩住北京全部轨迹，福建那 3 条在 1665 公里外、不会被算进来 ——
+        # 命中数远超 DRAW_LIMIT(20)，于是列表里有条目、地球上只画了 20 条。
+        #
+        # ⚠️ 这一段刻意放在 B 段**之前**：B/C/D 段的判据全部建立在"相机贴在某条轨迹上"
+        # 这个尺度上（C 段那条"拖拽后地球确实动了 ≥8% 视野跨度"尤其是），
+        # 在它们之后挪相机会把 C 段的基准污染掉。
+        print("=== A2) 全局视野缓冲区：命中 > DRAW_LIMIT 的真实场景 ===")
+        a2_done = False
+        a2_items = []
+        a2_ent = {"region": -1, "tracks": -1, "track_ids": [], "why": "A2 段没跑"}
+        a2_state, a2_txt = None, ""
+        if count_of(page, '[data-testid="draw-buffer"]') != 1:
+            skip("A2) 全局视野下的 50 公里缓冲区查出了结果", "draw-buffer 按钮不存在")
+        else:
+            try:
+                page.click('[data-testid="draw-buffer"]')
+                page.wait_for_timeout(300)
+                page.fill('[data-testid="buffer-m"]', str(BIG_BUFFER_M))
+                page.wait_for_timeout(200)
+                bm_now = page.input_value('[data-testid="buffer-m"]')
+                ccx = canvas["x"] + canvas["width"] / 2
+                ccy = canvas["y"] + canvas["height"] / 2
+                note(f"A2 段：半径输入框 = {bm_now}（期望 {BIG_BUFFER_M}，即 calcite.within.max-buffer-m）；"
+                     f"缓冲区中心 = 画布中心 ( {ccx:.0f},{ccy:.0f} )"
+                     "（初始相机正对北京上空 116.4,39.9）")
+                req_before_a2 = within_post_count()
+                page.mouse.click(ccx, ccy)
+                page.wait_for_timeout(600)
+                got_a2, waited_a2 = wait_new_within_request(page, req_before_a2, timeout_ms=15000)
+                req_after_a2 = within_post_count()
+                a2_state, a2_txt = wait_result(page, timeout_ms=20000)
+                a2_items = list_item_track_ids(page)
+                a2_ent = within_entities(page)
+                note(f"A2 段：状态={a2_state} stat-tracks={a2_txt!r}；列表条目 {len(a2_items)} 条；"
+                     f"地球上的命中轨迹实体 {a2_ent['tracks']} 条 / 区域实体 {a2_ent['region']} 个；"
+                     f"圈选请求 {req_before_a2} → {req_after_a2}"
+                     f"（等新请求 {waited_a2}ms/{got_a2}）；{req_summary()}")
+                check("A2) 全局视野下的 50 公里缓冲区查出了结果",
+                      (req_after_a2 - req_before_a2) >= 1
+                      and (count_of(page, '[data-testid="stat-tracks"]') == 1
+                           or count_of(page, '[data-testid="within-empty"]') == 1),
+                      f"状态={a2_state} 文本={a2_txt!r}；圈选请求计数 {req_before_a2} → {req_after_a2}"
+                      f"（新增 {req_after_a2 - req_before_a2}，期望 ≥1）"
+                      "；新增 0 = 这一击没被当成缓冲区中心（点在球外 / 没进绘制模式）")
+                a2_done = True
+            except Exception as e:              # noqa: BLE001
+                note(f"A2 段自身出错：{type(e).__name__}: {e}")
+                skip("A2) 全局视野下的 50 公里缓冲区查出了结果",
+                     f"段内异常：{type(e).__name__}: {e}")
+
+        # ------------------------------------------------ A2b) 点列表里"没画出来"的条目 → 地图补画
+        # ⭐ 这条是 `onWithinSelect` 的**行为证据**（提交 0af523b 那条链：点列表一条 → 地图补画）。
+        # 判据：点之前地球上 within-track-* 实体数 N → 点之后 N+1。
+        if not a2_done:
+            skip("A2b) 点列表里没画出来的条目 → 地图补画一条", "A2 段没跑成（见上面那条）")
+        elif a2_ent["why"]:
+            skip("A2b) 点列表里没画出来的条目 → 地图补画一条",
+                 f"拿不到实体（{a2_ent['why']}）—— 没有可靠的办法读'已画几条'")
+        elif not a2_items:
+            skip("A2b) 点列表里没画出来的条目 → 地图补画一条",
+                 f"列表里一条都没有（状态={a2_state} 文本={a2_txt!r}）—— 这一击没命中任何轨迹")
+        else:
+            drawn_a2 = set(str(x) for x in a2_ent["track_ids"])
+            undrawn_a2 = [i for i in a2_items if str(i) not in drawn_a2]
+            if not undrawn_a2:
+                skip("A2b) 点列表里没画出来的条目 → 地图补画一条",
+                     f"命中的 {len(a2_items)} 条**全部**已经画在地球上了"
+                     f"（列表 {a2_items}，已画 {sorted(drawn_a2, key=lambda s: int(s) if s.lstrip('-').isdigit() else 0)}）"
+                     f"—— 命中数 ≤ DRAW_LIMIT({DRAW_LIMIT}) 时不存在「没画出来」的条目，这条只能跳过；"
+                     "先看上面 A2 段那行的列表条目数（期望 > 20）与相机尺度")
+            else:
+                target_a2 = undrawn_a2[0]
+                before_n = a2_ent["tracks"]
+                click_err_a2 = ""
+                try:
+                    page.click(f'[data-testid="within-item-{target_a2}"]')
+                except Exception as e:          # noqa: BLE001
+                    # 点不动（被别的元素挡住 / 元素不在视口）是脚本/环境问题，不当功能判据
+                    click_err_a2 = f"{type(e).__name__}: {e}"
+                    note(f"A2b 段：点 within-item-{target_a2} 失败 —— {click_err_a2}")
+                after_a2 = a2_ent
+                spent_a2 = 0
+                if not click_err_a2:
+                    while spent_a2 < ENTITY_WAIT_MS:
+                        page.wait_for_timeout(400)
+                        spent_a2 += 400
+                        after_a2 = within_entities(page)
+                        if after_a2["tracks"] > before_n:
+                            break
+                note(f"A2b 段：点 within-item-{target_a2}（列表 {len(a2_items)} 条、"
+                     f"点前已画 {before_n} 条 → 点后 {after_a2['tracks']} 条，等了 {spent_a2}ms）；"
+                     f"点前已画 id={sorted(drawn_a2, key=lambda s: int(s) if s.lstrip('-').isdigit() else 0)}；"
+                     f"点后实体探针 why={after_a2['why']}")
+                if click_err_a2:
+                    skip("A2b) 点列表里没画出来的条目 → 地图上补画一条（within-track-* 实体数 +1）",
+                         f"点 within-item-{target_a2} 时抛异常（{click_err_a2}）—— 脚本没点到，"
+                         "不是「点列表不补画」，故跳过（诊断见上一行）")
+                else:
+                    check("A2b) 点列表里没画出来的条目 → 地图上补画一条（within-track-* 实体数 +1）",
+                          after_a2["tracks"] > before_n,
+                          f"点的是 within-item-{target_a2}；点前地球上已有 {before_n} 条 "
+                          f"within-track-* 实体（列表共 {len(a2_items)} 条，"
+                          f"没画出来的 {len(undrawn_a2)} 条：{undrawn_a2[:5]}）→ 点后 {after_a2['tracks']} 条"
+                          f"（期望 > {before_n}，等了 {spent_a2}ms）；"
+                          "点后仍相等 = onWithinSelect → loadWithinDetail 那条链断了"
+                          "（0af523b 就是它：`loadWithinDetail(ids)` 漏传序号时守卫恒真、直接 return）")
+
         # ------------------------------------------------ B) 先飞相机，再拉框
         print("=== B) 点一条轨迹飞过去 → 拉框 → 统计卡出现 ===")
         prev_tracks_text = None
@@ -908,6 +1246,13 @@ def main():
                 note(f"⚠️ 拖拽坐标超出视口 ({x0},{y0})→({x1},{y1})："
                      "拖出画面 Cesium 收不到 mouseup，这一笔作废（命中 0 条时先看这里）")
 
+            # ⭐ 修复轮 6：B 段也数网络请求。
+            #    原来这里那条 `统计卡出现（within-stats）` 是**恒真断言**：
+            #    `WithinStats.vue` 的根 div 没有 v-if、`App.vue` 里也无条件渲染它，
+            #    所以无论这次拉框有没有生效，它都在 —— 信息量为 0。
+            #    换成与 D/E/E2 段同款的"POST /api/analysis/within 计数增加 ≥1"：
+            #    这既证明这次手势被当成画区域，也证明请求真的发出去了，且完全不看 DOM 新旧文本。
+            req_before_b = within_post_count()
             rot_pre_draw = globe_rotate(page)
             page.click('[data-testid="draw-rect"]')
             page.wait_for_timeout(300)
@@ -921,8 +1266,25 @@ def main():
 
             drag(page, x0, y0, x1, y1)
             page.wait_for_timeout(600)         # 松手 → 发请求之间的最短间隔
+            got_req_b, req_waited_b = wait_new_within_request(page, req_before_b, timeout_ms=10000)
+            req_after_b = within_post_count()
+            # ⭐ 修复轮 6：等**这一次**查询收尾再读结果。
+            #    原因：A2 段在 DOM 里留了一张旧统计卡，而 `wait_result` 一看到 stat-tracks
+            #    就立刻返回 —— 不等这次收尾就会把 A2 的旧文本当成 B 段的结果
+            #    （B2 段要看的"命中 3 条时画在地球上的实体"也会变成 A2 那批实体）。
+            #    收尾信号用 `draw-hint` 的"查询中…"（withinBusy 在 fetch 之前就置 true，
+            #    所以 wait_new_within_request 返回时它一定已经亮了）。
+            spent_busy_b = 0
+            while spent_busy_b < 8000:
+                if not try_text(page, '[data-testid="draw-hint"]').startswith("查询中"):
+                    break
+                page.wait_for_timeout(200)
+                spent_busy_b += 200
             state, txt = wait_result(page)
-            note(f"B 段查询收尾状态 = {state}，stat-tracks 文本 = {txt!r}")
+            note(f"B 段查询收尾状态 = {state}，stat-tracks 文本 = {txt!r}；"
+                 f"圈选请求 {req_before_b} → {req_after_b}"
+                 f"（等新请求 {req_waited_b}ms/{got_req_b}，等收尾 {spent_busy_b}ms）；"
+                 f"{req_summary()}")
 
             rot_after_draw = globe_rotate(page)
             if rot_after_draw is None:
@@ -932,8 +1294,15 @@ def main():
                       rot_after_draw is True,
                       f"getRotateEnabled() = {rot_after_draw}（松手即退出绘制，期望 true）")
 
-            n_stats_card = count_of(page, '[data-testid="within-stats"]')
-            check("统计卡出现（within-stats）", n_stats_card == 1, f"实际 {n_stats_card} 个")
+            check("B) 拉框手势真的发起了圈选查询（POST /api/analysis/within 计数增加 ≥1）",
+                  (req_after_b - req_before_b) >= 1,
+                  f"圈选请求计数 {req_before_b} → {req_after_b}"
+                  f"（新增 {req_after_b - req_before_b}，期望 ≥1）"
+                  "；新增 0 = 这次拖拽没被当成拉框（地球被转了 / 拖出画面）"
+                  f"；{req_summary()}")
+            note(f"B 段统计卡容器 within-stats × "
+                 f"{count_of(page, '[data-testid=\"within-stats\"]')}"
+                 "（它没有 v-if、恒在，所以不作为判据 —— 见上面那条请求计数）")
             has_stat = count_of(page, '[data-testid="stat-tracks"]') == 1
             check("有「条轨迹穿过」数字（stat-tracks）", has_stat,
                   f"状态={state} 文本={txt!r}"
@@ -959,6 +1328,75 @@ def main():
             b_anchor = anchor
         if prev_tracks_text is None:
             b_anchor = center_rect(canvas)
+
+        # ------------------------------------------------ B2) 区域轮廓 / 命中轨迹的**实体**证据 + 列表↔地图高亮
+        # ⭐ 修复轮 6 新增（规格 9.5 的「区域轮廓与命中轨迹像素存在」）。
+        #    旧脚本全文只数了底色 `(9,20,40)`，**从没**检查过 `within-region` /
+        #    `within-track-*` 实体，也从没点过 `within-item-*` —— 提交 0af523b
+        #    （点列表一条 → 地图上什么都不画）就是这么漏过去的，靠人读代码才发现。
+        #    像素判据在这里天然不灵（相机贴在 5 公里级，离线底图是一片纯色），
+        #    所以判据换成**实体集合**：实体在 ⇔ CesiumGlobe 真把两个 prop 画进了地球。
+        print("=== B2) 区域轮廓 / 命中轨迹的实体证据 + 列表↔地图高亮 ===")
+        ent_b = within_entities(page)
+        note(f"B 段结果的实体：区域 {ent_b['region']} 个（轮廓面 + 边线，正常为 2）、"
+             f"命中轨迹 {ent_b['tracks']} 条 id={ent_b['track_ids']}；why={ent_b['why']}")
+        if ent_b["why"]:
+            skip("B2) 区域轮廓真的画在地球上（within-region* 实体 ≥1）", ent_b["why"])
+            skip("B2) 命中轨迹真的画在地球上（within-track-* 实体 ≥1）", ent_b["why"])
+            skip("B2) 点列表里已画的那条 → 地图上变选中样式", ent_b["why"])
+        else:
+            if prev_tracks_text is None:
+                skip("B2) 区域轮廓真的画在地球上（within-region* 实体 ≥1）",
+                     "B 段没拿到命中数（框没框到轨迹 —— 脚本坐标问题），实体本就不该出现")
+                skip("B2) 命中轨迹真的画在地球上（within-track-* 实体 ≥1）",
+                     "B 段没拿到命中数（框没框到轨迹）")
+            else:
+                check("B2) 区域轮廓真的画在地球上（within-region* 实体 ≥1）",
+                      ent_b["region"] >= 1,
+                      f"region 实体={ent_b['region']} 个（drawRegion 成功时应为 2：半透明面 + 边线）；"
+                      f"B 段命中 {prev_tracks_text!r} 条")
+                check("B2) 命中轨迹真的画在地球上（within-track-* 实体 ≥1）",
+                      ent_b["tracks"] >= 1,
+                      f"within-track-* 实体={ent_b['tracks']} 条（地图上该画的条数，"
+                      f"最多 DRAW_LIMIT={DRAW_LIMIT}）；区域实体={ent_b['region']} 个；"
+                      f"B 段命中 {prev_tracks_text!r} 条 —— 实体为 0 而 stat-tracks 有数字，"
+                      "就是 0af523b 那类「统计对、地图上什么都没画」的断链")
+
+            # 列表点选 → 地球高亮（与命中条数无关，只要地球上画了至少一条就能验）
+            drawn_b = [int(x) for x in ent_b["track_ids"] if str(x).lstrip("-").isdigit()]
+            if not drawn_b:
+                skip("B2) 点列表里已画的那条 → 地图上变选中样式",
+                     "地球上一条 within-track-* 实体都没有，没有可验的高亮对象")
+            else:
+                target_b = drawn_b[0]
+                st0 = within_track_style(page, target_b)
+                click_err_b = ""
+                try:
+                    page.click(f'[data-testid="within-item-{target_b}"]')
+                    page.wait_for_timeout(800)
+                except Exception as e:          # noqa: BLE001
+                    click_err_b = f"{type(e).__name__}: {e}"
+                st1 = within_track_style(page, target_b)
+                note(f"B2 段：点 within-item-{target_b} 前后，within-track-{target_b} 的样式 "
+                     f"width {st0.get('width')} → {st1.get('width')}；"
+                     f"rgb {st0.get('rgb')} → {st1.get('rgb')}；"
+                     f"ok={st0.get('ok')}/{st1.get('ok')}；点击异常={click_err_b or '无'}")
+                if click_err_b:
+                    skip("B2) 点列表里已画的那条 → 地图上变选中样式",
+                         f"点 within-item-{target_b} 时抛异常（{click_err_b}）—— 脚本没点到，故跳过")
+                elif not st0.get("ok") or not st1.get("ok"):
+                    skip("B2) 点列表里已画的那条 → 地图上变选中样式",
+                         f"读不到实体样式（点前 {st0.get('why')} / 点后 {st1.get('why')}）"
+                         "—— Cesium 的属性读不出来时一律 skip，不假红")
+                else:
+                    check("B2) 点列表里已画的那条 → 地图上该条变选中样式（线宽 2→3 / 颜色变亮蓝）",
+                          _is_selected_style(st1) and not _is_selected_style(st0),
+                          f"within-item-{target_b} → within-track-{target_b}："
+                          f"点前 width={st0.get('width')} rgb={st0.get('rgb')}"
+                          "（未选中应为宽 2 / 橙 #ff9f45≈[1.0,0.624,0.271]）→ "
+                          f"点后 width={st1.get('width')} rgb={st1.get('rgb')}"
+                          "（选中应为宽 3 / 亮蓝 #7fd1ff≈[0.498,0.820,1.0]）"
+                          "；样式没变 = 列表点选没传到地球（withinTracksForGlobe 的 selected 没生效）")
 
         # ------------------------------------------------ C) 拉框之后左键旋转恢复
         print("=== C) 拉框之后左键旋转必须恢复 ===")
@@ -1365,28 +1803,88 @@ def main():
         else:
             skip("切档不报错", "没有 mode-stay 按钮")
 
-        # ------------------------------------------------ G) 面板零溢出
-        print("=== G) 面板零溢出（两个矮视口）===")
+        # ------------------------------------------------ G) 面板零溢出（有结果 / 无结果）+ CSS 契约
+        # ⭐ 修复轮 6 修两个漏洞：
+        #   ① 旧脚本在 F 段「清除」**之后**才量溢出 → 量到的是**空面板**；
+        #      而 Task 8 评审专门警告的那个场景（命中多条时列表被裁，修法是把 `.within-stats`
+        #      加进 `App.vue` 的 `.panel > div:not(...)` 白名单链）**从来没有被布局验证过**。
+        #      现在两个状态都量：**有结果**（列表里真的有条目）+ **无结果**。
+        #   ② 新增一条与命中条数无关的 **CSS 契约** 断言：`.within-stats` 的 `flex-shrink` 必须
+        #      是 `1`。为什么是它：那条规则给面板里"非白名单"的 div 设 `flex: 0 0 auto`
+        #      （`flex-shrink: 0` = 不可收缩），把 `.within-stats` 加进 `:not(...)` 链之后它
+        #      拿回默认的 `flex-shrink: 1`（可收缩，内部 `.items` 才能滚动而不是把面板撑高）。
+        #      这条在 0 条 / 3 条 / 232 条命中下**都成立** —— 正好补上"232 条时列表被裁"
+        #      那个场景用真实数据不好构造的缺口。
+        print("=== G) 面板零溢出（有结果 / 无结果 × 两个矮视口）+ flex-shrink 契约 ===")
         for w, h in SHORT_VIEWPORTS:
             page.set_viewport_size({"width": w, "height": h})
             page.wait_for_timeout(300)
             if count_of(page, '[data-testid="mode-within"]') == 1:
                 page.click('[data-testid="mode-within"]')
             else:
-                skip(f"{w}x{h} 面板零溢出", "没有 mode-within 按钮")
+                skip(f"{w}x{h} 面板零溢出（有结果）", "没有 mode-within 按钮")
+                skip(f"{w}x{h} 面板零溢出（无结果）", "没有 mode-within 按钮")
+                skip(f"{w}x{h} .within-stats 的 flex-shrink == '1'（CSS 契约）", "没有 mode-within 按钮")
                 continue
             page.wait_for_timeout(900)
-            ov = panel_overflow(page)
-            if ov is None:
-                skip(f"{w}x{h} 面板零溢出", "取不到 .panel")
-                continue
-            box = page.locator(".panel").bounding_box()
-            over = ov["sh"] - ov["ch"]
-            note(f"{w}x{h} 面板 scrollHeight={ov['sh']} clientHeight={ov['ch']} "
-                 f"溢出={over}px box={box}")
-            check(f"{w}x{h} 面板零溢出", ov["sh"] <= ov["ch"] + 2,
-                  f"scrollHeight={ov['sh']} > clientHeight={ov['ch']} + 2（溢出 {over}px）"
-                  f" box={box}（矮视口下面板内容塞不下 → 会顶出下边界或裁掉列表）")
+
+            # --- ① 有结果：在**这个视口**下重新查一次最大半径缓冲区，拿到"列表里真的有条目"的状态
+            state_g, items_g, diag_g = draw_big_buffer(page)
+            note(f"{w}x{h} 有结果状态：{diag_g}")
+            ov_res = panel_overflow(page)
+            if ov_res is None:
+                skip(f"{w}x{h} 面板零溢出（有结果）", "取不到 .panel")
+            else:
+                box = page.locator(".panel").bounding_box()
+                over_res = ov_res["sh"] - ov_res["ch"]
+                note(f"{w}x{h} 有结果：列表条目 {items_g} 条；"
+                     f"面板 scrollHeight={ov_res['sh']} clientHeight={ov_res['ch']} "
+                     f"溢出={over_res}px box={box}")
+                if items_g == 0:
+                    skip(f"{w}x{h} 面板零溢出（有结果）",
+                         f"这次缓冲区没查出条目（状态={state_g} 文本={diag_g}）—— 量到的还是空面板，"
+                         "没有意义，故跳过（下面的无结果那条仍然会量）")
+                else:
+                    check(f"{w}x{h} 面板零溢出（有结果：列表 {items_g} 条）",
+                          ov_res["sh"] <= ov_res["ch"] + 2,
+                          f"scrollHeight={ov_res['sh']} > clientHeight={ov_res['ch']} + 2"
+                          f"（溢出 {over_res}px）；列表条目 {items_g} 条 box={box}"
+                          "—— 命中多条时列表被裁（Task 8 评审警告的那个场景，"
+                          "修法 = .within-stats 加进 .panel > div:not(...) 白名单链）")
+            fs_res = within_stats_flex_shrink(page)
+            if fs_res is None:
+                skip(f"{w}x{h} .within-stats 的 flex-shrink == '1'（有结果时）",
+                     "取不到 .within-stats（元素不在 / 读样式失败）")
+            else:
+                check(f"{w}x{h} .within-stats 的 flex-shrink == '1'（有结果时，CSS 契约）",
+                      fs_res == "1",
+                      f"getComputedStyle('.within-stats').flexShrink = {fs_res!r}（期望 '1'）；"
+                      "为 '0' 说明它落进了 .panel > div 的 flex: 0 0 auto 规则、不可收缩 → "
+                      "命中多条时会被撑高、裁掉列表（白名单链里必须带上 .within-stats）")
+
+            # --- ② 无结果：清除后再量一次（这一条就是旧脚本原来那条断言，保留）
+            cleared_g = click_clear(page)
+            page.wait_for_timeout(900)
+            ov_empty = panel_overflow(page)
+            if ov_empty is None:
+                skip(f"{w}x{h} 面板零溢出（无结果）", "取不到 .panel")
+            else:
+                over_empty = ov_empty["sh"] - ov_empty["ch"]
+                note(f"{w}x{h} 无结果：stat-tracks={count_of(page, '[data-testid=\"stat-tracks\"]')}；"
+                     f"面板 scrollHeight={ov_empty['sh']} clientHeight={ov_empty['ch']} "
+                     f"溢出={over_empty}px")
+                check(f"{w}x{h} 面板零溢出（无结果）", ov_empty["sh"] <= ov_empty["ch"] + 2,
+                      f"scrollHeight={ov_empty['sh']} > clientHeight={ov_empty['ch']} + 2"
+                      f"（溢出 {over_empty}px）"
+                      + ("" if cleared_g else "（这次清除没点成，看上面诊断）"))
+            fs_empty = within_stats_flex_shrink(page)
+            if fs_empty is None:
+                skip(f"{w}x{h} .within-stats 的 flex-shrink == '1'（无结果时）",
+                     "取不到 .within-stats（元素不在 / 读样式失败）")
+            else:
+                check(f"{w}x{h} .within-stats 的 flex-shrink == '1'（无结果时，CSS 契约）",
+                      fs_empty == "1",
+                      f"getComputedStyle('.within-stats').flexShrink = {fs_empty!r}（期望 '1'）")
 
         # ------------------------------------------------ 控制台
         check("控制台零报错（pageerror + console.error）", len(errors) == 0, errors[:5])

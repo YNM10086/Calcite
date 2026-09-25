@@ -534,7 +534,7 @@ const withinSelectedId = ref(null)
 let withinSeq = 0
 
 /*
- * 清空圈选的界面状态（统计 / 列表 / 区域 / 要画的轨迹 / 选中高亮 / 绘制模式 / 缓冲区中心）。
+ * 清空圈选的界面状态（统计 / 列表 / 区域 / 要画的轨迹 / 选中高亮 / 绘制模式）。
  *
  * ⚠️ 这个函数**故意不碰 withinSeq**，因为有两个用途，语义不同：
  *   · 用户主动清除 / 切档 / 数据变更（resetWithin 包装）→ 必须**推进**序号让在途请求作废；
@@ -548,6 +548,11 @@ let withinSeq = 0
  * ⚠️ withinBusy 必须在这里一起清：清除/切档会让在途请求变成"过期请求"，
  * 而关掉转圈的那句在 finally 里、带着 `mine === withinSeq` 的判断 —— 它永远不会执行了。
  * 不在这里清的话，清除之后 RegionDrawer 的提示会一直停在"查询中…"、查询按钮永久置灰。
+ *
+ * ⚠️ **`bufferCenter` 不在这里清**（本轮修复）：失败路径也要走这个函数，而"改个半径
+ * 拿同一个中心再来一次"恰恰是用户看到 400（"区域有交叉，请重画"）时最想做的事 ——
+ * 在这里清掉中心，`RegionDrawer` 的「查询」按钮就跟着置灰，连绕行的路都没了。
+ * 它只在**用户主动**的出口里清，见 resetWithin()。
  */
 function clearWithinState(keepError = false) {
   withinStats.value = null
@@ -561,7 +566,6 @@ function clearWithinState(keepError = false) {
   withinSelectedId.value = null   // 清除/切档时选中高亮一并复位（规格 6.7）
   withinBusy.value = false        // 转圈也要收，否则 finally 的守卫会把它永久留在 true
   drawingMode.value = 'idle'
-  bufferCenter.value = null
 }
 
 function resetWithin() {
@@ -577,9 +581,14 @@ function resetWithin() {
    *
    * ⚠️ 这里**故意不写行号**：本文件前几轮就因为注释里钉了行号而集体过期
    * （加了第五档之后整体下移，按注释跳转会落到别的代码上）。要定位就用上面的函数名/按钮名搜。
+   *
+   * ⚠️ `bufferCenter` 由**这里**清（而不是 clearWithinState）：只有"用户主动清除 / 切档 /
+   * 数据被改动"这三个出口才该丢掉缓冲区中心 —— 查询失败不清（失败后用户最想做的就是
+   * 改个半径重查，中心一丢，「查询」按钮就灰了，见上面 clearWithinState 的注释）。
    */
   withinSeq++
   clearWithinState()
+  bufferCenter.value = null
 }
 
 /** 拉框 / 多边形 / 缓冲区三种形状，最终都走这一个请求 */
@@ -621,6 +630,10 @@ async function queryWithin(geometry, extra = {}) {
      * withinBusy 就永远卡在 true、错误消息也留不下来。
      * 所以失败路径用不推进序号的 clearWithinState(true)：清掉半套结果，但**保留**错误消息
      * （后端那句"区域有交叉，请重画"正是要给人看的）。
+     *
+     * ⚠️ 它还**保留 bufferCenter**（本轮修复）：失败了也要让用户能改个半径、点「查询」
+     * 拿同一个中心再来一次 —— 那正是看到"请重画"时最自然的下一步。中心只在
+     * 用户主动清除 / 切档时由 resetWithin() 清掉。
      */
     clearWithinState(true)
     withinError.value = e.message || String(e)
@@ -1024,6 +1037,7 @@ async function selectTrack(id) {
           :buffer-m="bufferM"
           :busy="withinBusy"
           :has-result="!!withinStats"
+          :has-center="!!bufferCenter"
           @start="startDraw"
           @cancel="drawingMode = 'idle'"
           @clear="resetWithin"

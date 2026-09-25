@@ -800,6 +800,12 @@ watch(
 // 绘制模式变化 → 注册/注销鼠标事件 + 开关左键旋转。
 // ⚠️ 这是"画完地球转不动了"那个 bug 的唯一防线：App 每一次把模式收回 'idle'
 // （松手画完 / 取消 / ESC / 切档 / 请求失败）都会走到这里，没有第二条出口
+//
+// ⚠️ 这里**不能**加 `immediate: true` 来兜"挂载前就已经是绘制模式"那种情况：
+//    immediate 的首次调用发生在 setup 阶段，那时 `viewer` 还是 null，
+//    setDrawingMode 开头的守卫（!v || v.isDestroyed()）会把它**静默吃掉** ——
+//    正是要修的那个"模式被丢掉"的现象，等于没修。
+//    真正的兜底在 onMounted 末尾（viewer 与 ready 都就绪之后）补调一次，见那里。
 watch(() => props.drawingMode, (m) => setDrawingMode(m))
 
 // 区域回显 → 重画轮廓（画的是后端给的几何，不是本地画的形状）
@@ -870,6 +876,15 @@ onMounted(() => {
   // 圈选的两个图层同理：区域与命中结果都可能在挂载前就已经拿到了
   drawRegion(props.region)
   drawWithinTracks(props.withinTracks)
+  /*
+   * ⚠️ 绘制模式也要在这里补调一次（与上面几个 prop 同一个理由）。
+   * 漏了它的后果：`drawingMode` 若在 viewer 就绪前就已经不是 'idle'
+   * （父组件在挂载前就点了「拉框 / 多边形 / 缓冲区」），那一次变更只被 watcher 收到过，
+   * 而那时 `viewer.value` 还是 null → setDrawingMode 的守卫直接 return →
+   * 鼠标事件根本没注册、左键旋转也没关掉，界面上按钮亮着却画不出任何东西。
+   * 传 'idle' 时它是幂等的（clearDrawHandler + rotateEnabled(true) 都允许重复调用）。
+   */
+  setDrawingMode(props.drawingMode)
 })
 
 onBeforeUnmount(() => {

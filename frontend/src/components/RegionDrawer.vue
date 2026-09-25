@@ -6,6 +6,10 @@ const props = defineProps({
   bufferM: { type: Number, default: 500 },
   busy: { type: Boolean, default: false },
   hasResult: { type: Boolean, default: false },
+  // 缓冲区中心是否已经选过（App 持着 bufferCenter）。
+  // ⚠️ 「改完半径重查」唯一的准入条件就是它 —— 不能拿 `mode === 'buffer'` 当条件：
+  //    点下中心后 App 立刻把 drawingMode 收回 'idle'，用 mode 判会让查询按钮**永久置灰**。
+  hasCenter: { type: Boolean, default: false },
 })
 const emit = defineEmits(['start', 'cancel', 'clear', 'update:bufferM', 'query-buffer'])
 
@@ -16,8 +20,14 @@ const hint = computed(() => {
   switch (props.mode) {
     case 'rect': return '按住左键拖一个框，松开即查询'
     case 'polygon': return '逐个单击加点，双击（或点回起点）闭合即查询'
-    case 'buffer': return '单击一个中心点，再点「查询」'
-    default: return props.hasResult ? '换一种画法，或点「清除」' : '选一种画法开始'
+    // ⚠️ 这两句必须与实现一致（规格 6.3 的表格与那处更正）：单击中心点的那一刻
+    //    **就已经查了一次**（当前半径），「查询」按钮的用处是**改完半径后拿同一个中心重查**。
+    //    旧文案写"单击一个中心点，再点「查询」"，描述的是一个不存在的两步流程 ——
+    //    用户照着做时按钮还是灰的（点完中心 drawingMode 就回 idle 了）。
+    case 'buffer': return '单击地图选中心（随即以当前半径查询）；改完半径点「查询」重查'
+    default: return props.hasCenter && props.hasResult
+      ? '改完半径点「查询」可用同一个中心重查；换一种画法或点「清除」也行'
+      : (props.hasResult ? '换一种画法，或点「清除」' : '选一种画法开始')
   }
 })
 
@@ -49,7 +59,7 @@ function onBufferInput(e) {
               :class="{ on: bufferM === p }" :data-testid="`buffer-preset-${p}`"
               @click="emit('update:bufferM', p)">{{ p >= 1000 ? `${p / 1000}km` : `${p}m` }}</button>
       <button type="button" class="go" data-testid="buffer-query"
-              :disabled="mode !== 'buffer' || busy" @click="emit('query-buffer')">查询</button>
+              :disabled="busy || !hasCenter" @click="emit('query-buffer')">查询</button>
     </div>
 
     <p class="hint" data-testid="draw-hint">{{ hint }}</p>
