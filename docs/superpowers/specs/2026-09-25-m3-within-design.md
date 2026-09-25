@@ -393,9 +393,15 @@ POST 的 body 天然适合放 GeoJSON。（对比：密度接口只需要 `bbox`
 `RegionGeometry` 的公开接口（纯函数）：
 
 ```java
-public record Region(String wkt, int vertexCount, boolean hasBuffer) {}
-public static Region parse(JsonNode geometry, Integer bufferM, int maxVertices)
+public record Region(String wkt, boolean buffered, int vertexCount) {}
+public static Region parse(JsonNode geometry, Double bufferM, int maxVertices, double maxBufferM)
 ```
+
+⚠️ **签名里的两个细节是有意的，别"简化"回去**：
+- `bufferM` 是 **`Double`（可空包装类型）而不是 `int`** —— 规格 4 节要求 `bufferM = NaN` → 400，
+  而 `Integer` 根本表达不了 `NaN`（这个 400 分支就永远测不到）
+- 多一个 `maxBufferM` 参数 —— 规格 4 节要求 `bufferM > max-buffer-m` → 400，
+  没有这个参数就做不到（配置值由 `WithinProperties` 传进来，纯函数本身不读配置）
 
 职责：
 1. 只接受 `Polygon` / `MultiPolygon` / `Point`；其余类型抛 `IllegalArgumentException`（→ 400）
