@@ -358,7 +358,7 @@ POST 的 body 天然适合放 GeoJSON。（对比：密度接口只需要 `bbox`
 | `stats.distanceM` | 命中轨迹的**整条**里程之和 —— ⚠️ **不是区域内那一段**（算"区域内那一段"要 `ST_Intersection`，慢且口径更绕） |
 | `stats.sourceCounts` | 命中轨迹按 `source` 分组计数 |
 | `stats.earliest` / `latest` | 命中轨迹 `start_time` 的最早 / `end_time` 的最晚 |
-| `items[].insidePointCount` | 该轨迹落在区域内**且时间戳在时间窗内**的点数（与 `stats.pointCount` 的分组来源是**同一个查询**，必然自洽） |
+| `items[].insidePointCount` | 该轨迹落在区域内**且时间戳在时间窗内**的点数（与 `stats.pointCount` 的分组来源是**同一个查询**；⚠️ **只在未截断时** `sum(items[].insidePointCount) == stats.pointCount` —— 截断后剩下的 items 之和必然小于它，因为被截掉的那些轨迹也贡献点数） |
 | `items[].distanceM` / `durationS` / `pointCount` | 整条轨迹的里程 / 时长 / 点数（**不是区域内的**） |
 
 ⭐ 一句话：**除了 `insidePointCount`，items 里所有数字都是"整条轨迹"的**。
@@ -500,7 +500,9 @@ GROUP BY p.track_id
   没有它就会出现「**0 条轨迹穿过，却有 18 万个点**」这种自相矛盾的显示 ——
   这是实施计划评审时抓到的真实缺陷，裁定见 11.12
 - 结果**同时**提供：`stats.pointCount`（各行相加）与每个 item 的 `insidePointCount`
-  （两者同源，**必然自洽**）
+  （两者同源；⚠️ **未截断时** `sum(items[].insidePointCount) == stats.pointCount`，
+  截断后 items 之和必然更小 —— 实测命中 53 条、默认 limit 50 时是 42731 vs 42752，
+  差额 21 点属于被截掉的那 3 条。这条口径已由 `.tmp/verify-within-api.py` 钉住）
 - ⚠️ **这是接口里最贵的一步，而且对"绑定变量 vs 字面量"敏感 —— 实测 180~456 ms，见 2.5。**
   实现时不要去"优化"这个差距（2.5 里记了两条候选改法及其状态），但**验收脚本必须打印它的真实耗时**
 - **谓词用 `ST_Intersects` 而不是 `ST_Contains`**：点恰好落在边界上时 `ST_Contains` 为 false，
@@ -858,7 +860,7 @@ GeoJSON 是 Web GIS 的通用语言，以后要加"导入一块区域文件"不�
 2. **短路重新变得可证明**：点落在区域内且时间戳在窗内 ⇒ 它所属轨迹的 `[start,end]` 必然与窗口重叠
    ⇒ 该轨迹必在 `ids` 里。于是"`ids` 为空 ⇒ 区域内没有点"重新成立，
    那条省掉 200~450 ms 的快路径**保留**（11.4 式的"结构性保证"而不是巧合）。
-3. **`sum(items[].insidePointCount) == stats.pointCount` 重新成立**（4.1 的"必然自洽"），
+3. **`sum(items[].insidePointCount) == stats.pointCount` 重新成立**（4.1 的"必然自洽"，**未截断时**），
    因为两者来自同一个查询、同一套条件。
 
 **代价**：点查询多一个 `recorded_at` 条件（走的是同一个顺序扫描，实测量级不变）；
