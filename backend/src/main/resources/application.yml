@@ -102,3 +102,17 @@ calcite:
     recycle-dir: D:\Calcite-note\backups\deleted
     # 轨迹显示名的长度上限
     max-name-length: 200
+
+  # 空间范围查询（M3 第一阶段）
+  # 判定口径见 docs/superpowers/specs/2026-09-25-m3-within-design.md 第 3 节
+  within:
+    # 用户手画几何的顶点数上限（MultiPolygon 是所有环之和）。
+    # 服务端生成的缓冲区固定 33 个顶点，不受此限
+    max-vertices: 2000
+    # 缓冲区默认半径（米）
+    default-buffer-m: 500
+    # 缓冲区半径上限（米）：再大就该用拉框而不是缓冲区了
+    max-buffer-m: 50000
+    # items 默认返回条数（统计不受它影响，永远全量）
+    default-limit: 50
+    max-limit: 500
