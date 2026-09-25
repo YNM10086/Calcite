@@ -186,8 +186,15 @@ def panel_overflow(page):
 
 # ---------------------------------------------------------------- 页面侧探针
 # 下面几个 JS 遵守同一条纪律：取不到就返回 null / 空数组，绝不抛异常打断验收。
+#
+# ⚠️ 取 viewer 的两条路径（修复轮 2 才找对）：
+#   ① `inst.exposed`  —— 只有 defineExpose 里列出的方法（getRotateEnabled / getViewBbox / …）
+#      **没有 viewer**；② `inst.setupState.viewer` —— `<script setup>` 的顶层绑定，
+#      dev 模式下就挂在 setupState 上，**这才是 Viewer**（主控探针实测 hasScene: true、
+#      viewerType "Viewer"）。所以这里把**组件实例本身**交给后面用，两条路径都留着。
+#   ⚠️ ② 依赖 Vue 的 dev 内部态：生产构建（压缩后）可能取不到 —— 取不到一律 skip，不假红。
 GL_JS = r"""
-function findGlobe() {
+function findGlobeInst() {
   try {
     const app = document.querySelector('#app');
     const root = app && app.__vue_app__ && app.__vue_app__._instance;
@@ -199,9 +206,7 @@ function findGlobe() {
       if (!inst || seen.has(inst)) continue;
       seen.add(inst);
       const st = inst.setupState;
-      if (st && typeof st.setDrawingMode === 'function') {
-        return (inst.exposed && typeof inst.exposed === 'object') ? inst.exposed : st;
-      }
+      if (st && typeof st.setDrawingMode === 'function') return inst;
       const sub = inst.subTree;
       if (sub) {
         if (sub.component) stack.push(sub.component);
@@ -213,50 +218,75 @@ function findGlobe() {
   } catch (e) { return null; }
   return null;
 }
-// 组件公开实例上找 Cesium 的 Scene：运行时它通常挂在 `scene` 上（也可能被包成 ref/value）
-function findScene(g) {
-  if (!g) return null;
-  const cands = ['scene', '_scene'];
-  for (const k of cands) {
+// 组件公开实例（defineExpose 的对象）—— getRotateEnabled / getViewBbox 在这里
+function globeApi(inst) {
+  try {
+    const st = inst && inst.setupState;
+    if (inst && inst.exposed && typeof inst.exposed === 'object') return inst.exposed;
+    return st || null;
+  } catch (e) { return null; }
+}
+// Viewer：按 setupState.viewer → setupState._viewer → exposed.viewer → exposed.scene
+// 依次试（ref 要解包 .value），命中要求同时有 scene / camera / canvas。
+function findViewer(inst) {
+  if (!inst) return null;
+  const tried = [];
+  const paths = [
+    ['setupState.viewer', function () { return inst.setupState && inst.setupState.viewer; }],
+    ['setupState._viewer', function () { return inst.setupState && inst.setupState._viewer; }],
+    ['exposed.viewer', function () { return inst.exposed && inst.exposed.viewer; }],
+    ['ctx.viewer', function () { return inst.ctx && inst.ctx.viewer; }],
+  ];
+  for (const [name, get] of paths) {
     try {
-      let s = g[k];
-      if (s && s.value) s = s.value;
-      if (s && s.camera && s.canvas) return s;
-    } catch (e) {}
+      let v = get();
+      if (v && v.value) v = v.value;
+      if (v && v.scene && v.camera) return { viewer: v, path: name };
+      tried.push(name + '=' + (v === undefined ? 'undefined' : (v === null ? 'null' : typeof v)));
+    } catch (e) { tried.push(name + '=throw'); }
   }
-  return null;
+  return { viewer: null, path: null, tried: tried };
 }
 """
 
 
 def globe_probe(page):
     """一次 JS 往返拿回全部页面侧信息（少往返 = 少失败点）：
-      have_globe  找到 CesiumGlobe 的 exposed 了吗
+      have_globe  找到 CesiumGlobe 组件实例了吗
+      keys        exposed 上有哪些方法（诊断用，拿不到 viewer 时看它）
+      viewer_path 拿到 Viewer 走的是哪条路径（或试过哪些路径都失败）
       rotate      getRotateEnabled() → true / false / null
-      keys        exposed 上有哪些方法（诊断用，拿不到场景时看它）
-      cam         {lon, lat, h}（弧度 / 弧度 / 米）；来自真实 viewer（能拿到场景时）
-      bbox        getViewBbox() 的 {west, south, east, north}（度）—— 拿不到 viewer 也能有
+      cam         {lon, lat, h}（弧度 / 弧度 / 米）
+      bbox        getViewBbox() 的 {west, south, east, north}（度）—— 不依赖 viewer
       points      带 position 的实体投影到窗口的坐标（最多 200 个）
     """
     try:
         return page.evaluate(r"""() => {
             %s
-            const g = findGlobe();
-            const out = { have_globe: !!g, rotate: null, keys: [], cam: null, bbox: null, points: [] };
-            if (!g) return out;
-            out.keys = Object.keys(g);
-            if (typeof g.getRotateEnabled === 'function') {
-              const r = g.getRotateEnabled();
-              out.rotate = (r === true || r === false) ? r : null;
+            const inst = findGlobeInst();
+            const g = globeApi(inst);
+            const out = { have_globe: !!inst, has_api: !!g, rotate: null, keys: [],
+                          viewer_path: null, viewer_tried: [], cam: null, bbox: null, points: [] };
+            if (!inst) return out;
+            if (g) {
+              out.keys = Object.keys(g);
+              if (typeof g.getRotateEnabled === 'function') {
+                const r = g.getRotateEnabled();
+                out.rotate = (r === true || r === false) ? r : null;
+              }
+              if (typeof g.getViewBbox === 'function') {
+                try { out.bbox = g.getViewBbox(); } catch (e) {}
+              }
             }
-            if (typeof g.getViewBbox === 'function') {
-              try { out.bbox = g.getViewBbox(); } catch (e) {}
-            }
-            const s = findScene(g);
-            if (!s) return out;
+            const found = findViewer(inst);
+            out.viewer_path = found ? (found.path || null) : null;
+            out.viewer_tried = found && found.tried ? found.tried : [];
+            const v = found && found.viewer;
+            if (!v) return out;
+            const s = v.scene;
             try {
-              const c = s.camera.positionCartographic;
-              if (c) out.cam = { lon: c.longitude, lat: c.latitude, h: c.height };
+              const c = v.camera.positionCartographic;
+              if (c && isFinite(c.height)) out.cam = { lon: c.longitude, lat: c.latitude, h: c.height };
             } catch (e) {}
             try {
               const ST = (typeof Cesium !== 'undefined') ? Cesium.SceneTransforms : null;
@@ -267,7 +297,7 @@ def globe_probe(page):
               for (let i = 0; i < arr.length && out.points.length < 200; i++) {
                 const e = arr[i];
                 if (!e.position) continue;
-                const t = e.position.getValue(s.clock.currentTime);
+                const t = e.position.getValue(v.clock.currentTime);
                 if (!t) continue;
                 const w = f(s, t);
                 if (!w) continue;
@@ -281,8 +311,8 @@ def globe_probe(page):
         }""" % GL_JS)
     except Exception as e:                      # noqa: BLE001
         note(f"页面探针失败：{type(e).__name__}: {e}")
-        return {"have_globe": False, "rotate": None, "keys": [], "cam": None,
-                "bbox": None, "points": []}
+        return {"have_globe": False, "has_api": False, "rotate": None, "keys": [],
+                "viewer_path": None, "viewer_tried": [], "cam": None, "bbox": None, "points": []}
 
 
 def globe_rotate(page):
@@ -294,14 +324,52 @@ def globe_rotate(page):
     return globe_probe(page)["rotate"]
 
 
+def bbox_center(bbox):
+    """视图包围盒 → (中心经度, 中心纬度)；拿不到或不是有限数就返回 None"""
+    if not bbox:
+        return None
+    try:
+        w, e = float(bbox["west"]), float(bbox["east"])
+        s, n = float(bbox["south"]), float(bbox["north"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(x) for x in (w, e, s, n)):
+        return None
+    return ((w + e) / 2.0, (s + n) / 2.0)
+
+
+def bbox_shift_ratio(b0, b1):
+    """两次视野包围盒之间**中心位移 ÷ 视野跨度**（无量纲，与缩放无关）。
+
+    为什么用它当"地球转没转"的硬判据：
+      - **与缩放无关**：飞机飞到 5 公里级时，离线底图 NaturalEarthII 是一片纯色，
+        转不转**像素几乎不变**（实测像素差 66）—— 像素判据在"已放大"场景天然失效；
+        而包围盒中心一定跟着转（实测移动了视野宽度的 34%）。
+      - 位移按**两个方向分别算比例再取大者**，避免经度/纬度跨度差一个数量级时被稀释。
+    返回 (ratio, 经度比例, 纬度比例) 或 None。
+    """
+    c0, c1 = bbox_center(b0), bbox_center(b1)
+    if c0 is None or c1 is None:
+        return None
+    span_lon = abs(float(b0["east"]) - float(b0["west"]))
+    span_lat = abs(float(b0["north"]) - float(b0["south"]))
+    if span_lon <= 0 or span_lat <= 0:
+        return None
+    r_lon = abs(c1[0] - c0[0]) / span_lon
+    r_lat = abs(c1[1] - c0[1]) / span_lat
+    return max(r_lon, r_lat), r_lon, r_lat
+
+
 def _screen_of(page, lon, lat):
-    """（尽力而为）经纬度 → 窗口坐标。拿不到场景时返回 None（只用于诊断输出）。"""
+    """（尽力而为）经纬度 → 窗口坐标。拿不到 Viewer 时返回 None（只用于诊断输出）。"""
     try:
         return page.evaluate(r"""([lon, lat]) => {
             %s
-            const g = findGlobe();
-            const s = findScene(g);
-            if (!s) return null;
+            const inst = findGlobeInst();
+            const found = findViewer(inst);
+            const v = found && found.viewer;
+            if (!v) return null;
+            const s = v.scene;
             const ST = (typeof Cesium !== 'undefined') ? Cesium.SceneTransforms : null;
             const f = ST && (ST.worldToWindowCoordinates || ST.wgs84ToWindowCoordinates);
             if (!f) return null;
@@ -466,18 +534,23 @@ def main():
 
         pr0 = globe_probe(page)
         note(f"组件实例 have_globe={pr0['have_globe']}；exposed 方法={pr0['keys']}")
+        note(f"Viewer 路径 viewer_path={pr0['viewer_path']}；"
+             f"试过的路径={pr0['viewer_tried']}")
         note(f"初始相机 = {_fmt_cam(pr0['cam'])}；rotate={pr0['rotate']}；"
              f"视野 = {_bbox_txt(pr0['bbox'])}")
         if not pr0["have_globe"]:
-            note("⚠️ 找不到 CesiumGlobe 的 exposed（__vue_app__ 遍历失败）："
+            note("⚠️ 找不到 CesiumGlobe 组件实例（__vue_app__ 遍历失败）："
                  "6 条 getRotateEnabled 硬判据会 skip，退回像素/结果间接判据")
         if pr0["cam"] is None:
-            note("⚠️ 拿不到真实 viewer（组件公开实例上没有 scene）：实体投影点会为空，"
-                 "拉框只能回退画布中心；视野包围盒仍可用（getViewBbox）")
+            note("⚠️ 拿不到 Viewer —— 已试 setupState.viewer / setupState._viewer / "
+                 "exposed.viewer / ctx.viewer（见上一行 tried）。"
+                 "实体投影点会为空（拉框回退画布中心）；"
+                 "「点列表后相机飞近了」与「绘制中不旋转（相机位移）」两条会 skip。"
+                 "视野包围盒不依赖 Viewer，仍可用（getViewBbox）")
         for name, lon, lat in (("北京", 116.40, 39.90), ("上海", 121.47, 31.23)):
             s = _screen_of(page, lon, lat)
             if s is None:
-                note(f"{name} 屏幕坐标：取不到（viewer 未就绪）")
+                note(f"{name} 屏幕坐标：取不到（Viewer 未就绪）")
             else:
                 note(f"{name} 屏幕坐标：x={s['x']:.0f} y={s['y']:.0f} "
                      f"画布 {s['w']:.0f}x{s['h']:.0f} 视野内={s['on']}")
@@ -605,8 +678,11 @@ def main():
 
         # ------------------------------------------------ C) 拉框之后左键旋转恢复
         print("=== C) 拉框之后左键旋转必须恢复 ===")
+        c_ratio_bbox = None        # C 段实测的"位移 ÷ 视野跨度"（D 段的阈值要用它）
         shot_c_before = os.path.join(".tmp", "shot-within-c-before.png")
         shot_c_after = os.path.join(".tmp", "shot-within-c-after.png")
+        pr_c_before = globe_probe(page)
+        bbox_c_before = pr_c_before["bbox"]
         page.screenshot(path=shot_c_before)
         img_before = Image.open(shot_c_before).convert("RGB")
         page.mouse.move(canvas["x"] + canvas["width"] * 0.70,
@@ -618,17 +694,39 @@ def main():
         page.wait_for_timeout(2500)            # 真实等待惯性 / 重绘结束
         page.screenshot(path=shot_c_after)
         img_after = Image.open(shot_c_after).convert("RGB")
+        pr_c_after = globe_probe(page)
+        bbox_c_after = pr_c_after["bbox"]
+
+        # ⭐ 修复轮 2：C 段的判据换成「视野包围盒中心是否移动」——
+        #    与缩放无关，是"地球转没转"的硬证据。
+        #    为什么像素判据不适用：点完第一条轨迹后相机在 **5 公里级**缩放
+        #    （视野跨度 0.047°×0.024°），离线底图 NaturalEarthII 在那个尺度是一片纯色，
+        #    转不转几乎不改变像素（主控实测差 66，而包围盒中心移动了视野宽度的 34%）。
+        c_shift = bbox_shift_ratio(bbox_c_before, bbox_c_after)
+        # 实测基准：中心位移 ≈ 视野跨度的 34%（主控代跑数据）。阈值取 8%（约 1/4 余量），
+        # 既能挡住"完全没转"（≈0%），也不会被惯性/取整带来的小差异误伤。
+        C_MIN_SHIFT = 0.08
+        if c_shift is None:
+            skip("拖拽后地球确实动了（视野包围盒移动）", "拿不到 getViewBbox() 的包围盒")
+            c_ratio_bbox = None
+        else:
+            c_ratio_bbox = c_shift[0]
+            check("拖拽后地球确实动了（视野包围盒中心位移 ≥ 8% 视野跨度）",
+                  c_ratio_bbox >= C_MIN_SHIFT,
+                  f"中心位移 = {c_ratio_bbox:.1%} 视野跨度"
+                  f"（经度向 {c_shift[1]:.1%} / 纬度向 {c_shift[2]:.1%}），"
+                  f"阈值 {C_MIN_SHIFT:.0%}；拖拽前 {_bbox_txt(bbox_c_before)} → "
+                  f"拖拽后 {_bbox_txt(bbox_c_after)}")
+            note(f"C 段视野包围盒中心位移 = {c_ratio_bbox:.1%} 视野跨度"
+                 f"（经度向 {c_shift[1]:.1%} / 纬度向 {c_shift[2]:.1%}）；"
+                 f"{_bbox_txt(bbox_c_before)} → {_bbox_txt(bbox_c_after)}")
+
+        # 像素差：**降级为信息输出**（在已放大的纯色底图上它天然不敏感，会假红）
         blue_before = count_color(img_before, (9, 20, 40), tol=30, x_from=x_from)
         blue_after = count_color(img_after, (9, 20, 40), tol=30, x_from=x_from)
-        check("拖拽后地球确实动了（左键旋转已恢复，不是「地图坏了」）",
-              abs(blue_before - blue_after) > 200, f"{blue_before} vs {blue_after}")
         c_ratio = diff_ratio(shot_c_before, shot_c_after, x_from)
-        note(f"C 段底色像素 {blue_before} → {blue_after}（差 {abs(blue_before - blue_after)}）；"
-             f"地图区域变化像素占比 {c_ratio:.1%}（非绘制态拖拽的基准值）")
-        if abs(blue_before - blue_after) > 200 and c_ratio < 0.02:
-            note("⚠️ 底色像素差够大、但整片地图变化占比很小：这条可能是**判据本身**在作怪"
-                 "（面板/曲线重绘、底图异步加载），而不是真的转了 —— 请对照 D 段那行"
-                 "「相机 Δ经度/Δ纬度」与 getRotateEnabled 的行再判一次")
+        note(f"C 段底色像素 {blue_before} → {blue_after}（差 {abs(blue_before - blue_after)}，"
+             f"仅供参考、不参与断言）；地图区域变化像素占比 {c_ratio:.1%}")
         c1 = globe_probe(page)
         note(f"C 段拖拽后：相机 {_fmt_cam(c1['cam'])}；视野 {_bbox_txt(c1['bbox'])}；"
              f"rotate={c1['rotate']}")
@@ -650,7 +748,9 @@ def main():
                 check("进入绘制模式后 getRotateEnabled = false（D 段）", rot_d1 is False,
                       f"getRotateEnabled() = {rot_d1}（绘制中必须为 false）")
 
-            cam_before = globe_probe(page)["cam"]
+            pr_d_before = globe_probe(page)
+            cam_before = pr_d_before["cam"]
+            bbox_d_before = pr_d_before["bbox"]
             page.screenshot(path=SHOT)
             img_a = Image.open(SHOT).convert("RGB")
 
@@ -663,31 +763,54 @@ def main():
             dx1, dy1 = d_rect[2], d_rect[3]
             note(f"D 段拉框：( {dx0},{dy0} ) → ( {dx1},{dy1} )")
             drag(page, dx0, dy0, dx1, dy1, steps=10)
-            page.wait_for_timeout(400)
-            # ⚠️ 读相机要放在"等待查询结果"**之前**：查询一落地，App 就把 drawingMode 收回
+            page.wait_for_timeout(500)
+            # ⚠️ 读探针要放在"等待查询结果"**之前**：查询一落地，App 就把 drawingMode 收回
             #    'idle'、地球的 watcher 立刻把 enableRotate 恢复成 true —— 之后再读
             #    getRotateEnabled 只会读到 true，那是**竞态假红**，不是 bug。
-            cam_after = globe_probe(page)["cam"]
-            rot_d2 = globe_rotate(page)   # 只在拿不到相机时当兜底判据用（见下）
+            pr_d_after = globe_probe(page)
+            cam_after = pr_d_after["cam"]
+            bbox_d_after = pr_d_after["bbox"]
+            rot_d2 = pr_d_after["rotate"]   # 只用诊断（松手后可能已退出绘制态）
 
-            # ⭐ 位置②的硬证据：绘制中的拖拽**不该带动相机**。
-            # 这条不会踩上面的竞态 —— 相机是"拖拽有没有被当成旋转"的物理后果。
+            # ⭐ 修复轮 2 判据 A：绘制中的拖拽**不该让视野包围盒移动**。
+            #    与 C 段同一个硬证据（与缩放无关），并额外与 C 段实测值比较 ——
+            #    这样无论当前是"全球视野"还是"5 公里级缩放"都成立。
+            d_shift = bbox_shift_ratio(bbox_d_before, bbox_d_after)
+            D_MAX_SHIFT = 0.03                       # 视野跨度的 3%
+            if d_shift is None:
+                skip("绘制模式期间拖拽【没有】移动视野包围盒", "拿不到 getViewBbox() 的包围盒")
+            else:
+                d_ratio_bbox = d_shift[0]
+                bound = D_MAX_SHIFT
+                if c_ratio_bbox is not None:
+                    bound = min(D_MAX_SHIFT, c_ratio_bbox / 3.0)
+                check("绘制模式期间拖拽【没有】移动视野包围盒（绘制中左键旋转被关掉）",
+                      d_ratio_bbox < bound,
+                      f"中心位移 = {d_ratio_bbox:.2%} 视野跨度，阈值 {bound:.2%}"
+                      f"（= min(3%, C 段实测 {0 if c_ratio_bbox is None else c_ratio_bbox:.1%} ÷ 3)）；"
+                      f"{_bbox_txt(bbox_d_before)} → {_bbox_txt(bbox_d_after)}"
+                      "（非绘制态同样量级的拖拽会让它移动几十个百分点）")
+                note(f"D 段视野包围盒中心位移 = {d_ratio_bbox:.2%} 视野跨度"
+                     f"（C 段非绘制态是 {('拿不到' if c_ratio_bbox is None else f'{c_ratio_bbox:.1%}')}）；"
+                     f"{_bbox_txt(bbox_d_before)} → {_bbox_txt(bbox_d_after)}")
+
+            # ⭐ 修复轮 2 判据 B：相机**位置**没被带动（整段 C+D 手势后比较）。
+            #    修复轮 2 修好 findViewer 后这条应当能变成真断言。
             if cam_before and cam_after:
                 dlon = abs(cam_after["lon"] - cam_before["lon"])
                 dlat = abs(cam_after["lat"] - cam_before["lat"])
-                check("绘制模式期间拖拽【没有】转动相机（绘制中左键旋转被关掉）",
+                check("绘制模式期间相机没有被拖动（进入 D 段到 D 段拖拽结束）",
                       dlon < 0.02 and dlat < 0.02,
                       f"Δ经度={dlon:.6f} Δ纬度={dlat:.6f} "
-                      f"（非绘制态同样的 140px 拖拽会改变约 0.1~0.5 弧度）；"
+                      f"（非绘制态同样量级的拖拽会改约 0.1~0.5 弧度）；"
                       f"高度 {cam_before['h'] / 1000:.1f}→{cam_after['h'] / 1000:.1f}km")
                 note(f"D 段相机 Δ经度={dlon:.6f} Δ纬度={dlat:.6f} "
-                     f"高度 {cam_before['h'] / 1000:.1f}→{cam_after['h'] / 1000:.1f}km")
+                     f"高度 {cam_before['h'] / 1000:.1f}→{cam_after['h'] / 1000:.1f}km；"
+                     f"（拖拽刚结束）rotate={rot_d2}（松手后可能已退出绘制态，只作诊断）")
             else:
-                note("拿不到相机 → D 段的「绘制中不旋转」只能靠间接证据"
-                     "（B 段的开关断言 + D 段是否产生新查询结果）；这里不塞一条恒真断言充数。")
-                note(f"D 段（拖拽刚结束）getRotateEnabled = {rot_d2}"
-                     "（松手后可能已退出绘制态，读到 true 属竞态，不作为失败）")
-                skip("绘制模式期间拖拽【没有】转动相机", "viewer 不可达，拿不到相机位置")
+                note("拿不到相机 → 上面那条「相机没被拖动」记 skip"
+                     "（已试 setupState.viewer / exposed.viewer / ctx.viewer）")
+                skip("绘制模式期间相机没有被拖动", "拿不到 viewer 的 camera.positionCartographic")
 
             # ⚠️ 等"新"结果：B 段那张统计卡还在，不比对旧文本就会假绿
             state_d, txt_d = wait_new_result(page, prev_text=prev_tracks_text)
