@@ -214,37 +214,41 @@ class WithinServiceTest {
         assertTrue(e.getMessage().contains("交叉") || e.getMessage().contains("面积"), e.getMessage());
     }
 
+    /**
+     * ⭐ 契约：三条查询都必须用<b>仓储 row[2] 返回的 WKT</b>，而不是 {@code region.wkt()}；
+     * 且 <b>Point 必须走</b> {@code prepareBufferRegion}。
+     *
+     * <p><b>为什么这条只能钉在缓冲区路径上</b>（评审 2a 抓到的假修）：在多边形路径上
+     * {@code region.wkt()} 与 {@code prepared()} 的 row[2] 是<b>同一个字符串</b> ——
+     * {@code RegionGeometryTest} 把矩形解析结果逐字钉成
+     * {@code POLYGON((116.3 39.9,116.4 39.9,116.4 40,116.3 40,116.3 39.9))}，
+     * 与 {@code prepared()} 里那串一模一样。于是在多边形用例上把实现改成
+     * {@code findIdsIntersecting(region.wkt(), ...)}，断言<b>照样全绿</b>（没有判别力）。
+     * 只有 Point + bufferM 这条路径两者必然不同：{@code region.wkt()} 是 {@code POINT(116.32 40)}，
+     * 而仓储返回的是 PostGIS 按球面缓冲算出来的<b>33 顶点圆多边形</b>（设计文档 2.3 / 5.5）。
+     * 传错了数据库不会报错，只会静默地查成另一个区域 —— 所以这条断言必须能变红。
+     */
     @Test
-    void Point走缓冲区那条准备查询() throws Exception {
+    void Point走缓冲区那条准备查询_且查询用的是仓储返回的WKT() throws Exception {
+        String 仓储WKT = "POLYGON((116.3 39.9,116.4 39.9,116.4 40,116.3 40,116.3 39.9))";
+        assertEquals(仓储WKT, prepared().get(0)[2], "前提：prepared() 的 row[2] 就是这个多边形 WKT");
         when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of());
         var pointReq = new WithinRequest(
                 M.readTree("{\"type\":\"Point\",\"coordinates\":[116.32,40.00]}"), 500.0, null, null, null);
 
         WithinResponse r = service.within(pointReq);
 
+        // ── 准备查询走缓冲区那条 ────────────────────────────────────────
         verify(tracks).prepareBufferRegion(anyString(), eq(500.0));
         verify(tracks, never()).prepareRegion(anyString());
+
+        // ⭐ 查询用的必须是仓储 row[2] 那个多边形，而<b>不是</b> region.wkt() 的 "POINT(116.32 40)"
+        //    （两者在本用例里必然不同，所以这条断言真的有判别力）
+        verify(tracks).findIdsIntersecting(eq(仓储WKT), any(), any());
+        verify(tracks, never()).findIdsIntersecting(argThat(w -> !仓储WKT.equals(w)), any(), any());
+
         // params 回显 bufferM（缓冲区场景的 500.0）
         assertEquals(500.0, r.params().bufferM());
-    }
-
-    /**
-     * ⭐ 契约：三条查询都必须用<b>仓储 row[2] 返回的 WKT</b>，而不是 {@code region.wkt()}。
-     *
-     * <p>为什么值得一条专门的测试：两者在"缓冲区"路径上必然不同（一个是 POINT，一个是
-     * PostGIS 算出来的 33 顶点圆多边形）。如果哪天误把 {@code region.wkt()} 传下去，
-     * 别的测试全都还是绿的，而查出来的范围完全不对 —— 这正是设计文档 5.5 要防的那类静默错误。
-     */
-    @Test
-    void 查询用的是仓储返回的WKT而不是region的WKT() {
-        String 查询WKT = "POLYGON((116.3 39.9,116.4 39.9,116.4 40,116.3 40,116.3 39.9))";
-        when(tracks.findIdsIntersecting(anyString(), any(), any())).thenReturn(List.of());
-
-        service.within(req(null, null, null));
-
-        // prepared() 的 row[2] 就是这个 WKT；region.wkt() 是由 JSON 现拼的另一个字符串
-        verify(tracks).findIdsIntersecting(eq(查询WKT), any(), any());
-        verify(tracks, never()).findIdsIntersecting(argThat(w -> !查询WKT.equals(w)), any(), any());
     }
 
     @Test
