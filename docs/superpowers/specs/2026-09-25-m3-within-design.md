@@ -197,11 +197,22 @@ PostGIS 默认每象限 8 段 → 4×8+1）。**服务端生成的缓冲区不�
 |---|---|---|
 | `ScreenSpaceEventType.LEFT_DOWN / LEFT_UP / LEFT_CLICK / LEFT_DOUBLE_CLICK / MOUSE_MOVE` | 16449 | 拉框与多边形的鼠标事件 |
 | `ScreenSpaceEventHandler.setInputAction(action, type, modifiers?)` | 16391/16400 | 注册/注销，可逆 |
-| `viewer.screenSpaceCameraController` → **`enableRotate: boolean`** | 44780 / 45315 | **画之前必须关掉左键旋转**（见 6.2） |
+| ⚠️ **`viewer.scene.screenSpaceCameraController`** → **`enableRotate: boolean`** | 运行时实测（见下） | **画之前必须关掉左键旋转**（见 6.2） |
 | `camera.pickEllipsoid(windowPosition, ellipsoid?, result?)` | 29406 | 屏幕坐标 → 经纬度 |
 | `scene.pickPosition(windowPosition, result?)` | 45040 | 同上（贴地时更准） |
 | `drawSimilarity(baseline, tracks)` 的多线叠加写法（每条一个 Polyline + 按值配色） | `CesiumGlobe.vue` 273 | **可直接复用于"命中轨迹"图层** |
 
+> ⚠️ **2.7 的一处更正（2026-09-25，浏览器验收时发现）**：
+> `screenSpaceCameraController` 在 **Cesium 1.145 的运行时挂在 `viewer.scene` 上，不在 `viewer` 上**。
+> 实测（从运行中的页面掏出 viewer 对象）：`viewer.screenSpaceCameraController === undefined`、
+> `viewer.scene.screenSpaceCameraController.constructor.name === 'ScreenSpaceCameraController'`。
+> 写错的表现是**只在浏览器里炸**：`rotateEnabled()` 抛 "Cannot set properties of undefined (setting 'enableRotate')"，
+> 进而让 `setDrawingMode()` 中断、事件处理器根本没注册 → **整个绘制功能静默失效**
+> （而桩测试发现不了 —— 替身把属性放在了 viewer 上）。
+>
+> ⭐ **教训（比这个 bug 本身更重要）**：2.7 当初只对着 `Cesium.d.ts` 查符号存在性就下了结论，
+> **没有对运行时核验**。类型声明的行号能"证明"一个属性存在，却证明不了它挂在哪个对象上。
+> 凡是"靠某个第三方运行时 API"的设计判断，都必须**在真实运行时里摸一次**再写进设计。
 ### 2.8 仓储层的既有写法（决定新代码怎么写）
 
 - 空间 SQL 一律 `@Query(value = "...", nativeQuery = true)` 返回 `List<Object[]>`（见 `TrackRepository`）
@@ -576,7 +587,7 @@ GROUP BY p.track_id
 ### 6.2 ⚠️ 绘制模式必须**临时关掉地球的左键旋转**
 
 Cesium 默认 **左键拖动 = 旋转地球**。不关掉的话，用户拉一个框，地球会跟着转，框画得歪七扭八。
-`viewer.screenSpaceCameraController.enableRotate`（2.7 已确认该属性存在）在进入绘制模式时置 `false`，
+⚠️ **`viewer.scene.screenSpaceCameraController.enableRotate`** 在进入绘制模式时置 `false`（**路径见 2.7 的更正**），
 绘制结束 / 取消 / 切档 / 组件卸载时**必须恢复 `true`**。
 
 **这是一条硬要求**：恢复动作要挂在 `onUnmounted` 与"退出绘制"的唯一出口上，
