@@ -568,11 +568,15 @@ function resetWithin() {
   /*
    * ⚠️ 这一行是上面那套防护能生效的关键：**推进序号 = 让所有在途请求作废**。
    *
-   * 「清除」/ 切档 / 数据变更都走这里（`:969` / `:211` / `:719`），若不推进，
+   * resetWithin 的四个调用点：「清除」按钮（模板 @clear）、switchMode 里那句
+   * `if (viewMode.value !== 'within')`、resetAnalysisState（数据被改动）。若不推进，
    * queryWithin 里那句 `mine !== withinSeq` 在清除之后**依然不成立**，
    * 挂起的响应回来时照样会把 region / 统计 / 列表整块写回去 ——
    * 表现就是"清除没生效"、切走再切回还能看到上一次的区域与列表。
    * 既有相似档在完全相同的处境就是这么做的（similaritySeq++）。
+   *
+   * ⚠️ 这里**故意不写行号**：本文件前几轮就因为注释里钉了行号而集体过期
+   * （加了第五档之后整体下移，按注释跳转会落到别的代码上）。要定位就用上面的函数名/按钮名搜。
    */
   withinSeq++
   clearWithinState()
@@ -714,7 +718,16 @@ function onWithinSelect(trackId) {
   withinSelectedId.value = trackId
   if (!withinTrackIds.value.includes(trackId)) {
     withinTrackIds.value = [...withinTrackIds.value, trackId]
-    loadWithinDetail(withinTrackIds.value)
+    /*
+     * ⚠️ 必须把当前序号一起传进去（和 queryWithin 那个调用点一样）。
+     * 漏传时 `mine === undefined`，而 withinSeq 是数字 → 进入守卫 `mine !== withinSeq`
+     * **恒为 true** 直接 return，withinDetail 永远不写入 —— 表现就是"列表里高亮亮了、
+     * 地图上却没有这条橙线"（withinTracksForGlobe 只遍历 withinDetail）。
+     *
+     * ⚠️ 也不能写 `++withinSeq`：那会把这次刚刚落地的查询结果自己作废，
+     * 变成"点一条就把整批命中轨迹清空"。这里只是读，不推进。
+     */
+    loadWithinDetail(withinTrackIds.value, withinSeq)
   }
 }
 
