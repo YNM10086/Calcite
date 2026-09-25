@@ -12,6 +12,7 @@
     "check:hotspot": "node scripts/check-hotspot.mjs",
     "check:density": "node scripts/check-density.mjs",
     "check:similarity": "node scripts/check-similarity.mjs",
+    "check:region": "node scripts/check-region.mjs",
     "check:data-edit": "node scripts/check-data-edit.mjs"
   },
   "dependencies": {
