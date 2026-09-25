@@ -382,10 +382,27 @@ const CLOSE_PX = 12                // 屏幕像素：鼠标离起点这么近就
 const DRAW_MODES = ['rect', 'polygon', 'buffer']
 
 /** 统一开关「左键拖动旋转地球」。
- *  为什么包一层：所有恢复动作都走这一个出口，"漏掉某条退出路径"就只剩"忘了调用"一种可能 */
+ *  为什么包一层：所有恢复动作都走这一个出口，"漏掉某条退出路径"就只剩"忘了调用"一种可能。
+ *
+ *  ⚠️⚠️ 路径必须是 `scene.screenSpaceCameraController`（**运行时事实，勿改回 `v.screenSpaceCameraController`**）：
+ *  Cesium 1.145 里 `screenSpaceCameraController` 是 **Scene** 的成员（Cesium.d.ts:44780
+ *  `readonly screenSpaceCameraController: ScreenSpaceCameraController;` 属于 class Scene），
+ *  **viewer 上没有这个属性**（d.ts 里那些示例写的也都是 `viewer.scene.screenSpaceCameraController`）。
+ *  走错路径的后果很隐蔽：属性赋值在 **注册鼠标事件之前**就抛
+ *  `TypeError: Cannot set properties of undefined (setting 'enableRotate')`，
+ *  函数当场中断 → 绘制模式压根没进去（点「拉框」没有任何反应、不画预览、不发请求）。
+ *  而这个错**桩测试发现不了** —— 除非替身自己也把属性挂在 scene 上（见 .tmp/cesium-stub.mjs）。 */
 function rotateEnabled(on) {
   const v = viewer.value
-  if (v && !v.isDestroyed()) v.screenSpaceCameraController.enableRotate = on
+  if (v && !v.isDestroyed() && v.scene) v.scene.screenSpaceCameraController.enableRotate = on
+}
+
+/** 读当前的"左键旋转"开关（只读，给浏览器验收当硬证据用：不用再靠"有没有出结果"间接推断）。
+ *  @returns {boolean|null} viewer 还没建好或已销毁时返回 null —— 调用方据此知道"现在问不到" */
+function getRotateEnabled() {
+  const v = viewer.value
+  if (!v || v.isDestroyed() || !v.scene) return null
+  return v.scene.screenSpaceCameraController.enableRotate
 }
 
 /** 屏幕坐标 → 经纬度；点在地球之外返回 null（否则会算出 NaN 坐标，一路传到后端） */
@@ -983,7 +1000,7 @@ function getViewBbox() {
 }
 
 /**
- * 暴露给父组件的七个方法。
+ * 暴露给父组件的八个方法。
  * 父组件通过 ref 调用，例如：globe.value.play()
  */
 defineExpose({
@@ -994,6 +1011,8 @@ defineExpose({
   getViewBbox,
   /** 切换绘制模式（'idle' 关闭）。绘制期间左键旋转被关掉，收尾一律走这里 */
   setDrawingMode,
+  /** 读"左键旋转"开关（boolean | null）—— 给验收脚本读硬证据，组件自己不消费 */
+  getRotateEnabled,
   /** 开始播放 */
   play() {
     const v = viewer.value
