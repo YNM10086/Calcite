@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -120,4 +121,102 @@ public interface TrackRepository extends JpaRepository<Track, Long> {
             WHERE t.id IN (:ids)
             """, nativeQuery = true)
     List<Object[]> findSummariesByIds(@Param("ids") Collection<Long> ids);
+
+    /**
+     * 区域准备（拉框 / 自由多边形）：一条小查询同时拿到<b>合法性</b>、<b>回显用的 GeoJSON</b>、
+     * <b>查询用的 WKT</b>。
+     *
+     * <p><b>为什么三件事必须同一条查询</b>：这样"被校验的几何""查询用的几何""回显的几何"
+     * 必然是同一个对象 —— "看到的圈 = 查的范围"就成了结构保证。
+     *
+     * <p><b>为什么必须查 ST_IsValid</b>：实测（设计文档 2.9）自交的"蝴蝶结"多边形
+     * {@code ST_Intersects} <b>不报错</b>，而是返回 237 条（比它的外接矩形还多）——
+     * 静默错误比报错危险得多。不合法一律由上层转成 400。
+     *
+     * @return 单行 {@code [Boolean valid, String geojson, String wkt]}
+     */
+    @Query(value = """
+            SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g)
+            FROM (SELECT ST_GeomFromText(:wkt, 4326) AS g) s
+            """, nativeQuery = true)
+    List<Object[]> prepareRegion(@Param("wkt") String wkt);
+
+    /**
+     * 区域准备（缓冲区）：<b>由 PostGIS 把圆算成多边形</b>，之后判定与"拉框/多边形"完全相同。
+     *
+     * <p><b>为什么不用 {@code ST_DWithin(geom::geography, ...)}</b>：实测 303 ms 且顺序扫描 ——
+     * 瓶颈是对每条候选轨迹的每个顶点算椭球距离（北京有 228 条候选，粗筛减不掉）。
+     * 算成多边形后只要 7.9 ms，而且命中 {@code idx_track_geom}（设计文档 2.3）。
+     *
+     * <p>⚠️ {@code ::geography} 不能漏：不加就是"按度缓冲 500 度"。
+     *
+     * @return 单行 {@code [Boolean valid, String geojson, String wkt]}
+     */
+    @Query(value = """
+            SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g)
+            FROM (SELECT ST_Buffer(ST_GeomFromText(:wkt, 4326)::geography, :bufferM)::geometry AS g) s
+            """, nativeQuery = true)
+    List<Object[]> prepareBufferRegion(@Param("wkt") String wkt, @Param("bufferM") double bufferM);
+
+    /**
+     * 命中轨迹的 id：轨迹<b>线</b>与区域相交，且<b>时间窗重叠</b>。
+     *
+     * <p>时间语义（设计文档 5.7）：{@code [start_time, end_time]} 与 {@code [from, to]} 有重叠就算"经过"。
+     * <b>不按 track_point.recorded_at 过滤</b> —— 那会把判定谓词从"线"降级成"点"（点比线稀，
+     * 采样间距 5~42 米），漏判；更糟的是"有没有时间过滤"会变成两套不同的判定谓词。
+     *
+     * <p>⚠️ 调用方必须把 null 的 from/to 换成<b>无限宽的边界值</b> —— native query 里不写
+     * {@code IS NULL} 判断（可空参数的类型推断很容易出问题，见 {@code aggregateDensity} 的注释）。
+     *
+     * <p>{@code ST_Intersects} 自带包围盒预筛 → 命中 {@code idx_track_geom}（实测 10~24 ms）。
+     */
+    @Query(value = """
+            SELECT t.id FROM track t
+            WHERE ST_Intersects(t.geom, ST_GeomFromText(:wkt, 4326))
+              AND t.start_time <= :to
+              AND t.end_time   >= :from
+            """, nativeQuery = true)
+    List<Long> findIdsIntersecting(@Param("wkt") String wkt,
+                                   @Param("from") OffsetDateTime from,
+                                   @Param("to") OffsetDateTime to);
+
+    /**
+     * items 的摘要。<b>故意不用</b> {@code findSummariesByIds}：那个正被相似度接口使用，
+     * 为两个字段去改它等于拿 M2 的回归冒险；而且它还多算了一个 {@code ST_Length(geom::geography)}。
+     *
+     * <p>⭐ 里程直接用<b>已存好的派生列</b> {@code t.distance_m}（导入时算好的）——
+     * 不在查询时把整条 LineString 转成 geography 逐顶点算椭球长度。同样的数字，一个要算一个要读。
+     *
+     * @return 每行 {@code [Long id, String name, String source, Integer pointCount,
+     *                     Integer durationS, Double distanceM, String startTime, String endTime]}
+     */
+    @Query(value = """
+            SELECT t.id, t.name, t.source, t.point_count, t.duration_s, t.distance_m,
+                   to_char(t.start_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                   to_char(t.end_time   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM track t WHERE t.id IN (:ids)
+            """, nativeQuery = true)
+    List<Object[]> findWithinSummariesByIds(@Param("ids") Collection<Long> ids);
+
+    /**
+     * 区域统计：按来源分组的条数/里程，以及整个命中集合的时间跨度。
+     *
+     * <p>为什么不复用 items 的查询：items 会被 limit 截断，而统计<b>必须全量</b>。
+     * 一行 SQL 同时给出 5 个统计数字，Java 侧只做求和与取首尾。
+     *
+     * <p>ISO-8601 字符串可以直接比大小（同格式定长），所以 Java 侧用 min/max 选首尾是安全的。
+     *
+     * @return 每行 {@code [String source, Long tracks, Double distanceM, String earliest, String latest]}
+     */
+    @Query(value = """
+            SELECT t.source,
+                   count(*)                                        AS tracks,
+                   coalesce(sum(t.distance_m), 0)                  AS distance_m,
+                   to_char(min(t.start_time) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                   to_char(max(t.end_time)   AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            FROM track t
+            WHERE t.id IN (:ids)
+            GROUP BY t.source
+            """, nativeQuery = true)
+    List<Object[]> aggregateWithinStats(@Param("ids") Collection<Long> ids);
 }

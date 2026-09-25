@@ -164,4 +164,30 @@ public interface TrackPointRepository extends JpaRepository<TrackPoint, Long> {
     List<Object[]> findSimilarityScores(@Param("trackId") Long trackId,
                                         @Param("tol") double toleranceM,
                                         @Param("eps") double eps);
+
+    /**
+     * 区域统计：每条的<b>区域内点数</b>（相加即为区域内总点数）。
+     *
+     * <p>⚠️ 这是整个接口里最贵的一步，而且对"绑定变量 vs 字面量"<b>敏感</b>：
+     * 实测字面量约 180 ms（顺序扫描 + 聚合），而绑定变量走通用计划时优化器会改选
+     * {@code idx_track_point_st} 并为了分组多付一次外部排序（落盘），变成 <b>456 ms</b>。
+     * <b>本轮接受这个区间、不优化</b>（两条候选改法及状态见设计文档 2.5）。
+     *
+     * <p>谓词用 {@code ST_Intersects} 而不是 {@code ST_Contains}：点恰好落在边界上时
+     * {@code ST_Contains} 为 false，而"线穿过"用的 {@code ST_Intersects} 对边界为 true ——
+     * 保持一致，避免出现"点不算在里面、线却穿过了"这种自相矛盾。
+     *
+     * <p>⚠️ <b>不要</b>改成"只统计返回的那 50 条轨迹"：实测更慢（1153 ms），
+     * 因为优化器仍从空间索引扫完全部 18 万点，还叠了一个 855 万次比较的嵌套循环。
+     *
+     * @return 每行 {@code [Long trackId, Long inside]}
+     */
+    @Query(value = """
+            SELECT p.track_id, count(*) AS inside
+            FROM track_point p
+            WHERE p.geom && ST_GeomFromText(:wkt, 4326)
+              AND ST_Intersects(ST_GeomFromText(:wkt, 4326), p.geom)
+            GROUP BY p.track_id
+            """, nativeQuery = true)
+    List<Object[]> countPointsInsideGrouped(@Param("wkt") String wkt);
 }
