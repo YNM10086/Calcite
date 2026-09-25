@@ -57,11 +57,11 @@ def check(name, cond, detail=""):
     global ok, fail
     if cond:
         ok += 1
-        print(f"  [OK] {name}")
+        print(f"  [OK] {name}", flush=True)
     else:
         fail += 1
         msgs.append(f"{name} :: {detail}")
-        print(f"  [XX] {name}  {detail}")
+        print(f"  [XX] {name}  {detail}", flush=True)
 
 
 def sql(q):
@@ -139,31 +139,12 @@ def body_message(res):
     return None
 
 
-if not os.environ.get("PGPASSWORD"):
-    print("PGPASSWORD 未设置 —— 先把 application-local.yml 里的密码放进环境变量再跑。")
-    sys.exit(2)
-if not os.path.exists(PSQL):
-    print("找不到 psql: %s" % PSQL)
-    sys.exit(2)
-
-wkt = polygon_wkt(BEIJING_RING)
-
-print("=== A) 北京大框 vs SQL 真值 ===")
-# ⚠️ 显式给 limit=500：默认 limit=50 会把 items 截断，那样就没法用 items 与 SQL 的命中集合对拍了
-status, res, ms = post(poly_body(BEIJING_RING, limit=500))
-print(f"  接口耗时 {ms:.0f} ms")
-check("状态 200", status == 200, status)
-truth_ids = {int(x) for x in sql(
-    f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326))")}
-check("total 等于 SQL 命中数", res["total"] == len(truth_ids),
-      f'{res["total"]} vs {len(truth_ids)}')
-check("limit=500 时未截断", res["truncated"] is False, res["truncated"])
-check("items 的 id 集合与 SQL 命中集合完全相同",
-      {i["trackId"] for i in res["items"]} == truth_ids,
-      f'接口 {len(res["items"])} 条 / SQL {len(truth_ids)} 条')
-
 def points_by_track(wkt_sql, from_sql=None, to_sql=None):
-    """SQL 真值：区域内的逐条点数（可选时间窗），返回 {trackId: inside}。"""
+    """SQL 真值：区域内的逐条点数（可选时间窗），返回 {trackId: inside}。
+
+    ⚠️ 「带窗」与「不带窗」是两份**不同的**真值，不能互相顶替 —— 断言必须用与响应
+    同一个口径的那一份（这是审查抓到的 Important，见报告第 11 节）。
+    """
     q = (f"SELECT track_id, count(*) FROM track_point "
          f"WHERE geom && ST_GeomFromText('{wkt_sql}',4326) "
          f"AND ST_Intersects(ST_GeomFromText('{wkt_sql}',4326), geom)")
@@ -171,6 +152,30 @@ def points_by_track(wkt_sql, from_sql=None, to_sql=None):
         q += f" AND recorded_at BETWEEN '{from_sql}' AND '{to_sql}'"
     q += " GROUP BY track_id"
     return {int(a): int(b) for a, b in (ln.split("|") for ln in sql(q))}
+
+
+def shaped_ok(res):
+    """响应是否是"能继续取字段"的形状（状态 200 且关键字段在）。
+
+    没有这道守卫时，一旦接口回 500，下面 res["total"] 会以 KeyError/TypeError
+    的 traceback 结束 —— 而不是给出一行可读的 [XX]。
+    """
+    return (isinstance(res, dict) and "stats" in res and "items" in res
+            and "region" in res and "total" in res)
+
+
+def wrong_inside_ids(items, truth_map):
+    """返回 items 里 insidePointCount 与 **传入的那份真值** 不符的 trackId 列表。
+
+    ⚠️ 关键在"传入的那份"：调用方必须传与响应**同一个时间窗口径**的真值。
+    审查抓到的 Important 就是这里被传了错的那一份（不带窗的真值配带窗的响应），
+    而当时数据恰好让两份真值等价 → 断言绿得**没有验证它声称的东西**。
+
+    做成参数化（而不是闭包直接读某个全局 map）正是为了让"口径"成为一个显式参数，
+    并且可以被 `_red-verify-task6.py` 用一个**人造的跨窗响应**证伪。
+    """
+    return [i["trackId"] for i in items
+            if i["insidePointCount"] != truth_map.get(i["trackId"])]
 
 
 def check_stats_pointcount(name, res, truth_map):
@@ -185,289 +190,416 @@ def check_stats_pointcount(name, res, truth_map):
     check(name, res["stats"]["pointCount"] == truth_full,
           f'{res["stats"]["pointCount"]} vs SQL 全量 {truth_full}')
 
+def main():
+    # 前置检查放进 main()：这样 `import` 本文件（供 _red-verify-task6.py 抽函数）
+    # 不会因为没有密码/没有 psql 就 sys.exit。
+    if not os.environ.get("PGPASSWORD"):
+        print("PGPASSWORD 未设置 —— 先把 application-local.yml 里的密码放进环境变量再跑。")
+        sys.exit(2)
+    if not os.path.exists(PSQL):
+        print("找不到 psql: %s" % PSQL)
+        sys.exit(2)
 
-truth_points = sql_int(
-    f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
-    f"AND ST_Intersects(ST_GeomFromText('{wkt}',4326), geom)")
-check("pointCount 等于 SQL 区域内点数", res["stats"]["pointCount"] == truth_points,
-      f'{res["stats"]["pointCount"]} vs {truth_points}')
+    wkt = polygon_wkt(BEIJING_RING)
 
-truth_src = dict(ln.split("|") for ln in sql(
-    f"SELECT source, count(*) FROM track WHERE id IN "
-    f"(SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326))) GROUP BY 1"))
-check("sourceCounts 与 SQL 一致",
-      {k: int(v) for k, v in res["stats"]["sourceCounts"].items()} ==
-      {k: int(v) for k, v in truth_src.items()},
-      f'{res["stats"]["sourceCounts"]} vs {truth_src}')
+    # F 段那个时间窗（多处复用，避免抄错字符串）
+    WIN_FROM = "2008-11-01T00:00:00Z"
+    WIN_TO = "2008-11-30T23:59:59Z"
+    # 「无限宽」上界哨兵，与 WithinService.MAX_TIME 一致
+    TO_SENTINEL = "2999-12-31T23:59:59Z"
 
-truth_dist = float(sql(
-    f"SELECT coalesce(sum(distance_m),0) FROM track WHERE id IN "
-    f"(SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)))")[0])
-check("distanceM 与 SQL 求和一致（相对误差 <0.01）",
-      abs(res["stats"]["distanceM"] - truth_dist) <= max(0.01, truth_dist * 1e-6),
-      f'{res["stats"]["distanceM"]} vs {truth_dist}')
+    # ⚠️ 重导数据后，任何"必然截断 / 必然不截断"的假设都会假红 —— 判据一律从 base_total 推导
+    LIMIT_MAX = 500     # calcite.within.max-limit
+    LIMIT_DEFAULT = 50  # calcite.within.default-limit
 
-truth_map = points_by_track(wkt)
-# ⭐ limit=500 时 232 条全在 items 里 → 这里 brief 那条 `sum(items[].insidePointCount)
-# == stats.pointCount` **应当严格成立**（未截断是它的前提）
-check("limit=500（未截断）时 sum(items[].insidePointCount) == stats.pointCount",
-      sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
-      f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
-check("每条 item 的 insidePointCount 都等于 SQL 逐条分组值",
-      {i["trackId"]: i["insidePointCount"] for i in res["items"]} == truth_map,
-      f'不一致 {[k for k in truth_map if dict((i["trackId"], i["insidePointCount"]) for i in res["items"]).get(k) != truth_map[k]][:5]}')
-check("items 内 insidePointCount 之和 ≤ pointCount",
-      sum(i["insidePointCount"] for i in res["items"]) <= res["stats"]["pointCount"])
-check_stats_pointcount("pointCount == SQL 全量逐条分组求和", res, truth_map)
-check("items 按 insidePointCount 降序",
-      all(res["items"][i]["insidePointCount"] >= res["items"][i + 1]["insidePointCount"]
-          for i in range(len(res["items"]) - 1)))
-check("region 回显是对象而不是字符串",
-      isinstance(res["region"], dict) and res["region"].get("type") == "Polygon",
-      type(res["region"]).__name__)
 
-# ⭐ 截断语义（顺手钉住）：默认 limit=50 时命中 232 条 → items 只留 50 条，
-# 但 stats/total 仍然全量。这同时解释了"为什么不能拿 items 之和去断 pointCount"。
-status, res_trunc, _ = post(poly_body(BEIJING_RING))
-check("默认 limit=50 时 truncated=true", res_trunc["truncated"] is True, res_trunc["truncated"])
-check("默认 limit=50 时 items 恰好 50 条", len(res_trunc["items"]) == 50, len(res_trunc["items"]))
-check("截断不影响 total 与 stats（仍然全量）",
-      res_trunc["total"] == res["total"]
-      and res_trunc["stats"]["pointCount"] == res["stats"]["pointCount"]
-      and res_trunc["stats"]["trackCount"] == res["stats"]["trackCount"],
-      f'total {res_trunc["total"]} vs {res["total"]}')
-check("截断时 items 之和 ≤ pointCount（保留的是点数最多的那些）",
-      sum(i["insidePointCount"] for i in res_trunc["items"]) <= res_trunc["stats"]["pointCount"],
-      f'{sum(i["insidePointCount"] for i in res_trunc["items"])} vs {res_trunc["stats"]["pointCount"]}')
+    print("=== A) 北京大框 vs SQL 真值 ===")
+    # ⚠️ 显式给 limit=max：默认 limit=50 会把 items 截断，那样就没法用 items 与 SQL 的命中集合对拍了
+    status, res, ms = post(poly_body(BEIJING_RING, limit=LIMIT_MAX))
+    print(f"  接口耗时 {ms:.0f} ms")
+    check("状态 200", status == 200, status)
+    if not (status == 200 and shaped_ok(res)):
+        # ⚠️ 非 200 就不再往下取字段 —— 否则会以 KeyError/TypeError 的 traceback 结束，
+        # 而不是给出一行可读的 [XX]（审查 Minor 3）。
+        check("A 段响应形状可继续断言（stats/items/region/total 都在）", False,
+              f"status={status} res={res if isinstance(res, str) else type(res).__name__}")
+        print("A 段无法继续 —— 先修接口。")
+        print(f"\n{ok} 项通过，{fail} 项失败")
+        for _m in msgs:
+            print("  -", _m)
+        sys.exit(1)
 
-# 保存"无时间窗"的基线，F 段要用它做关系比较（而不是写死 18 万那种数字）
-base_points = res["stats"]["pointCount"]
-base_total = res["total"]
-print(f"  info: total={base_total} pointCount={base_points} "
-      f"sourceCounts={res['stats']['sourceCounts']} latest={res['stats']['latest']}")
-check("latest 与 SQL 的 max(end_time) 一致",
-      res["stats"]["latest"] == sql(
-          f"SELECT to_char(max(end_time) AT TIME ZONE 'UTC', "
-          f"'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM track WHERE id IN "
-          f"(SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)))")[0],
-      res["stats"]["latest"])
+    truth_ids = {int(x) for x in sql(
+        f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326))")}
 
-print("=== B) 上海缓冲区：region 必须是 33 顶点的圆多边形 ===")
-status, res, ms = post({"geometry": {"type": "Point", "coordinates": [121.50, 31.29]},
-                        "bufferM": 1000})
-print(f"  接口耗时 {ms:.0f} ms")
-check("状态 200", status == 200, status)
-ring = res["region"]["coordinates"][0]
-check("region 顶点数 = 33", len(ring) == 33, len(ring))
-check("region 首尾闭合", ring[0] == ring[-1])
-truth = sql_int("SELECT count(*) FROM track WHERE ST_DWithin(geom::geography, "
-                "ST_SetSRID(ST_MakePoint(121.50,31.29),4326)::geography, 1000)")
-check("与球面 ST_DWithin 的结果一致（该点附近无超长边轨迹）",
-      res["total"] == truth, f'{res["total"]} vs {truth}')
+    # "无时间窗"的基线：F 段与截断段都要用它做**关系比较**（而不是写死 18 万那种数字）
+    base_total = res["total"]
+    base_points = res["stats"]["pointCount"]
 
-# ⭐ 缓冲区"看到的圈 = 查的范围"：region 是后端拿去查询的那个几何（规格 11.4）。
-# 直接量它：把回显的每个顶点按等距圆柱近似换算成米，到圆心的距离应当恒等于 bufferM。
-# 这条防的是"缓冲区按度算"（漏 ::geography）—— 那样半径会是 1000 度，距离差 5 个数量级。
-LAT_M_PER_DEG = 111320.0
-C_LON, C_LAT = 121.50, 31.29
-radii_m = [
-    math.hypot((lon - C_LON) * LAT_M_PER_DEG * math.cos(math.radians(C_LAT)),
-               (lat - C_LAT) * LAT_M_PER_DEG)
-    for lon, lat in ring
-]
-worst = max(abs(r - 1000.0) for r in radii_m)
-print(f"  info: region 顶点到圆心的距离 {min(radii_m):.1f} ~ {max(radii_m):.1f} 米")
-check("region 每个顶点都在圆心 1000 米处（±5%，排除'按度缓冲'）",
-      worst <= 50.0, f"最大偏差 {worst:.1f} 米")
-check("region 顶点数 33 = 1 起点 + 32 段 + 1 闭合点",
-      len(ring) == 33 and 32 <= len(radii_m) <= 33, len(ring))
 
-print("=== C) 已知边界：3 条含超长边的轨迹（设计文档 3.4，有意钉住）===")
-status, res, _ = post({"geometry": {"type": "Point", "coordinates": [118.95, 35.66]},
-                       "bufferM": 1500})
-truth_sphere = sql_int("SELECT count(*) FROM track WHERE ST_DWithin(geom::geography, "
-                       "ST_SetSRID(ST_MakePoint(118.95,35.66),4326)::geography, 1500)")
-check("平面解释返回 3 条（球面是 0 条）", res["total"] == 3, res["total"])
-check("同时确认球面确实是 0 条（说明这 3 条是平面解释的产物）", truth_sphere == 0, truth_sphere)
-check("这 3 条正是 121/161/166", sorted(i["trackId"] for i in res["items"]) == [121, 161, 166],
-      sorted(i["trackId"] for i in res["items"]))
 
-print("=== D) 空区域 ===")
-status, res, _ = post(poly_body([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)]))
-check("状态 200（不是错误）", status == 200, status)
-check("total = 0", res["total"] == 0, res["total"])
-check("items 为空数组", res["items"] == [], res["items"])
-check("统计全为 0", res["stats"]["trackCount"] == 0 and res["stats"]["pointCount"] == 0
-      and res["stats"]["distanceM"] == 0, res["stats"])
-check("空区域的 sourceCounts 为空", res["stats"]["sourceCounts"] == {}, res["stats"]["sourceCounts"])
+    truth_points = sql_int(
+        f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
+        f"AND ST_Intersects(ST_GeomFromText('{wkt}',4326), geom)")
+    check("pointCount 等于 SQL 区域内点数", res["stats"]["pointCount"] == truth_points,
+          f'{res["stats"]["pointCount"]} vs {truth_points}')
 
-print("=== E) 400 分支逐条打 ===")
-bad_cases = [
-    ("缺 geometry", {}),
-    ("类型不在白名单", {"geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}),
-    ("环未闭合", poly_body([(0, 0), (1, 0), (1, 1), (0, 1)])),
-    ("环点数 < 4", poly_body([(0, 0), (1, 0), (0, 0)])),
-    ("纬度越界", poly_body([(0, 0), (1, 0), (1, 91), (0, 91), (0, 0)])),
-    ("Point 没给 bufferM", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}}),
-    ("bufferM = 0", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}, "bufferM": 0}),
-    ("bufferM 超上限", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}, "bufferM": 99999}),
-    ("limit = 0", poly_body(BEIJING_RING, limit=0)),
-    ("limit = 501", poly_body(BEIJING_RING, limit=501)),
-    ("from > to", poly_body(BEIJING_RING, **{"from": "2009-01-01T00:00:00Z", "to": "2008-01-01T00:00:00Z"})),
-    ("自交多边形（蝴蝶结）", poly_body([(116.30, 39.90), (116.50, 40.10),
-                                        (116.50, 39.90), (116.30, 40.10), (116.30, 39.90)])),
-]
-for name, body in bad_cases:
-    status, res, _ = post(body)
-    check(f"400：{name}", status == 400, f"实际 {status} {res if isinstance(res, str) else res}")
-    # ⭐ 硬要求 1：我们的参数校验分支必须把【中文原因】放到响应体的 message 字段里。
-    # 这条防的是 server.error.include-message 被改回 never —— 那样后端单测全绿、用户却看不到原因。
-    m = body_message(res)
-    check(f"400 响应体带 message（不是 status 而已）：{name}", m is not None,
-          f"响应体 = {res!r}")
-    if m is not None:
-        check(f"400 的原因是中文（我们自己的校验分支）：{name}",
-              any("\u4e00" <= ch <= "\u9fff" for ch in m), m)
+    # ⚠️ 截断标志的判据必须由**命中数**推导，不能写死"未截断" —— 重导数据后会假红
+    check(f"limit={LIMIT_MAX} 时 truncated == (命中数 > {LIMIT_MAX})",
+          res["truncated"] == (len(truth_ids) > LIMIT_MAX),
+          f'truncated={res["truncated"]} 命中数={len(truth_ids)}')
+    check("total 等于 SQL 命中数", res["total"] == len(truth_ids),
+          f'{res["total"]} vs {len(truth_ids)}')
+    check("items 的 id 集合与 SQL 命中集合完全相同",
+          {i["trackId"] for i in res["items"]} == truth_ids,
+          f'接口 {len(res["items"])} 条 / SQL {len(truth_ids)} 条')
 
-# ⭐ 硬要求 1 的专门一条：自交多边形必须是设计文档承诺的那句中文原因，一字不差
-status, res, _ = post(poly_body([(116.30, 39.90), (116.50, 40.10),
-                                 (116.50, 39.90), (116.30, 40.10), (116.30, 39.90)]))
-check("自交多边形的 400 message 等于「区域有交叉或面积为 0，请重画」",
-      status == 400 and body_message(res) == OUR_400_HINT,
-      f"status={status} message={body_message(res)!r}")
+    truth_src = dict(ln.split("|") for ln in sql(
+        f"SELECT source, count(*) FROM track WHERE id IN "
+        f"(SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326))) GROUP BY 1"))
+    check("sourceCounts 与 SQL 一致",
+          {k: int(v) for k, v in res["stats"]["sourceCounts"].items()} ==
+          {k: int(v) for k, v in truth_src.items()},
+          f'{res["stats"]["sourceCounts"]} vs {truth_src}')
 
-# ⚠️ 硬要求 2：别把两种 400 混为一谈 —— body 缺失 / JSON 畸形由 Spring 的
-# HttpMessageNotReadableException 处理，message 是 Jackson 的英文消息，不是我们的中文原因。
-print("--- E2) 与「框架的 400」划清界限（不是我们的校验分支）---")
-status, res, _ = post(None, raw="")
-check("body 缺失 → 400", status == 400, status)
-m_missing = body_message(res)
-print(f"  info: body 缺失时 message = {m_missing!r}")
-check("body 缺失的 message 不是我们的中文原因（是框架消息）",
-      m_missing is not None and m_missing != OUR_400_HINT, f"{m_missing!r}")
+    truth_dist = float(sql(
+        f"SELECT coalesce(sum(distance_m),0) FROM track WHERE id IN "
+        f"(SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)))")[0])
+    check("distanceM 与 SQL 求和一致（相对误差 <0.01）",
+          abs(res["stats"]["distanceM"] - truth_dist) <= max(0.01, truth_dist * 1e-6),
+          f'{res["stats"]["distanceM"]} vs {truth_dist}')
 
-status, res, _ = post(None, raw='{"geometry": ')
-check("JSON 畸形 → 400", status == 400, status)
-m_broken = body_message(res)
-print(f"  info: JSON 畸形时 message = {m_broken!r}")
-check("JSON 畸形的 message 不是我们的中文原因（是 Jackson 消息）",
-      m_broken is not None and m_broken != OUR_400_HINT, f"{m_broken!r}")
-
-# ⭐ 硬要求 3（规格 11.12 的裁定）：点统计必须与 id 过滤共用同一个时间窗
-print("=== F) 时间窗（重叠语义）===")
-status, res, _ = post(poly_body(BEIJING_RING,
-                                **{"from": "2008-11-01T00:00:00Z", "to": "2008-11-30T23:59:59Z"}))
-truth = sql_int(f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-                f"AND start_time <= '2008-11-30T23:59:59Z' AND end_time >= '2008-11-01T00:00:00Z'")
-check("时间窗命中数与 SQL 一致（含端点重叠）", res["total"] == truth, f'{res["total"]} vs {truth}')
-check("时间窗是收窄而不是放大", res["total"] <= len(truth_ids), res["total"])
-
-truth_win_points = sql_int(
-    f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
-    f"AND ST_Intersects(ST_GeomFromText('{wkt}',4326), geom) "
-    f"AND recorded_at BETWEEN '2008-11-01T00:00:00Z' AND '2008-11-30T23:59:59Z'")
-check("时间窗内 pointCount 等于 SQL 真值（点统计也吃时间窗）",
-      res["stats"]["pointCount"] == truth_win_points,
-      f'{res["stats"]["pointCount"]} vs {truth_win_points}')
-
-# 关系断言，样本永远有效：时间窗是收窄的 → pointCount 必须严格小于不带窗时
-print(f"  info: 带窗 pointCount={res['stats']['pointCount']} / 不带窗 {base_points}")
-check("⭐ 带时间窗的 pointCount 严格小于不带时间窗（不是同一口径）",
-      res["stats"]["pointCount"] < base_points,
-      f'{res["stats"]["pointCount"]} vs {base_points}')
-
-# ⭐ 硬要求 3 的核心断言：两者同源 → 必须严格自洽（规格 11.12 论点 3）
-# ⚠️ brief 写的是 `sum(items[].insidePointCount) == stats.pointCount`，但那只在 items
-# **未截断**时成立：本段命中 53 条 > 默认 limit 50，items 只剩 50 条，之和必然少
-# 被截掉那 3 条的点数（实测少 21 点）。所以这里用 SQL 全量逐条真值来断"同源自洽"，
-# 并显式记录截断事实 —— 断言不比 brief 弱，只是把"未截断"这个前提摆到明面上。
-wrong_ids = [i["trackId"] for i in res["items"] if i["insidePointCount"] != truth_map.get(i["trackId"])]
-check("带窗时每条 item 的 insidePointCount 都等于 SQL 逐条分组值",
-      not wrong_ids, f"不一致 {wrong_ids[:5]}")
-check_stats_pointcount("⭐ pointCount == SQL 全量逐条分组求和（带时间窗，11.12 的自洽）",
-                       res, points_by_track(wkt, "2008-11-01T00:00:00Z", "2008-11-30T23:59:59Z"))
-if not res["truncated"]:
-    check("⭐ 未截断时 sum(items[].insidePointCount) == stats.pointCount（brief 原式）",
+    truth_map = points_by_track(wkt)
+    # ⭐ limit=500 时 232 条全在 items 里 → 这里 brief 那条 `sum(items[].insidePointCount)
+    # == stats.pointCount` **应当严格成立**（未截断是它的前提）
+    check("limit=500（未截断）时 sum(items[].insidePointCount) == stats.pointCount",
           sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
           f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
-else:
-    # 截断了：items 之和就必须**严格小于** pointCount，差额 = 被截掉那几条的点数
-    cut = sum(v for k, v in points_by_track(
-        wkt, "2008-11-01T00:00:00Z", "2008-11-30T23:59:59Z").items()
-        if k not in {i["trackId"] for i in res["items"]})
-    check("⭐ 截断时 sum(items[].insidePointCount) + 被截掉的点数 == stats.pointCount",
-          sum(i["insidePointCount"] for i in res["items"]) + cut == res["stats"]["pointCount"],
-          f'{sum(i["insidePointCount"] for i in res["items"])} + {cut} vs {res["stats"]["pointCount"]}')
-    print(f"  info: 本段命中 {res['total']} 条 > limit {res['params']['limit']}，"
-          f"items 截断到 {len(res['items'])} 条（被截掉 {cut} 点）"
-          f" —— 这就是 brief 那条断言不能直接用在这里的原因")
-check("带窗时 total == stats.trackCount",
-      res["total"] == res["stats"]["trackCount"], f'{res["total"]} vs {res["stats"]["trackCount"]}')
-check("带窗时 items 的 id 都在 SQL 命中集合里",
-      {i["trackId"] for i in res["items"]} <=
-      {int(x) for x in sql(
-          f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-          f"AND start_time <= '2008-11-30T23:59:59Z' "
-          f"AND end_time >= '2008-11-01T00:00:00Z'")})
-check("params 回显了 from/to/limit",
-      res["params"]["from"] is not None and res["params"]["to"] is not None,
-      str(res["params"]))
+    check("每条 item 的 insidePointCount 都等于 SQL 逐条分组值",
+          {i["trackId"]: i["insidePointCount"] for i in res["items"]} == truth_map,
+          f'不一致 {[k for k in truth_map if dict((i["trackId"], i["insidePointCount"]) for i in res["items"]).get(k) != truth_map[k]][:5]}')
+    check("items 内 insidePointCount 之和 ≤ pointCount",
+          sum(i["insidePointCount"] for i in res["items"]) <= res["stats"]["pointCount"])
+    check_stats_pointcount("pointCount == SQL 全量逐条分组求和", res, truth_map)
+    check("items 按 insidePointCount 降序",
+          all(res["items"][i]["insidePointCount"] >= res["items"][i + 1]["insidePointCount"]
+              for i in range(len(res["items"]) - 1)))
+    check("region 回显是对象而不是字符串",
+          isinstance(res["region"], dict) and res["region"].get("type") == "Polygon",
+          type(res["region"]).__name__)
 
-# ⭐ 硬要求 3 的"缺陷回归钉子"：一个把所有命中轨迹都排除的时间窗
-# → total 必须是 0，而且 stats.pointCount 也必须是 0（修复前是 181211）
-print("--- F2) 把所有命中轨迹都排除的时间窗（规格 11.12 那个缺陷）---")
-status, res, ms = post(poly_body(BEIJING_RING,
-                                 **{"from": "2020-01-01T00:00:00Z", "to": "2020-12-31T00:00:00Z"}))
-print(f"  接口耗时 {ms:.0f} ms")
-check("状态 200", status == 200, status)
-check("⭐ 2020 时间窗：total = 0", res["total"] == 0, res["total"])
-check("⭐ 2020 时间窗：stats.trackCount = 0", res["stats"]["trackCount"] == 0,
-      res["stats"]["trackCount"])
-check("⭐ 2020 时间窗：stats.pointCount = 0（修复前是 18 万，这是缺陷的回归钉子）",
-      res["stats"]["pointCount"] == 0, res["stats"]["pointCount"])
-check("2020 时间窗：items 为空（不是拿到一堆不属于这段时间的轨迹）",
-      res["items"] == [], f'{len(res["items"])} 条')
-check("2020 时间窗：distanceM = 0", res["stats"]["distanceM"] == 0, res["stats"]["distanceM"])
-# 独立性：SQL 独立确认这个窗内确实一条都没有（免得断言"永远成立"而看不到真值）
-truth_2020 = sql_int(f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-                     f"AND start_time <= '2020-12-31T00:00:00Z' AND end_time >= '2020-01-01T00:00:00Z'")
-check("SQL 独立确认该时间窗内本来就没有命中的轨迹", truth_2020 == 0, truth_2020)
+    # ⭐ 截断语义（顺手钉住）：命中数超过默认 limit 时 items 只留 limit 条，
+    # 但 stats/total 仍然全量。这同时解释了"为什么不能拿 items 之和去断 pointCount"。
+    # ⚠️ 「必然截断」是**数据假设**（要求命中数 > 50），重导数据会假红 ——
+    # 判据一律由 base_total（来自上面那条 200 响应的 total）推导（审查 Minor 2）。
+    status, res_trunc, _ = post(poly_body(BEIJING_RING))
+    print(f"  info: 默认 limit={LIMIT_DEFAULT} 时 total={base_total} "
+          f"items={len(res_trunc['items'])} truncated={res_trunc['truncated']}")
+    check(f"默认 limit={LIMIT_DEFAULT} 时 truncated == (total > {LIMIT_DEFAULT})",
+          res_trunc["truncated"] == (base_total > LIMIT_DEFAULT),
+          f'truncated={res_trunc["truncated"]} total={base_total}')
+    check(f"默认 limit={LIMIT_DEFAULT} 时 items 条数 == min({LIMIT_DEFAULT}, total)",
+          len(res_trunc["items"]) == min(LIMIT_DEFAULT, base_total),
+          f'{len(res_trunc["items"])} vs min({LIMIT_DEFAULT}, {base_total})')
+    check("截断不影响 total 与 stats（仍然全量）",
+          res_trunc["total"] == res["total"]
+          and res_trunc["stats"]["pointCount"] == res["stats"]["pointCount"]
+          and res_trunc["stats"]["trackCount"] == res["stats"]["trackCount"],
+          f'total {res_trunc["total"]} vs {res["total"]}')
+    check("截断时 items 之和 ≤ pointCount（保留的是点数最多的那些）",
+          sum(i["insidePointCount"] for i in res_trunc["items"]) <= res_trunc["stats"]["pointCount"],
+          f'{sum(i["insidePointCount"] for i in res_trunc["items"])} vs {res_trunc["stats"]["pointCount"]}')
 
-# 半开窗：只给 from，不给 to —— 走"无限宽哨兵"。
-# ⚠️ 期望值不能写死 0：数据里有一条 sample 轨迹是 2026-09-08（见 project 记忆的"已知数据事实"），
-# 所以 from=2020 且 to 无限宽时它【应当】命中。正确做法还是从 SQL 现取真值。
-print("--- F3) 只给 from（另一端无限宽哨兵）---")
-FROM_2020 = "2020-01-01T00:00:00Z"
-TO_SENTINEL = "2999-12-31T23:59:59Z"          # WithinService.MAX_TIME
-status, res, ms = post(poly_body(BEIJING_RING, **{"from": FROM_2020}))
-check("状态 200", status == 200, status)
-truth_half = sql_int(
-    f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-    f"AND start_time <= '{TO_SENTINEL}' AND end_time >= '{FROM_2020}'")
-check("只给 from：total 与 SQL（另一端无限宽）一致", res["total"] == truth_half,
-      f'{res["total"]} vs {truth_half}')
-check("只给 from：pointCount 与 SQL 一致（哨兵两处共用）",
-      res["stats"]["pointCount"] == sum(points_by_track(wkt, FROM_2020, TO_SENTINEL).values()),
-      f'{res["stats"]["pointCount"]} vs '
-      f'{sum(points_by_track(wkt, FROM_2020, TO_SENTINEL).values())}')
-check("只给 from：total == stats.trackCount",
-      res["total"] == res["stats"]["trackCount"], f'{res["total"]} vs {res["stats"]["trackCount"]}')
-# 用 SQL 印证"它命中的确实是那条 2026 年的 sample 轨迹"，而不是碰巧对上了
-sample_ids = {int(x) for x in sql(
-    f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-    f"AND start_time <= '{TO_SENTINEL}' AND end_time >= '{FROM_2020}'")}
-check("只给 from：items 的 id 集合与 SQL 命中集合完全相同",
-      {i["trackId"] for i in res["items"]} == sample_ids,
-      f'{sorted(i["trackId"] for i in res["items"])} vs {sorted(sample_ids)}')
-# 无上界的窗会把"整条轨迹"也算进来，因此 pointCount 必然不为 0（只要真值不为 0）
-check("只给 from：pointCount 与 2020 那条轨迹无关地自洽（说明没误用「全排除」语义）",
-      res["stats"]["pointCount"] == 0 if truth_half == 0 else res["stats"]["pointCount"] > 0,
-      f'truth_half={truth_half} pointCount={res["stats"]["pointCount"]}')
+    # 无时间窗基线的 info 行（base_total / base_points 已在 A 段开头定义）
+    print(f"  info: total={base_total} pointCount={base_points} "
+          f"sourceCounts={res['stats']['sourceCounts']} latest={res['stats']['latest']}")
+    check("latest 与 SQL 的 max(end_time) 一致",
+          res["stats"]["latest"] == sql(
+              f"SELECT to_char(max(end_time) AT TIME ZONE 'UTC', "
+              f"'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM track WHERE id IN "
+              f"(SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)))")[0],
+          res["stats"]["latest"])
 
-print()
-print(f"{ok} 项通过，{fail} 项失败")
-if msgs:
-    print("失败明细：")
-    for m in msgs:
-        print("  -", m)
-sys.exit(1 if fail else 0)
+    print("=== B) 上海缓冲区：region 必须是 33 顶点的圆多边形 ===")
+    status, res, ms = post({"geometry": {"type": "Point", "coordinates": [121.50, 31.29]},
+                            "bufferM": 1000})
+    print(f"  接口耗时 {ms:.0f} ms")
+    check("状态 200", status == 200, status)
+    if not (status == 200 and shaped_ok(res)):
+        # ⚠️ 非 200 就不再取 ring（否则 res["region"]["coordinates"] 会以 TypeError 崩掉）
+        check("B 段响应形状可继续断言（region 在）", False, f"status={status}")
+        ring = []
+        radii_m = []
+    else:
+        ring = res["region"]["coordinates"][0]
+    if ring:
+        check("region 顶点数 = 33", len(ring) == 33, len(ring))
+        check("region 首尾闭合", ring[0] == ring[-1])
+    truth = sql_int("SELECT count(*) FROM track WHERE ST_DWithin(geom::geography, "
+                    "ST_SetSRID(ST_MakePoint(121.50,31.29),4326)::geography, 1000)")
+    check("与球面 ST_DWithin 的结果一致（该点附近无超长边轨迹）",
+          res.get("total") == truth, f'{res.get("total")} vs {truth}')
+
+    # ⭐ 缓冲区"看到的圈 = 查的范围"：region 是后端拿去查询的那个几何（规格 11.4）。
+    # 直接量它：把回显的每个顶点按等距圆柱近似换算成米，到圆心的距离应当恒等于 bufferM。
+    # 这条防的是"缓冲区按度算"（漏 ::geography）—— 那样半径会是 1000 度，距离差 5 个数量级。
+    LAT_M_PER_DEG = 111320.0
+    C_LON, C_LAT = 121.50, 31.29
+    radii_m = [
+        math.hypot((lon - C_LON) * LAT_M_PER_DEG * math.cos(math.radians(C_LAT)),
+                   (lat - C_LAT) * LAT_M_PER_DEG)
+        for lon, lat in ring
+    ]
+    if radii_m:
+        worst = max(abs(r - 1000.0) for r in radii_m)
+        print(f"  info: region 顶点到圆心的距离 {min(radii_m):.1f} ~ {max(radii_m):.1f} 米"
+              f"（含闭合点共 {len(radii_m)} 个顶点）")
+        check("region 每个顶点都在圆心 1000 米处（±5%，排除'按度缓冲'）",
+              worst <= 50.0, f"最大偏差 {worst:.1f} 米")
+
+        # ⭐ 计划/任务书 Review Focus #3 点名要求的「面积 ≈ πr²」：
+        # 用**鞋带公式**独立算回显多边形的平面面积（等距圆柱近似，与上面量半径同一套换算），
+        # 与 π·1000² 比。这条是"圈出来的区域 = 一个半径 1000 米的圆"的另一个角度：
+        # 顶点距离对 → 保证是圆；面积对 → 保证没有"缺一块/多一块"的病态多边形。
+        def shoelace_m2(pts):
+            """鞋带公式：返回无符号平面面积（输入已换算成米）。"""
+            s = 0.0
+            for i in range(len(pts) - 1):
+                x1, y1 = pts[i]
+                x2, y2 = pts[i + 1]
+                s += x1 * y2 - x2 * y1
+            return abs(s) / 2.0
+
+        ring_m = [((lon - C_LON) * LAT_M_PER_DEG * math.cos(math.radians(C_LAT)),
+                   (lat - C_LAT) * LAT_M_PER_DEG) for lon, lat in ring]
+        area_m2 = shoelace_m2(ring_m)
+        expect_area = math.pi * 1000.0 * 1000.0
+        rel = abs(area_m2 - expect_area) / expect_area
+        print(f"  info: region 鞋带公式面积 {area_m2:,.0f} m² vs πr² {expect_area:,.0f} m² "
+              f"（相对差 {rel * 100:.2f}%）")
+        check("region 面积 ≈ π·1000²（±5%，Review Focus #3）",
+              rel <= 0.05, f"{area_m2:.0f} vs {expect_area:.0f}（相对差 {rel * 100:.2f}%）")
+
+    print("=== C) 已知边界：3 条含超长边的轨迹（设计文档 3.4，有意钉住）===")
+    status, res, _ = post({"geometry": {"type": "Point", "coordinates": [118.95, 35.66]},
+                           "bufferM": 1500})
+    truth_sphere = sql_int("SELECT count(*) FROM track WHERE ST_DWithin(geom::geography, "
+                           "ST_SetSRID(ST_MakePoint(118.95,35.66),4326)::geography, 1500)")
+    check("同时确认球面确实是 0 条（说明这 3 条是平面解释的产物）", truth_sphere == 0, truth_sphere)
+    if not (status == 200 and shaped_ok(res)):
+        check("C 段响应形状可继续断言", False, f"status={status}")
+    else:
+        check("平面解释返回 3 条（球面是 0 条）", res["total"] == 3, res["total"])
+        check("这 3 条正是 121/161/166",
+              sorted(i["trackId"] for i in res["items"]) == [121, 161, 166],
+              sorted(i["trackId"] for i in res["items"]))
+
+    print("=== D) 空区域 ===")
+    status, res, _ = post(poly_body([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)]))
+    check("状态 200（不是错误）", status == 200, status)
+    if not (status == 200 and shaped_ok(res)):
+        check("D 段响应形状可继续断言", False, f"status={status}")
+    else:
+        check("total = 0", res["total"] == 0, res["total"])
+        check("items 为空数组", res["items"] == [], res["items"])
+        check("统计全为 0", res["stats"]["trackCount"] == 0 and res["stats"]["pointCount"] == 0
+              and res["stats"]["distanceM"] == 0, res["stats"])
+        check("空区域的 sourceCounts 为空",
+              res["stats"]["sourceCounts"] == {}, res["stats"]["sourceCounts"])
+
+    print("=== E) 400 分支逐条打 ===")
+    bad_cases = [
+        ("缺 geometry", {}),
+        ("类型不在白名单", {"geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}),
+        ("环未闭合", poly_body([(0, 0), (1, 0), (1, 1), (0, 1)])),
+        ("环点数 < 4", poly_body([(0, 0), (1, 0), (0, 0)])),
+        ("纬度越界", poly_body([(0, 0), (1, 0), (1, 91), (0, 91), (0, 0)])),
+        ("Point 没给 bufferM", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}}),
+        ("bufferM = 0", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}, "bufferM": 0}),
+        ("bufferM 超上限", {"geometry": {"type": "Point", "coordinates": [116.3, 40.0]}, "bufferM": 99999}),
+        ("limit = 0", poly_body(BEIJING_RING, limit=0)),
+        ("limit = 501", poly_body(BEIJING_RING, limit=501)),
+        ("from > to", poly_body(BEIJING_RING, **{"from": "2009-01-01T00:00:00Z", "to": "2008-01-01T00:00:00Z"})),
+        ("自交多边形（蝴蝶结）", poly_body([(116.30, 39.90), (116.50, 40.10),
+                                            (116.50, 39.90), (116.30, 40.10), (116.30, 39.90)])),
+    ]
+    for name, body in bad_cases:
+        status, res, _ = post(body)
+        check(f"400：{name}", status == 400, f"实际 {status} {res if isinstance(res, str) else res}")
+        # ⭐ 硬要求 1：我们的参数校验分支必须把【中文原因】放到响应体的 message 字段里。
+        # 这条防的是 server.error.include-message 被改回 never —— 那样后端单测全绿、用户却看不到原因。
+        m = body_message(res)
+        check(f"400 响应体带 message（不是 status 而已）：{name}", m is not None,
+              f"响应体 = {res!r}")
+        if m is not None:
+            check(f"400 的原因是中文（我们自己的校验分支）：{name}",
+                  any("\u4e00" <= ch <= "\u9fff" for ch in m), m)
+
+    # ⭐ 硬要求 1 的专门一条：自交多边形必须是设计文档承诺的那句中文原因，一字不差
+    status, res, _ = post(poly_body([(116.30, 39.90), (116.50, 40.10),
+                                     (116.50, 39.90), (116.30, 40.10), (116.30, 39.90)]))
+    check("自交多边形的 400 message 等于「区域有交叉或面积为 0，请重画」",
+          status == 400 and body_message(res) == OUR_400_HINT,
+          f"status={status} message={body_message(res)!r}")
+
+    # ⚠️ 硬要求 2：别把两种 400 混为一谈 —— body 缺失 / JSON 畸形由 Spring 的
+    # HttpMessageNotReadableException 处理，message 是 Jackson 的英文消息，不是我们的中文原因。
+    print("--- E2) 与「框架的 400」划清界限（不是我们的校验分支）---")
+    status, res, _ = post(None, raw="")
+    check("body 缺失 → 400", status == 400, status)
+    m_missing = body_message(res)
+    print(f"  info: body 缺失时 message = {m_missing!r}")
+    check("body 缺失的 message 不是我们的中文原因（是框架消息）",
+          m_missing is not None and m_missing != OUR_400_HINT, f"{m_missing!r}")
+
+    status, res, _ = post(None, raw='{"geometry": ')
+    check("JSON 畸形 → 400", status == 400, status)
+    m_broken = body_message(res)
+    print(f"  info: JSON 畸形时 message = {m_broken!r}")
+    check("JSON 畸形的 message 不是我们的中文原因（是 Jackson 消息）",
+          m_broken is not None and m_broken != OUR_400_HINT, f"{m_broken!r}")
+
+    # ⭐ 硬要求 3（规格 11.12 的裁定）：点统计必须与 id 过滤共用同一个时间窗
+    print("=== F) 时间窗（重叠语义）===")
+    status, res, _ = post(poly_body(BEIJING_RING, **{"from": WIN_FROM, "to": WIN_TO}))
+    check("状态 200", status == 200, status)
+    # ⭐⭐⭐ 带窗的响应对应的**必须是带窗的真值**（审查抓到的 Important）：
+    # 原先这里误用了 A 段不带窗的 truth_map，只有当"每条命中轨迹的区域内点全部落在窗内"
+    # 时才碰巧成立 —— 当前数据恰好满足（审查者定点 SQL 实测：53 条里 win<>allp 的有 0 条），
+    # 所以它当时绿得**没有验证它声称的东西**，一旦重导数据出现跨窗轨迹就会假红。
+    # 现在统一用 WIN_MAP（带同一时间窗的逐条分组真值），并全文复用同一份（顺便省掉重复 psql）。
+    WIN_MAP = points_by_track(wkt, WIN_FROM, WIN_TO)
+    truth = sql_int(f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+                    f"AND start_time <= '{WIN_TO}' AND end_time >= '{WIN_FROM}'")
+    check("时间窗命中数与 SQL 一致（含端点重叠）", res["total"] == truth, f'{res["total"]} vs {truth}')
+    check("时间窗是收窄而不是放大", res["total"] <= len(truth_ids), res["total"])
+
+    truth_win_points = sql_int(
+        f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
+        f"AND ST_Intersects(ST_GeomFromText('{wkt}',4326), geom) "
+        f"AND recorded_at BETWEEN '{WIN_FROM}' AND '{WIN_TO}'")
+    check("时间窗内 pointCount 等于 SQL 真值（点统计也吃时间窗）",
+          res["stats"]["pointCount"] == truth_win_points,
+          f'{res["stats"]["pointCount"]} vs {truth_win_points}')
+
+    # 关系断言，样本永远有效：时间窗是收窄的 → pointCount 必须严格小于不带窗时
+    print(f"  info: 带窗 pointCount={res['stats']['pointCount']} / 不带窗 {base_points}")
+    check("⭐ 带时间窗的 pointCount 严格小于不带时间窗（不是同一口径）",
+          res["stats"]["pointCount"] < base_points,
+          f'{res["stats"]["pointCount"]} vs {base_points}')
+
+    # ⭐ 硬要求 3 的核心断言：两者同源 → 必须严格自洽（规格 11.12 论点 3）
+    # ⚠️ brief 写的是 `sum(items[].insidePointCount) == stats.pointCount`，但那只在 items
+    # **未截断**时成立：本段命中数 > 默认 limit 时 items 会被截断，之和必然少被截掉那几条的点数。
+    # 所以这里用 SQL 全量逐条真值来断"同源自洽"，并显式记录截断事实 ——
+    # 断言不比 brief 弱，只是把"未截断"这个前提摆到明面上。
+    # ⚠️ 真值必须是 **WIN_MAP（带同一个时间窗）**，不是 A 段的 truth_map（不带窗）——
+    # 这是审查抓到的 Important：两者只在"每条命中轨迹的区域内点全落在窗内"时才相等。
+    wrong_ids = wrong_inside_ids(res["items"], WIN_MAP)
+    check("带窗时每条 item 的 insidePointCount 都等于【带窗】SQL 逐条分组值",
+          not wrong_ids, f"不一致 {wrong_ids[:5]}")
+
+    # ⭐ 口径必须是显式的：同时断言"不带窗的真值与带窗的真值在**当前数据上**恰好等价"，
+    # 把这个巧合**摆到明面上**（而不是让它偷偷撑着一条假绿的断言）。
+    # 一旦重导数据出现跨窗轨迹，这一条会变红并告诉你："现在两份真值不同了，别再混用"。
+    same_on_shared = all(truth_map[k] == WIN_MAP[k] for k in (set(truth_map) & set(WIN_MAP)))
+    print(f"  info: 不带窗真值 {len(truth_map)} 条轨迹 / 带窗真值 {len(WIN_MAP)} 条；"
+          f"共有键上两份是否等价 = {same_on_shared}；不带窗点数 {sum(truth_map.values())} / "
+          f"带窗点数 {sum(WIN_MAP.values())}")
+    check("两份真值在共有轨迹上等价（等价 → 说明当前数据没有跨窗轨迹，口径混用查不出来）",
+          same_on_shared, "共有键上不等价 —— 数据集里出现跨窗轨迹了，两份真值不能再混用")
+    check_stats_pointcount("⭐ pointCount == SQL 全量逐条分组求和（带时间窗，11.12 的自洽）",
+                           res, WIN_MAP)
+    if not res["truncated"]:
+        check("⭐ 未截断时 sum(items[].insidePointCount) == stats.pointCount（brief 原式）",
+              sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
+    else:
+        # 截断了：items 之和就必须**严格小于** pointCount，差额 = 被截掉那几条的点数
+        cut = sum(v for k, v in WIN_MAP.items() if k not in {i["trackId"] for i in res["items"]})
+        check("⭐ 截断时 sum(items[].insidePointCount) + 被截掉的点数 == stats.pointCount",
+              sum(i["insidePointCount"] for i in res["items"]) + cut == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} + {cut} vs {res["stats"]["pointCount"]}')
+        print(f"  info: 本段命中 {res['total']} 条 > limit {res['params']['limit']}，"
+              f"items 截断到 {len(res['items'])} 条（被截掉 {cut} 点）"
+              f" —— 这就是 brief 那条断言不能直接用在这里的原因")
+    check("带窗时 total == stats.trackCount",
+          res["total"] == res["stats"]["trackCount"], f'{res["total"]} vs {res["stats"]["trackCount"]}')
+    check("带窗时 items 的 id 都在 SQL 命中集合里",
+          {i["trackId"] for i in res["items"]} <=
+          {int(x) for x in sql(
+              f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+              f"AND start_time <= '{WIN_TO}' AND end_time >= '{WIN_FROM}'")})
+    check("params 回显了 from/to/limit",
+          res["params"]["from"] is not None and res["params"]["to"] is not None,
+          str(res["params"]))
+
+    # ⭐ 硬要求 3 的"缺陷回归钉子"：一个把所有命中轨迹都排除的时间窗
+    # → total 必须是 0，而且 stats.pointCount 也必须是 0（修复前是 181211）
+    print("--- F2) 把所有命中轨迹都排除的时间窗（规格 11.12 那个缺陷）---")
+    EMPTY_FROM = "2020-01-01T00:00:00Z"
+    EMPTY_TO = "2020-12-31T00:00:00Z"
+    status, res, ms = post(poly_body(BEIJING_RING, **{"from": EMPTY_FROM, "to": EMPTY_TO}))
+    print(f"  接口耗时 {ms:.0f} ms")
+    check("状态 200", status == 200, status)
+    if not (status == 200 and shaped_ok(res)):
+        check("F2 段响应形状可继续断言", False, f"status={status}")
+    else:
+        check("⭐ 2020 时间窗：total = 0", res["total"] == 0, res["total"])
+        check("⭐ 2020 时间窗：stats.trackCount = 0", res["stats"]["trackCount"] == 0,
+              res["stats"]["trackCount"])
+        check("⭐ 2020 时间窗：stats.pointCount = 0（修复前是 18 万，这是缺陷的回归钉子）",
+              res["stats"]["pointCount"] == 0, res["stats"]["pointCount"])
+        check("2020 时间窗：items 为空（不是拿到一堆不属于这段时间的轨迹）",
+              res["items"] == [], f'{len(res["items"])} 条')
+        check("2020 时间窗：distanceM = 0", res["stats"]["distanceM"] == 0, res["stats"]["distanceM"])
+    # 独立性：SQL 独立确认这个窗内确实一条都没有（免得断言"永远成立"而看不到真值）
+    truth_2020 = sql_int(f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+                         f"AND start_time <= '{EMPTY_TO}' AND end_time >= '{EMPTY_FROM}'")
+    check("SQL 独立确认该时间窗内本来就没有命中的轨迹", truth_2020 == 0, truth_2020)
+
+    # 半开窗：只给 from，不给 to —— 走"无限宽哨兵"。
+    # ⚠️ 期望值不能写死 0：数据里有一条 sample 轨迹是 2026-09-08（见 project 记忆的"已知数据事实"），
+    # 所以 from=2020 且 to 无限宽时它【应当】命中。正确做法还是从 SQL 现取真值。
+    print("--- F3) 只给 from（另一端无限宽哨兵）---")
+    FROM_2020 = "2020-01-01T00:00:00Z"
+    # TO_SENTINEL 已在文件开头定义（与 WithinService.MAX_TIME 一致）
+    status, res, ms = post(poly_body(BEIJING_RING, **{"from": FROM_2020}))
+    check("状态 200", status == 200, status)
+    HALF_MAP = points_by_track(wkt, FROM_2020, TO_SENTINEL)
+    truth_half = sql_int(
+        f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+        f"AND start_time <= '{TO_SENTINEL}' AND end_time >= '{FROM_2020}'")
+    if not (status == 200 and shaped_ok(res)):
+        check("F3 段响应形状可继续断言", False, f"status={status}")
+    else:
+        check("只给 from：total 与 SQL（另一端无限宽）一致", res["total"] == truth_half,
+              f'{res["total"]} vs {truth_half}')
+        check("只给 from：pointCount 与 SQL 一致（哨兵两处共用）",
+              res["stats"]["pointCount"] == sum(HALF_MAP.values()),
+              f'{res["stats"]["pointCount"]} vs {sum(HALF_MAP.values())}')
+        check("只给 from：total == stats.trackCount",
+              res["total"] == res["stats"]["trackCount"], f'{res["total"]} vs {res["stats"]["trackCount"]}')
+        # 用 SQL 印证"它命中的确实是那条 2026 年的 sample 轨迹"，而不是碰巧对上了
+        sample_ids = {int(x) for x in sql(
+            f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+            f"AND start_time <= '{TO_SENTINEL}' AND end_time >= '{FROM_2020}'")}
+        check("只给 from：items 的 id 集合与 SQL 命中集合完全相同",
+              {i["trackId"] for i in res["items"]} == sample_ids,
+              f'{sorted(i["trackId"] for i in res["items"])} vs {sorted(sample_ids)}')
+        # 无上界的窗会把"整条轨迹"也算进来，因此 pointCount 必然不为 0（只要真值不为 0）
+        check("只给 from：pointCount 与「全排除」语义不同地自洽",
+              res["stats"]["pointCount"] == 0 if truth_half == 0 else res["stats"]["pointCount"] > 0,
+              f'truth_half={truth_half} pointCount={res["stats"]["pointCount"]}')
+
+    print()
+    print(f"{ok} 项通过，{fail} 项失败")
+    if msgs:
+        print("失败明细：")
+        for m in msgs:
+            print("  -", m)
+    sys.exit(1 if fail else 0)
+
+
+if __name__ == "__main__":
+    main()
