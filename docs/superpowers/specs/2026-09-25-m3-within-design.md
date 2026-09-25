@@ -213,6 +213,23 @@ PostGIS 默认每象限 8 段 → 4×8+1）。**服务端生成的缓冲区不�
 - 点级查询可以用 `ST_DWithin(geography)`（点便宜，相似度接口就这么写的），
   **线级不行**（2.3 实测 303 ms）——这条差异要留在代码注释里，免得以后有人"统一写法"把性能改坏
 
+### 2.9 ⚠️ 非法几何的失败模式：**静默出错**，不是报错
+
+用户手画多边形很容易画成"蝴蝶结"（自交）。实测 PostGIS 对它的反应：
+
+| 输入 | `ST_IsValid` | `ST_Intersects` 的行为 |
+|---|---|---|
+| **蝴蝶结（自交）多边形** | **false** | ⚠️ **不报错**，返回 **237 条** —— 比它的外接矩形（232 条）**还多** |
+| 环未闭合（3 点 / 首尾不同） | — | **直接报错**：`geometry requires more points` / `geometry contains non-closed rings` |
+| 退化多边形（所有点共线，面积为 0） | **false** | （同样会被 `ST_IsValid` 抓出） |
+| 带洞多边形 / MultiPolygon | true | ✅ 正常 |
+
+**这是本设计里最危险的一处**：非法多边形不会让接口报错，而是给出一个**看着挺像样、但毫无意义**的数字
+（237 条"穿过"的轨迹）。用户没有任何办法察觉。而未闭合的环则会变成 **500**（`ST_GeomFromText` 抛错）。
+
+**结论**：必须加一道**有效性守卫**（见 5.3），非法几何一律 **400 + 人能看懂的原因**，
+**不自动修复**（理由见 11.11）。
+
 ---
 
 ## 3. 判定口径（本设计的核心）
@@ -321,8 +338,9 @@ POST 的 body 天然适合放 GeoJSON。（对比：密度接口只需要 `bbox`
 | body 不是合法 JSON / 缺 `geometry` | 400 |
 | `geometry.type` 不在 `{Polygon, MultiPolygon, Point}` 内 | 400 |
 | Polygon 环未闭合，或某环点数 < 4 | 400 |
-| 坐标越界（`|lat| > 90` 或 `|lon| > 180`） | 400 |
+| 坐标越界（纬度绝对值 > 90，或经度绝对值 > 180） | 400 |
 | 顶点数 > `calcite.within.max-vertices` | 400（"区域太复杂，请简化"） |
+| ⚠️ **多边形自交 / 面积为 0**（`ST_IsValid = false`） | **400**（"区域有交叉，请重画"）—— **必须挡住**：不挡的话 PostGIS **不报错**，而是返回一个静默错误的数字（实测自交多边形返回 237 条，见 2.9） |
 | `geometry` 是 `Point` 但没给 `bufferM` | 400 |
 | `bufferM <= 0`、非有限数，或 > `max-buffer-m` | 400 |
 | `from > to` | 400 |
@@ -358,7 +376,7 @@ POST 的 body 天然适合放 GeoJSON。（对比：密度接口只需要 `bbox`
 |---|---|---|
 | `web/dto/WithinRequest`（record） | 请求体形状：`JsonNode geometry` + `Integer bufferM` + `OffsetDateTime from/to` + `Integer limit` | DTO 只描述形状 |
 | `web/dto/WithinResponse`（record） | 响应：`region` / `stats` / `items` / `total` / `truncated` / `params`；内嵌 `Stats` / `Item` / `Params` | 沿用 `HotspotResponse.Params` 的嵌套 record 风格 |
-| `service/RegionGeometry`（纯计算，零依赖） | GeoJSON → 校验 → 顶点数 / 越界检查 → WKT 字符串；环闭合判断 | **纯函数，可以直接用 JUnit 测**（对齐 `SimilarityMath` / `DensityGrid` 的做法） |
+| `service/RegionGeometry`（纯计算，零依赖） | GeoJSON → **结构**校验（类型白名单 / 环闭合 / 最少点数 / 顶点数 / 坐标越界）→ WKT 字符串。⚠️ **不做拓扑校验**（自交、面积为 0 要靠 PostGIS 的 `ST_IsValid`，见 5.3） | **纯函数，可以直接用 JUnit 测**（对齐 `SimilarityMath` / `DensityGrid` 的做法） |
 | `service/WithinService` | 编排：算 region → 查 id → 查 items → 算统计 → 截断 | 碰数据库的都在这层 |
 | `service/WithinProperties`（`@ConfigurationProperties`） | `calcite.within.*` 配置 | ⚠️ **YAML 列表/嵌套必须用 `@ConfigurationProperties`**，`@Value` 绑不了（既有教训） |
 | `web/AnalysisController.within()` | 收 HTTP、参数校验、400/200 的取舍 | 不写 SQL |
@@ -393,18 +411,32 @@ public static Region parse(JsonNode geometry, Integer bufferM, int maxVertices)
 - 校验必须发生在 Java 侧（要给出**人能看懂的 400 原因**，而不是让 PostGIS 抛裸异常）
 - 校验完之后 WKT 是最省事的载体，且和 `ST_GeomFromText` 一一对应
 
-### 5.3 缓冲区怎么算成区域
+### 5.3 ⭐ 区域的准备与校验（一条小查询，三种形状统一）
 
-缓冲区要**两件事**：给查询用、给 `region` 回显用 —— 而它们**是同一个东西**，所以只算一次：
+区域要做三件事：**校验合法性**、**给 SQL 查询用**、**给前端回显**。
+三件事由**同一条小查询**完成 —— 于是"被校验的几何"、"查询用的几何"、"回显的几何"**必然是同一个**：
 
 ```sql
-SELECT ST_AsGeoJSON(ST_Buffer(ST_GeomFromText(:pointWkt, 4326)::geography, :r)::geometry)
+-- 拉框 / 自由多边形用这条
+SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g), ST_NPoints(g)
+FROM (SELECT ST_GeomFromText(:wkt, 4326) AS g) s;
+
+-- 缓冲区用这条（唯一的差别是 g 怎么来）
+SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g), ST_NPoints(g)
+FROM (SELECT ST_Buffer(ST_GeomFromText(:wkt, 4326)::geography, :bufferM)::geometry AS g) s;
 ```
 
-拿到 GeoJSON 后：`region` 直接返回它；查询用的 WKT 用 `ST_AsText` 一起取回（或由同一个 SQL 返回 WKT 再转）。
+- ⚠️ **写成两条 SQL，不用 `CASE WHEN :bufferM IS NULL` 合一条** ——
+  native query 里的可空参数类型推断很容易出问题（这是 `aggregateDensity` 注释里记着的坑，别踩第二遍）
+- `ST_IsValid(g) = false` → **400**（"区域有交叉 / 面积为 0，请重画"），**不自动修复**（理由见 11.11）
+- `region` 字段用 `ST_AsGeoJSON(g)` **解析后的对象**（Java 侧是 `JsonNode`），
+  **不是原始字符串** —— 否则响应里会是一段被转义的 JSON 文本，前端还得再 `JSON.parse` 一次
+- 回显**统一**走这条：连"拉框/自由多边形"也回显数据库吐出的几何（而不是前端自己算的那个），
+  于是 11.4 说的"看到的 = 查到的"对**三种形状**都成立，**没有特例**
+- `ST_NPoints` 拿到的顶点数可用于日志/诊断（服务端缓冲区固定 33，2.6）
 
-⚠️ **`::geography` 在这里是必须的**：不加就是"按度缓冲 500 度"。加了才是"球面 500 米"。
-且**只在生成圆的那一次用到 geography**，之后的相交判定全是几何（2.3 的性能来源）。
+⚠️ **`::geography` 只在算缓冲区那一次用**：不加就是"按度缓冲 500 度"，加了才是"球面 500 米"。
+之后的相交判定**全是纯几何** —— 这正是 2.3 那个 38 倍性能的来源。
 
 ### 5.4 命中的轨迹 id
 
@@ -631,6 +663,10 @@ calcite:
 - `Point` 没给 `bufferM` → 异常；`bufferM = 0` / 负数 / `NaN` → 异常
 - MultiPolygon 的顶点数是**所有环之和**（防漏算）
 
+⚠️ **职责边界要清楚**：`RegionGeometry` 是纯 Java，**做不了拓扑合法性检查** ——
+"自交 / 面积为 0"必须靠 PostGIS 的 `ST_IsValid`（5.3）。
+所以 9.2 只覆盖**结构**校验，**拓扑校验的测试落在 9.4（接口对拍）**。
+
 `WithinServiceTest`（mock 仓库，预计 ~8 项）：排序（`insidePointCount` 降序 → `trackId` 升序）、
 `limit` 截断后 `truncated` 正确、空结果返回全 0 统计、`from/to` 的传参（空值变成无限宽边界）。
 
@@ -651,6 +687,8 @@ calcite:
 - `region` 回显：缓冲区的 `region` 是**多边形**且顶点数 = **33**；面积与 `πr²` 的相对误差 < 1%
 - 400 分支逐条打：非法类型、环未闭合、顶点数超限、`Point` 无 `bufferM`、`bufferM = 0`、
   `from > to`、`limit = 0` 与 `limit = 501`
+- ⚠️ **自交多边形必须 400**：拿一个"蝴蝶结"多边形打接口，断言 **400**
+  （不是 200，更不是 500）—— **这条如果漏了，"静默错误的数字"就会从这道缝里溜进来**（2.9 / 11.11）
 - ⚠️ **已知边界用例**：那 3 条含超长边的轨迹（121/161/166）——用 `(118.95, 35.66)` + 1.5 km 缓冲区
   断言"**返回 3 条**"，并在注释里写明"这 3 条是平面解释的产物，见设计文档 3.4"。**这是有意钉住的，不是 bug。**
 - ⭐ **打印接口的真实耗时**（总耗时，最好再分开记"轨迹查询"与"区域内点数统计"）：
@@ -688,6 +726,7 @@ calcite:
 | 项 | 说明 |
 |---|---|
 | **平面 vs 球面的分歧** | 只影响 3 条含超长边的轨迹（121/161/166），最大 11.7 km。见 3.4，**有意不修**，用测试钉住 |
+| **非法几何一律 400，不自动修复** | 自交 / 面积为 0 的多边形会被挡住，**不用 `ST_MakeValid` 猜用户意图**（理由见 11.11）。用户偶尔要重画一次 |
 | **区域内点数统计 180~456 ms，且对绑定变量敏感** | 通用计划下优化器改选空间索引、多付一次外部排序（2.5）。**本轮不优化** —— 两条候选改法（id 数组 / `prepareThreshold=0`）及其状态记在 2.5，验收时以真实耗时为准 |
 | **停留点是"命中轨迹的"** | 不是"区域内所有轨迹的"（后者要读全库 28.6 万点，等于把热点接口 2 秒的开销搬进来）。见 5.9 |
 | **不保存区域** | 无区域档案、无命名、无历史记录（YAGNI） |
@@ -756,6 +795,22 @@ GeoJSON 是 Web GIS 的通用语言，以后要加"导入一块区域文件"不�
 **所以"实测"必须测到与实现一致的写法**，否则数字漂亮但实现时对不上（这正是本节存在的理由）。
 
 **处置**：不改（理由与两条候选改法见 2.5），但**验收脚本打印真实耗时** —— 把猜测变成观测。
+
+### 11.11 为什么非法几何**挡住**而不是用 `ST_MakeValid` 自动修复
+
+`ST_MakeValid` 看起来更"友好"：用户画了蝴蝶结，系统自动修成两个三角形继续算。
+**不采用**，理由三条：
+
+1. **修复结果可能与用户意图完全无关。** 蝴蝶结被 `ST_MakeValid` 修成 `MultiPolygon`（两个三角），
+   而用户以为画的是一个大区域 —— 数字照样会出来，只是答的是另一个问题。
+2. **"静默"正是要消灭的东西。** 实测（2.9）PostGIS 对自交多边形**不报错**，直接给出 237 条
+   （比外接矩形还多）。这种"看着像样但无意义"的结果，比一句 400 危险得多 ——
+   用户没有任何线索去怀疑它。
+3. **400 是一句话就能修好的事。** "区域有交叉，请重画"对用户是可操作的；
+   而"我们猜你画的是什么"不可操作，也不可解释。
+
+**代价**：多一次 `ST_IsValid` 检查（一个只有几十个顶点的多边形，可忽略），
+以及用户偶尔要重画一次。**换来的是"界面上出现的每个数字都是真的"。**
 
 ---
 
@@ -869,6 +924,7 @@ backend/src/main/java/com/calcite/
 backend/src/main/java/com/calcite/
 ├── web/AnalysisController.java           加 within() 端点 + 400 分支
 ├── repository/TrackRepository.java       加 findWithinSummariesByIds（不改 findSummariesByIds）
+│                                         加 prepareRegion / prepareBufferRegion（区域校验 + 回显，见 5.3）
 └── repository/TrackPointRepository.java  加 countPointsInsideGrouped（对齐 aggregateDensity 的写法）
 backend/src/main/resources/application.yml 加 calcite.within.*
 ```
