@@ -12,15 +12,20 @@ import com.calcite.service.StayPointCache;
 import com.calcite.service.StayPointService;
 import com.calcite.service.SimilarityService;
 import com.calcite.service.TrackedStay;
+import com.calcite.service.WithinService;
 import com.calcite.service.importer.RawPoint;
 import com.calcite.web.dto.DensityResponse;
 import com.calcite.web.dto.HotspotDto;
 import com.calcite.web.dto.HotspotResponse;
 import com.calcite.web.dto.SimilarityResponse;
+import com.calcite.web.dto.WithinRequest;
+import com.calcite.web.dto.WithinResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -51,6 +56,7 @@ public class AnalysisController {
     private final DensityService densityService;
     private final StayPointCache stayPointCache;
     private final SimilarityService similarityService;
+    private final WithinService withinService;
     private final double defaultRadiusM;
     private final int defaultMinVisits;
 
@@ -61,6 +67,7 @@ public class AnalysisController {
                               DensityService densityService,
                               StayPointCache stayPointCache,
                               SimilarityService similarityService,
+                              WithinService withinService,
                               @Value("${calcite.hotspot.radius-m:200}") double defaultRadiusM,
                               @Value("${calcite.hotspot.min-visits:2}") int defaultMinVisits) {
         this.trackRepository = trackRepository;
@@ -70,6 +77,7 @@ public class AnalysisController {
         this.densityService = densityService;
         this.stayPointCache = stayPointCache;
         this.similarityService = similarityService;
+        this.withinService = withinService;
         this.defaultRadiusM = defaultRadiusM;
         this.defaultMinVisits = defaultMinVisits;
     }
@@ -201,6 +209,28 @@ public class AnalysisController {
             return similarityService.similarity(trackId, toleranceM, limit);
         } catch (SimilarityService.TrackNotFoundException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, e.getMessage());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+    }
+
+    /**
+     * 空间范围查询（M3 第一阶段）：画一块区域，查出穿过的轨迹。
+     *
+     * <p><b>为什么是 POST 而不是 GET</b>：自由多边形的坐标串放 URL 里又长又要转义；
+     * body 天然适合放 GeoJSON（对比：密度接口只需要 bbox 四个数，所以用 GET + query 参数）。
+     *
+     * <p><b>参数非法一律 400 并原样给出原因</b> —— {@code WithinService} 抛的
+     * {@link IllegalArgumentException} 的 message 是写给人看的（"区域有交叉，请重画"这种）。
+     * 非法几何<b>必须</b>在这一层被挡住：实测自交多边形不会让 PostGIS 报错，
+     * 而是返回一个静默错误的数字（设计文档 2.9）。
+     *
+     * <p>区域内没有轨迹是 <b>200 + 空列表</b>，不是错误。
+     */
+    @PostMapping("/within")
+    public WithinResponse within(@RequestBody WithinRequest request) {
+        try {
+            return withinService.within(request);
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
         }
