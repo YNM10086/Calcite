@@ -423,15 +423,21 @@ PowerShell 只负责启动和查错，不显示图形。
   - 后端 `mvn test` **162**（基线 133 → 162 = +`RegionGeometryTest 16` +`WithinServiceTest 13`）
     ⚠️ 任务书里写的"期望 163"是**陈旧值** —— 163→162 是 Task 4 修复轮**有意合并**了一条
     （断言更强，非丢测试；`progress.md:175`、计划 `:1320/:1379/:2820` 都写 162）
-  - 前端 node **7 个套件 153 项**（playback 17 / chart 37 / hotspot 25 / density 25 /
-    similarity 19 / data-edit 11 / **region 19**）
+  - 前端 node **7 个套件 157 项**（playback 17 / chart 37 / hotspot 25 / density 25 /
+    similarity 19 / data-edit 11 / **region 23**）
   - **浏览器 8 个脚本全绿**：stay **7** / chart-pixels **10** / import-pixels **6** / filter **7** /
-    hotspots **17** / density **15** / similarity **17** / **within 31**
-  - **接口对拍 5 个全绿**：`verify-within-api` **97** / `verify-hotspot-api` **375** /
+    hotspots **17** / density **15** / similarity **17** / **within 42**（最终审查修复波后从 31 升到 42，
+    含"有结果时面板零溢出"四种组合、区域/命中轨迹实体断言、列表↔地图高亮）
+  - **接口对拍 5 个全绿**：`verify-within-api` **105** / `verify-hotspot-api` **375** /
     `verify-density-api` **51** / `verify-similarity-api` **45** / `verify-data-edit-api`（提权下全绿）
-  - ⚠️ `verify-data-edit-api.py` / `check-data-edit.py` **必须提权**才能跑（读写回收站目录）
+  - ⚠️ `verify-data-edit-api.py` / `check-data-edit.py` **必须提权**才能跑（读写回收站目录），
+    且**会真的删掉一条轨迹**（删前导出回收站；跑完要按脚本提示从源 `.plt` 重新导入，**id 会变**）
+  - 生产构建（提权）：`vite build` **1506 modules / ✓ built**（构建在沙箱内必须提权，`spawn EPERM`）
 - ⚠️ **已知限制（不修）**：极快甩动绘制后地球会**轻微跳一下** ——
   合成拖拽实测 **20% 视野跨度**，人类速度拖拽实测 **0**（Cesium 输入聚合器在合成事件下被激发）
+- 📌 **遗留小债（给 M4，最终复审发现）**：`App.vue` 搬 `@media` 块时**静默删掉了 `.status.live { color: #7fd1ff }`**
+  —— 模板仍在用该类（`:class="{ live: trackPoints.length > 0 }"`），所以状态行"已载入轨迹"时的蓝色高亮没了。
+  **纯视觉、无功能影响**，**一行即可恢复**（放回 `.status` 基础规则之后、`@media` 之前）。
 - 📌 **明确未做**：保存 / 命名区域、区域导出、多区域叠加、区域内的深度指标（限速 / 爬升）
 
 ### ▶ 下次接着做（2026-09-25 M3 收工时的状态）
