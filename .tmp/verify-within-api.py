@@ -124,6 +124,16 @@ def polygon_wkt(ring):
 BEIJING_RING = [(116.28, 39.98), (116.42, 39.98), (116.42, 40.02),
                 (116.28, 40.02), (116.28, 39.98)]
 
+# F 段那个时间窗（多处复用，避免抄错字符串）—— 必须是**模块级**：
+# check_f_section 在模块级定义，读不到 main() 的局部变量（本轮踩到过这个 NameError）。
+WIN_FROM = "2008-11-01T00:00:00Z"
+WIN_TO = "2008-11-30T23:59:59Z"
+# 「无限宽」上界哨兵，与 WithinService.MAX_TIME 一致
+TO_SENTINEL = "2999-12-31T23:59:59Z"
+# 从 application.yml 读到的两个 limit（判据从真值推导，不写死数据假设）
+LIMIT_MAX = 500     # calcite.within.max-limit
+LIMIT_DEFAULT = 50  # calcite.within.default-limit
+
 
 def poly_body(ring, **extra):
     body = {"geometry": {"type": "Polygon", "coordinates": [ring]}}
@@ -190,53 +200,114 @@ def check_stats_pointcount(name, res, truth_map):
     check(name, res["stats"]["pointCount"] == truth_full,
           f'{res["stats"]["pointCount"]} vs SQL 全量 {truth_full}')
 
-def main():
-    # 前置检查放进 main()：这样 `import` 本文件（供 _red-verify-task6.py 抽函数）
-    # 不会因为没有密码/没有 psql 就 sys.exit。
-    if not os.environ.get("PGPASSWORD"):
-        print("PGPASSWORD 未设置 —— 先把 application-local.yml 里的密码放进环境变量再跑。")
-        sys.exit(2)
-    if not os.path.exists(PSQL):
-        print("找不到 psql: %s" % PSQL)
-        sys.exit(2)
+def check_f_section(status, res, wkt, truth_map, truth_ids, base_points):
+    """F 段（时间窗）的全部断言，**自带非 200 守卫**。
 
-    wkt = polygon_wkt(BEIJING_RING)
+    ⚠️ 抽成函数是为了让守卫能干净地包住整段（原来这十几行是平铺在 main() 里的，
+    非 200 时 res["total"] / res["stats"] 会 KeyError/TypeError 崩掉，
+    连最后的汇总行都不打印 —— 审查 Minor 4 第 1 条）。
 
-    # F 段那个时间窗（多处复用，避免抄错字符串）
-    WIN_FROM = "2008-11-01T00:00:00Z"
-    WIN_TO = "2008-11-30T23:59:59Z"
-    # 「无限宽」上界哨兵，与 WithinService.MAX_TIME 一致
-    TO_SENTINEL = "2999-12-31T23:59:59Z"
+    ⭐ 带窗的响应对应的**必须是带窗的真值**：`WIN_MAP = points_by_track(wkt, WIN_FROM, WIN_TO)`，
+    不是调用方传进来的 `truth_map`（那是**不带窗**的）。这是审查抓到的 Important ——
+    两者只在"每条命中轨迹的区域内点全落在窗内"时才相等。
 
-    # ⚠️ 重导数据后，任何"必然截断 / 必然不截断"的假设都会假红 —— 判据一律从 base_total 推导
-    LIMIT_MAX = 500     # calcite.within.max-limit
-    LIMIT_DEFAULT = 50  # calcite.within.default-limit
-
-
-    print("=== A) 北京大框 vs SQL 真值 ===")
-    # ⚠️ 显式给 limit=max：默认 limit=50 会把 items 截断，那样就没法用 items 与 SQL 的命中集合对拍了
-    status, res, ms = post(poly_body(BEIJING_RING, limit=LIMIT_MAX))
-    print(f"  接口耗时 {ms:.0f} ms")
-    check("状态 200", status == 200, status)
+    返回 WIN_MAP（失败时返回 {}），供 F2/F3 继续复用。
+    """
     if not (status == 200 and shaped_ok(res)):
-        # ⚠️ 非 200 就不再往下取字段 —— 否则会以 KeyError/TypeError 的 traceback 结束，
-        # 而不是给出一行可读的 [XX]（审查 Minor 3）。
+        check("F 段响应形状可继续断言（stats/items/total 都在）", False,
+              f"status={status} res={res if isinstance(res, str) else type(res).__name__}")
+        return {}
+    WIN_MAP = points_by_track(wkt, WIN_FROM, WIN_TO)
+    truth = sql_int(f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+                    f"AND start_time <= '{WIN_TO}' AND end_time >= '{WIN_FROM}'")
+    check("时间窗命中数与 SQL 一致（含端点重叠）", res["total"] == truth, f'{res["total"]} vs {truth}')
+    check("时间窗是收窄而不是放大", res["total"] <= len(truth_ids), res["total"])
+
+    truth_win_points = sql_int(
+        f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
+        f"AND ST_Intersects(ST_GeomFromText('{wkt}',4326), geom) "
+        f"AND recorded_at BETWEEN '{WIN_FROM}' AND '{WIN_TO}'")
+    check("时间窗内 pointCount 等于 SQL 真值（点统计也吃时间窗）",
+          res["stats"]["pointCount"] == truth_win_points,
+          f'{res["stats"]["pointCount"]} vs {truth_win_points}')
+
+    # 关系断言，样本永远有效：时间窗是收窄的 → pointCount 必须严格小于不带窗时
+    print(f"  info: 带窗 pointCount={res['stats']['pointCount']} / 不带窗 {base_points}")
+    check("⭐ 带时间窗的 pointCount 严格小于不带时间窗（不是同一口径）",
+          res["stats"]["pointCount"] < base_points,
+          f'{res["stats"]["pointCount"]} vs {base_points}')
+
+    # ⭐ 硬要求 3 的核心断言：两者同源 → 必须严格自洽（规格 11.12 论点 3）
+    # ⚠️ brief 写的是 `sum(items[].insidePointCount) == stats.pointCount`，但那只在 items
+    # **未截断**时成立。所以这里用 SQL 全量逐条真值来断"同源自洽"，并显式记录截断事实。
+    wrong_ids = wrong_inside_ids(res["items"], WIN_MAP)
+    check("带窗时每条 item 的 insidePointCount 都等于【带窗】SQL 逐条分组值",
+          not wrong_ids, f"不一致 {wrong_ids[:5]}")
+
+    # ⭐ 口径必须是显式的：把"不带窗真值与带窗真值在当前数据上恰好等价"这个巧合
+    # 摆到明面上，而不是让它偷偷撑着一条假绿的断言。
+    # ⚠️ 这是**信息输出，不是断言**（审查 Minor 4 第 3 条）：出现跨窗轨迹时它**不该红** ——
+    # 那时接口仍然是对的，只是 F 段的口径从此真正有区分力了。判成断言 = 假红。
+    shared = set(truth_map) & set(WIN_MAP)
+    n_diff = sum(1 for k in shared if truth_map[k] != WIN_MAP[k])
+    if n_diff == 0:
+        print(f"  info: 不带窗真值 {len(truth_map)} 条 / 带窗真值 {len(WIN_MAP)} 条；共有 {len(shared)} 条，"
+              f"两份在共有轨迹上【相等】—— 当前数据没有跨窗轨迹，"
+              f"口径混用查不出来，所以 F 段必须显式传 WIN_MAP")
+    else:
+        print(f"  info: 注意：不带窗与带窗的两份真值在共有轨迹上已不相等"
+              f"（跨窗轨迹 {n_diff} 条出现了）—— F 段断言现在才真正有区分力")
+    print(f"  info: 不带窗点数 {sum(truth_map.values())} / 带窗点数 {sum(WIN_MAP.values())}")
+
+    check_stats_pointcount("⭐ pointCount == SQL 全量逐条分组求和（带时间窗，11.12 的自洽）",
+                           res, WIN_MAP)
+    if not res["truncated"]:
+        check("⭐ 未截断时 sum(items[].insidePointCount) == stats.pointCount（brief 原式）",
+              sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
+    else:
+        cut = sum(v for k, v in WIN_MAP.items() if k not in {i["trackId"] for i in res["items"]})
+        check("⭐ 截断时 sum(items[].insidePointCount) + 被截掉的点数 == stats.pointCount",
+              sum(i["insidePointCount"] for i in res["items"]) + cut == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} + {cut} vs {res["stats"]["pointCount"]}')
+        print(f"  info: 本段命中 {res['total']} 条 > limit {res['params']['limit']}，"
+              f"items 截断到 {len(res['items'])} 条（被截掉 {cut} 点）"
+              f" —— 这就是 brief 那条断言不能直接用在这里的原因")
+    check("带窗时 total == stats.trackCount",
+          res["total"] == res["stats"]["trackCount"], f'{res["total"]} vs {res["stats"]["trackCount"]}')
+    check("带窗时 items 的 id 都在 SQL 命中集合里",
+          {i["trackId"] for i in res["items"]} <=
+          {int(x) for x in sql(
+              f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
+              f"AND start_time <= '{WIN_TO}' AND end_time >= '{WIN_FROM}'")})
+    check("params 回显了 from/to/limit",
+          res["params"]["from"] is not None and res["params"]["to"] is not None,
+          str(res["params"]))
+    return WIN_MAP
+
+
+def check_a_section(status, res, wkt, limit_max):
+    """A 段（北京大框 vs SQL 真值）的全部断言，**自带非 200 守卫**。
+
+    抽成函数的理由与 check_f_section 相同：守卫要干净地包住整段，
+    否则非 200 时 res["total"] / res["truncated"] 会 KeyError 崩掉（审查 Minor 3 的彻底版）。
+
+    ⚠️ brief 那条 `sum(items[].insidePointCount) == stats.pointCount` 的**前提是"未截断"**，
+    这里用 `res["truncated"]` 门控，两种情形各断各的（不写死"未截断"，否则命中 > limit 时假红）。
+
+    返回 (truth_ids, base_total, base_points, truth_map)；失败时返回 None。
+    """
+    if not (status == 200 and shaped_ok(res)):
         check("A 段响应形状可继续断言（stats/items/region/total 都在）", False,
               f"status={status} res={res if isinstance(res, str) else type(res).__name__}")
         print("A 段无法继续 —— 先修接口。")
-        print(f"\n{ok} 项通过，{fail} 项失败")
-        for _m in msgs:
-            print("  -", _m)
-        sys.exit(1)
+        return None
 
     truth_ids = {int(x) for x in sql(
         f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326))")}
-
     # "无时间窗"的基线：F 段与截断段都要用它做**关系比较**（而不是写死 18 万那种数字）
     base_total = res["total"]
     base_points = res["stats"]["pointCount"]
-
-
 
     truth_points = sql_int(
         f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
@@ -245,8 +316,8 @@ def main():
           f'{res["stats"]["pointCount"]} vs {truth_points}')
 
     # ⚠️ 截断标志的判据必须由**命中数**推导，不能写死"未截断" —— 重导数据后会假红
-    check(f"limit={LIMIT_MAX} 时 truncated == (命中数 > {LIMIT_MAX})",
-          res["truncated"] == (len(truth_ids) > LIMIT_MAX),
+    check(f"limit={limit_max} 时 truncated == (命中数 > {limit_max})",
+          res["truncated"] == (len(truth_ids) > limit_max),
           f'truncated={res["truncated"]} 命中数={len(truth_ids)}')
     check("total 等于 SQL 命中数", res["total"] == len(truth_ids),
           f'{res["total"]} vs {len(truth_ids)}')
@@ -270,14 +341,23 @@ def main():
           f'{res["stats"]["distanceM"]} vs {truth_dist}')
 
     truth_map = points_by_track(wkt)
-    # ⭐ limit=500 时 232 条全在 items 里 → 这里 brief 那条 `sum(items[].insidePointCount)
-    # == stats.pointCount` **应当严格成立**（未截断是它的前提）
-    check("limit=500（未截断）时 sum(items[].insidePointCount) == stats.pointCount",
-          sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
-          f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
+    # ⭐ brief 那条断言的**前提是"未截断"**：不能写死，命中数 > limit 时 items 会被截断，
+    # 写死"未截断"就假红了（审查 Minor 4 新发现 2）。用 res["truncated"] 门控。
+    if not res["truncated"]:
+        check(f"limit={limit_max}（未截断）时 sum(items[].insidePointCount) == stats.pointCount",
+              sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
+    else:
+        a_cut = sum(v for k, v in truth_map.items() if k not in {i["trackId"] for i in res["items"]})
+        check(f"limit={limit_max}（截断）时 sum(items) + 被截掉的点数 == stats.pointCount",
+              sum(i["insidePointCount"] for i in res["items"]) + a_cut == res["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res["items"])} + {a_cut} vs {res["stats"]["pointCount"]}')
+        print(f"  info: A 段命中 {res['total']} 条 > limit {limit_max}，items 截断到 "
+              f"{len(res['items'])} 条（被截掉 {a_cut} 点）")
+    # 逐条点数：只比 items 里实际出现的那几条（截断时真值里多出来的键不该算作"不一致"）
     check("每条 item 的 insidePointCount 都等于 SQL 逐条分组值",
-          {i["trackId"]: i["insidePointCount"] for i in res["items"]} == truth_map,
-          f'不一致 {[k for k in truth_map if dict((i["trackId"], i["insidePointCount"]) for i in res["items"]).get(k) != truth_map[k]][:5]}')
+          not wrong_inside_ids(res["items"], truth_map),
+          f'不一致 {wrong_inside_ids(res["items"], truth_map)[:5]}')
     check("items 内 insidePointCount 之和 ≤ pointCount",
           sum(i["insidePointCount"] for i in res["items"]) <= res["stats"]["pointCount"])
     check_stats_pointcount("pointCount == SQL 全量逐条分组求和", res, truth_map)
@@ -287,28 +367,60 @@ def main():
     check("region 回显是对象而不是字符串",
           isinstance(res["region"], dict) and res["region"].get("type") == "Polygon",
           type(res["region"]).__name__)
+    return truth_ids, base_total, base_points, truth_map
+
+
+def main():
+    # 前置检查放进 main()：这样 `import` 本文件（供 _red-verify-task6.py 抽函数）
+    # 不会因为没有密码/没有 psql 就 sys.exit。
+    if not os.environ.get("PGPASSWORD"):
+        print("PGPASSWORD 未设置 —— 先把 application-local.yml 里的密码放进环境变量再跑。")
+        sys.exit(2)
+    if not os.path.exists(PSQL):
+        print("找不到 psql: %s" % PSQL)
+        sys.exit(2)
+
+    wkt = polygon_wkt(BEIJING_RING)
+
+    print("=== A) 北京大框 vs SQL 真值 ===")
+    # ⚠️ 显式给 limit=max：默认 limit=50 会把 items 截断，那样就没法用 items 与 SQL 的命中集合对拍了
+    status, res, ms = post(poly_body(BEIJING_RING, limit=LIMIT_MAX))
+    print(f"  接口耗时 {ms:.0f} ms")
+    check("状态 200", status == 200, status)
+    # 整段（含非 200 守卫）在 check_a_section 里，见本文件上方定义
+    a_out = check_a_section(status, res, wkt, LIMIT_MAX)
+    if a_out is None:
+        print(f"\n{ok} 项通过，{fail} 项失败")
+        for _m in msgs:
+            print("  -", _m)
+        sys.exit(1)
+    truth_ids, base_total, base_points, truth_map = a_out
 
     # ⭐ 截断语义（顺手钉住）：命中数超过默认 limit 时 items 只留 limit 条，
     # 但 stats/total 仍然全量。这同时解释了"为什么不能拿 items 之和去断 pointCount"。
     # ⚠️ 「必然截断」是**数据假设**（要求命中数 > 50），重导数据会假红 ——
     # 判据一律由 base_total（来自上面那条 200 响应的 total）推导（审查 Minor 2）。
     status, res_trunc, _ = post(poly_body(BEIJING_RING))
-    print(f"  info: 默认 limit={LIMIT_DEFAULT} 时 total={base_total} "
-          f"items={len(res_trunc['items'])} truncated={res_trunc['truncated']}")
-    check(f"默认 limit={LIMIT_DEFAULT} 时 truncated == (total > {LIMIT_DEFAULT})",
-          res_trunc["truncated"] == (base_total > LIMIT_DEFAULT),
-          f'truncated={res_trunc["truncated"]} total={base_total}')
-    check(f"默认 limit={LIMIT_DEFAULT} 时 items 条数 == min({LIMIT_DEFAULT}, total)",
-          len(res_trunc["items"]) == min(LIMIT_DEFAULT, base_total),
-          f'{len(res_trunc["items"])} vs min({LIMIT_DEFAULT}, {base_total})')
-    check("截断不影响 total 与 stats（仍然全量）",
-          res_trunc["total"] == res["total"]
-          and res_trunc["stats"]["pointCount"] == res["stats"]["pointCount"]
-          and res_trunc["stats"]["trackCount"] == res["stats"]["trackCount"],
-          f'total {res_trunc["total"]} vs {res["total"]}')
-    check("截断时 items 之和 ≤ pointCount（保留的是点数最多的那些）",
-          sum(i["insidePointCount"] for i in res_trunc["items"]) <= res_trunc["stats"]["pointCount"],
-          f'{sum(i["insidePointCount"] for i in res_trunc["items"])} vs {res_trunc["stats"]["pointCount"]}')
+    # ⚠️ 与其它段同类：形状不对就不能再取字段（res_trunc 是 str 时 len(res_trunc["items"]) 会 TypeError）
+    if not (status == 200 and shaped_ok(res_trunc)):
+        check("截断段响应形状可继续断言", False, f"status={status}")
+    else:
+        print(f"  info: 默认 limit={LIMIT_DEFAULT} 时 total={base_total} "
+              f"items={len(res_trunc['items'])} truncated={res_trunc['truncated']}")
+        check(f"默认 limit={LIMIT_DEFAULT} 时 truncated == (total > {LIMIT_DEFAULT})",
+              res_trunc["truncated"] == (base_total > LIMIT_DEFAULT),
+              f'truncated={res_trunc["truncated"]} total={base_total}')
+        check(f"默认 limit={LIMIT_DEFAULT} 时 items 条数 == min({LIMIT_DEFAULT}, total)",
+              len(res_trunc["items"]) == min(LIMIT_DEFAULT, base_total),
+              f'{len(res_trunc["items"])} vs min({LIMIT_DEFAULT}, {base_total})')
+        check("截断不影响 total 与 stats（仍然全量）",
+              res_trunc["total"] == res["total"]
+              and res_trunc["stats"]["pointCount"] == res["stats"]["pointCount"]
+              and res_trunc["stats"]["trackCount"] == res["stats"]["trackCount"],
+              f'total {res_trunc["total"]} vs {res["total"]}')
+        check("截断时 items 之和 ≤ pointCount（保留的是点数最多的那些）",
+              sum(i["insidePointCount"] for i in res_trunc["items"]) <= res_trunc["stats"]["pointCount"],
+              f'{sum(i["insidePointCount"] for i in res_trunc["items"])} vs {res_trunc["stats"]["pointCount"]}')
 
     # 无时间窗基线的 info 行（base_total / base_points 已在 A 段开头定义）
     print(f"  info: total={base_total} pointCount={base_points} "
@@ -326,19 +438,22 @@ def main():
     print(f"  接口耗时 {ms:.0f} ms")
     check("状态 200", status == 200, status)
     if not (status == 200 and shaped_ok(res)):
-        # ⚠️ 非 200 就不再取 ring（否则 res["region"]["coordinates"] 会以 TypeError 崩掉）
-        check("B 段响应形状可继续断言（region 在）", False, f"status={status}")
+        # ⚠️ 非 200 / 非 JSON 错误体（res 是 str）都不能再取字段：
+        # res["region"]... 会 TypeError，而 res.get("total") 在 str 上会 **AttributeError**
+        # —— 所以下面这条断言也必须放进守卫里（审查 Minor 4 的 B 段部分）。
+        check("B 段响应形状可继续断言（region/total 在）", False,
+              f"status={status} res={res if isinstance(res, str) else type(res).__name__}")
         ring = []
         radii_m = []
     else:
         ring = res["region"]["coordinates"][0]
-    if ring:
-        check("region 顶点数 = 33", len(ring) == 33, len(ring))
-        check("region 首尾闭合", ring[0] == ring[-1])
-    truth = sql_int("SELECT count(*) FROM track WHERE ST_DWithin(geom::geography, "
-                    "ST_SetSRID(ST_MakePoint(121.50,31.29),4326)::geography, 1000)")
-    check("与球面 ST_DWithin 的结果一致（该点附近无超长边轨迹）",
-          res.get("total") == truth, f'{res.get("total")} vs {truth}')
+        if ring:
+            check("region 顶点数 = 33", len(ring) == 33, len(ring))
+            check("region 首尾闭合", ring[0] == ring[-1])
+        truth = sql_int("SELECT count(*) FROM track WHERE ST_DWithin(geom::geography, "
+                        "ST_SetSRID(ST_MakePoint(121.50,31.29),4326)::geography, 1000)")
+        check("与球面 ST_DWithin 的结果一致（该点附近无超长边轨迹）",
+              res["total"] == truth, f'{res["total"]} vs {truth}')
 
     # ⭐ 缓冲区"看到的圈 = 查的范围"：region 是后端拿去查询的那个几何（规格 11.4）。
     # 直接量它：把回显的每个顶点按等距圆柱近似换算成米，到圆心的距离应当恒等于 bufferM。
@@ -463,76 +578,8 @@ def main():
     print("=== F) 时间窗（重叠语义）===")
     status, res, _ = post(poly_body(BEIJING_RING, **{"from": WIN_FROM, "to": WIN_TO}))
     check("状态 200", status == 200, status)
-    # ⭐⭐⭐ 带窗的响应对应的**必须是带窗的真值**（审查抓到的 Important）：
-    # 原先这里误用了 A 段不带窗的 truth_map，只有当"每条命中轨迹的区域内点全部落在窗内"
-    # 时才碰巧成立 —— 当前数据恰好满足（审查者定点 SQL 实测：53 条里 win<>allp 的有 0 条），
-    # 所以它当时绿得**没有验证它声称的东西**，一旦重导数据出现跨窗轨迹就会假红。
-    # 现在统一用 WIN_MAP（带同一时间窗的逐条分组真值），并全文复用同一份（顺便省掉重复 psql）。
-    WIN_MAP = points_by_track(wkt, WIN_FROM, WIN_TO)
-    truth = sql_int(f"SELECT count(*) FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-                    f"AND start_time <= '{WIN_TO}' AND end_time >= '{WIN_FROM}'")
-    check("时间窗命中数与 SQL 一致（含端点重叠）", res["total"] == truth, f'{res["total"]} vs {truth}')
-    check("时间窗是收窄而不是放大", res["total"] <= len(truth_ids), res["total"])
-
-    truth_win_points = sql_int(
-        f"SELECT count(*) FROM track_point WHERE geom && ST_GeomFromText('{wkt}',4326) "
-        f"AND ST_Intersects(ST_GeomFromText('{wkt}',4326), geom) "
-        f"AND recorded_at BETWEEN '{WIN_FROM}' AND '{WIN_TO}'")
-    check("时间窗内 pointCount 等于 SQL 真值（点统计也吃时间窗）",
-          res["stats"]["pointCount"] == truth_win_points,
-          f'{res["stats"]["pointCount"]} vs {truth_win_points}')
-
-    # 关系断言，样本永远有效：时间窗是收窄的 → pointCount 必须严格小于不带窗时
-    print(f"  info: 带窗 pointCount={res['stats']['pointCount']} / 不带窗 {base_points}")
-    check("⭐ 带时间窗的 pointCount 严格小于不带时间窗（不是同一口径）",
-          res["stats"]["pointCount"] < base_points,
-          f'{res["stats"]["pointCount"]} vs {base_points}')
-
-    # ⭐ 硬要求 3 的核心断言：两者同源 → 必须严格自洽（规格 11.12 论点 3）
-    # ⚠️ brief 写的是 `sum(items[].insidePointCount) == stats.pointCount`，但那只在 items
-    # **未截断**时成立：本段命中数 > 默认 limit 时 items 会被截断，之和必然少被截掉那几条的点数。
-    # 所以这里用 SQL 全量逐条真值来断"同源自洽"，并显式记录截断事实 ——
-    # 断言不比 brief 弱，只是把"未截断"这个前提摆到明面上。
-    # ⚠️ 真值必须是 **WIN_MAP（带同一个时间窗）**，不是 A 段的 truth_map（不带窗）——
-    # 这是审查抓到的 Important：两者只在"每条命中轨迹的区域内点全落在窗内"时才相等。
-    wrong_ids = wrong_inside_ids(res["items"], WIN_MAP)
-    check("带窗时每条 item 的 insidePointCount 都等于【带窗】SQL 逐条分组值",
-          not wrong_ids, f"不一致 {wrong_ids[:5]}")
-
-    # ⭐ 口径必须是显式的：同时断言"不带窗的真值与带窗的真值在**当前数据上**恰好等价"，
-    # 把这个巧合**摆到明面上**（而不是让它偷偷撑着一条假绿的断言）。
-    # 一旦重导数据出现跨窗轨迹，这一条会变红并告诉你："现在两份真值不同了，别再混用"。
-    same_on_shared = all(truth_map[k] == WIN_MAP[k] for k in (set(truth_map) & set(WIN_MAP)))
-    print(f"  info: 不带窗真值 {len(truth_map)} 条轨迹 / 带窗真值 {len(WIN_MAP)} 条；"
-          f"共有键上两份是否等价 = {same_on_shared}；不带窗点数 {sum(truth_map.values())} / "
-          f"带窗点数 {sum(WIN_MAP.values())}")
-    check("两份真值在共有轨迹上等价（等价 → 说明当前数据没有跨窗轨迹，口径混用查不出来）",
-          same_on_shared, "共有键上不等价 —— 数据集里出现跨窗轨迹了，两份真值不能再混用")
-    check_stats_pointcount("⭐ pointCount == SQL 全量逐条分组求和（带时间窗，11.12 的自洽）",
-                           res, WIN_MAP)
-    if not res["truncated"]:
-        check("⭐ 未截断时 sum(items[].insidePointCount) == stats.pointCount（brief 原式）",
-              sum(i["insidePointCount"] for i in res["items"]) == res["stats"]["pointCount"],
-              f'{sum(i["insidePointCount"] for i in res["items"])} vs {res["stats"]["pointCount"]}')
-    else:
-        # 截断了：items 之和就必须**严格小于** pointCount，差额 = 被截掉那几条的点数
-        cut = sum(v for k, v in WIN_MAP.items() if k not in {i["trackId"] for i in res["items"]})
-        check("⭐ 截断时 sum(items[].insidePointCount) + 被截掉的点数 == stats.pointCount",
-              sum(i["insidePointCount"] for i in res["items"]) + cut == res["stats"]["pointCount"],
-              f'{sum(i["insidePointCount"] for i in res["items"])} + {cut} vs {res["stats"]["pointCount"]}')
-        print(f"  info: 本段命中 {res['total']} 条 > limit {res['params']['limit']}，"
-              f"items 截断到 {len(res['items'])} 条（被截掉 {cut} 点）"
-              f" —— 这就是 brief 那条断言不能直接用在这里的原因")
-    check("带窗时 total == stats.trackCount",
-          res["total"] == res["stats"]["trackCount"], f'{res["total"]} vs {res["stats"]["trackCount"]}')
-    check("带窗时 items 的 id 都在 SQL 命中集合里",
-          {i["trackId"] for i in res["items"]} <=
-          {int(x) for x in sql(
-              f"SELECT id FROM track WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}',4326)) "
-              f"AND start_time <= '{WIN_TO}' AND end_time >= '{WIN_FROM}'")})
-    check("params 回显了 from/to/limit",
-          res["params"]["from"] is not None and res["params"]["to"] is not None,
-          str(res["params"]))
+    # 整段（含非 200 守卫）在 check_f_section 里，见本文件上方定义
+    WIN_MAP = check_f_section(status, res, wkt, truth_map, truth_ids, base_points)
 
     # ⭐ 硬要求 3 的"缺陷回归钉子"：一个把所有命中轨迹都排除的时间窗
     # → total 必须是 0，而且 stats.pointCount 也必须是 0（修复前是 181211）

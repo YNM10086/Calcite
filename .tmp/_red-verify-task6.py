@@ -148,9 +148,19 @@ print(f"  info: 已从 {os.path.basename(TARGET)} 抽出 wrong_inside_ids"
       f"（源码行数 {len(open(TARGET, encoding='utf-8').read().splitlines())}）")
 check("目标脚本里存在 wrong_inside_ids（修复已落地）",
       "def wrong_inside_ids" in target_src)
-check("目标脚本 F 段调用的是 WIN_MAP（带窗真值）而不是 truth_map（不带窗）",
-      'wrong_inside_ids(res["items"], WIN_MAP)' in target_src
-      and 'wrong_inside_ids(res["items"], truth_map)' not in target_src)
+# ⚠️ F 段的断言现在住在 check_f_section 里（本轮为了让非 200 守卫干净地包住整段而抽出），
+# 所以静态检查要跟着看那里：真值必须是 WIN_MAP（带窗），不能是调用方传进来的 truth_map。
+f_body = target_src.split("def check_f_section", 1)[-1].split("\ndef ", 1)[0]
+check("check_f_section 里的真值是 WIN_MAP（带同一时间窗），不是 truth_map（不带窗）",
+      'wrong_inside_ids(res["items"], WIN_MAP)' in f_body
+      and 'wrong_inside_ids(res["items"], truth_map)' not in f_body)
+check("check_f_section 自己用带窗参数算 WIN_MAP",
+      "points_by_track(wkt, WIN_FROM, WIN_TO)" in f_body)
+check("check_f_section 开头有非 200 守卫（Minor 4 第 1 条）",
+      "if not (status == 200 and shaped_ok(res)):" in f_body)
+check("check_a_section 开头也有非 200 守卫（Minor 3 彻底版）",
+      "if not (status == 200 and shaped_ok(res)):"
+      in target_src.split("def check_a_section", 1)[-1].split("\ndef ", 1)[0])
 
 # ─────────────────────────────────────────────────────────────────────────────
 print("=== 1) 数据级：当前数据到底有没有跨窗轨迹（决定能不能用真数据验红）===")
@@ -243,6 +253,108 @@ print(f"  info: 用不带窗真值断带窗响应 → 不一致 {len(buggy_now)}
 check("修复前的写法在【当前数据】下也通过 —— 这就是'假绿'（它没在验证它声称的东西）",
       buggy_now == [],
       f"不一致 {buggy_now[:5]}（这反而说明当前数据已出现跨窗轨迹，必须修）")
+
+print()
+print("=== 4) Minor 4 验红：非 200 / 非 JSON 错误体时，守卫是否真的挡住（不再崩）===")
+# 变量：不给后端造错误，而是把 check_a_section / check_f_section 用**假响应**直接调一次。
+# 关键：这两个函数是**模块级**的（本轮刚从 main() 里抽出来），所以可以 import 后直接调。
+import importlib.util as _ilu
+
+spec = _ilu.spec_from_file_location("vwa_mod", TARGET)
+vwa = _ilu.module_from_spec(spec)
+spec.loader.exec_module(vwa)      # 有 __main__ 守卫，不会真的跑对拍
+check("能 import verify-within-api.py 而不触发整轮对拍（有 __main__ 守卫）", True)
+check("check_a_section / check_f_section 是模块级函数（可被定点测试）",
+      callable(getattr(vwa, "check_a_section", None))
+      and callable(getattr(vwa, "check_f_section", None)))
+
+before_ok, before_fail = vwa.ok, vwa.fail
+
+
+def guarded_call(fn, label, *args):
+    """调一个带守卫的段函数，返回 (是否抛异常, 该次新增的失败条数, 返回值的形状)。"""
+    o0, f0 = vwa.ok, vwa.fail
+    try:
+        out = fn(*args)
+        return None, vwa.fail - f0, out
+    except Exception as ex:                      # noqa: BLE001 —— 这里就是要抓"崩没崩"
+        return f"{type(ex).__name__}: {ex}", vwa.fail - f0, None
+
+
+# 三种"坏响应"，全都是真实可能出现的形状：
+#   ① 500 + JSON 错误体（有 message/detail，但没有 stats/items）
+#   ② 非 JSON 错误体（res 是 str）—— 这正是审查指出 res.get("total") 会 AttributeError 的那种
+#   ③ 200 但结构不全（缺 stats）
+BAD_500_JSON = (500, {"timestamp": "x", "status": 500, "error": "Internal Server Error",
+                      "message": "boom"}, None)
+BAD_STR = (502, "<html><body>Bad Gateway</body></html>", None)
+BAD_200_PARTIAL = (200, {"region": {"type": "Polygon"}, "total": 0}, None)
+
+WKT_BJ = "POLYGON((116.28 39.98,116.42 39.98,116.42 40.02,116.28 40.02,116.28 39.98))"
+for label, resp in [("500+JSON 错误体", BAD_500_JSON),
+                    ("非 JSON 错误体（str）", BAD_STR),
+                    ("200 但缺 stats/items", BAD_200_PARTIAL)]:
+    vwa.ok, vwa.fail = 0, 0          # 每次清零，n 就是这次调用记的失败条数
+    err, nfail, out = guarded_call(vwa.check_f_section, label,
+                                   resp[0], resp[1], WKT_BJ, {}, set(), 100)
+    check(f"F 段守卫：{label} 不抛异常（修复前会 KeyError/TypeError）",
+          err is None, f"抛了 {err}")
+    check(f"F 段守卫：{label} 记 1 条失败并返回 {{}}（可继续跑后面段落）",
+          nfail == 1 and out == {}, f"nfail={nfail} out={out!r}")
+
+    vwa.ok, vwa.fail = 0, 0
+    err, nfail, out = guarded_call(vwa.check_a_section, label,
+                                   resp[0], resp[1], WKT_BJ, 500)
+    check(f"A 段守卫：{label} 不抛异常",
+          err is None, f"抛了 {err}")
+    check(f"A 段守卫：{label} 记 1 条失败并返回 None（main 据此提前汇总退出）",
+          nfail == 1 and out is None, f"nfail={nfail} out={out!r}")
+
+# ⚠️ 特别针对审查点名的那一处：非 JSON 错误体时旧的 `res.get("total")` 会 AttributeError
+try:
+    BAD_STR[1].get("total")          # 这正是修复前的写法（res 是 str 时）
+    check("对照：str 上 .get() 确实会抛 AttributeError（说明旧写法有真实风险）", False,
+          "居然没抛")
+except AttributeError as ex:
+    check("对照：str 上 .get() 确实会抛 AttributeError（说明旧写法有真实风险）", True)
+    print(f"  info: 复现旧写法 → AttributeError: {ex}")
+
+
+# ⭐⭐ 最直接的"修好了"证明：把**修复前那段不带守卫的代码**原样跑一遍同样的坏响应。
+# 修复前 F 段体就是平铺的这几行（本轮之前就是这样），没有任何形状检查：
+def f_body_unguarded(res):
+    t = sql_count_unused = None                     # noqa: F841 —— 占位，模拟段内其它语句
+    truth = 53
+    a = res["total"] == truth                       # ← 修复前的第 1 处取值
+    b = res["stats"]["pointCount"]                  # ← 修复前的第 2 处取值
+    return a, b
+
+
+def f_body_guarded(res, status):
+    """修复后的写法：先守卫，形状不对就记一条失败并返回。"""
+    if not (status == 200 and vwa.shaped_ok(res)):
+        return "GUARDED"
+    return res["total"], res["stats"]["pointCount"]
+
+
+for label, (st, bad_res) in [("500+JSON", (500, BAD_500_JSON[1])),
+                             ("非 JSON str", (502, BAD_STR[1])),
+                             ("200 缺 stats", (200, BAD_200_PARTIAL[1]))]:
+    try:
+        f_body_unguarded(bad_res)
+        unguarded = "没崩（意外）"
+    except Exception as ex:                          # noqa: BLE001
+        unguarded = f"{type(ex).__name__}"
+    try:
+        guarded = f_body_guarded(bad_res, st)
+    except Exception as ex:                          # noqa: BLE001
+        guarded = f"崩了 {type(ex).__name__}"
+    print(f"  info: {label:14s} 修复前(无守卫) → {unguarded:16s} | 修复后(守卫) → {guarded}")
+    check(f"⭐ 前后对照：{label} 修复前会崩、修复后走守卫",
+          unguarded != "没崩（意外）" and guarded == "GUARDED",
+          f"unguarded={unguarded} guarded={guarded!r}")
+
+vwa.ok, vwa.fail = before_ok, before_fail     # 把假响应的记账清掉，不污染本脚本统计
 
 print()
 print(f"{ok} 项通过，{fail} 项失败")
