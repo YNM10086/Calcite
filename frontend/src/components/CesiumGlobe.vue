@@ -61,7 +61,10 @@ const props = defineProps({
   similarTracks: { type: Array, default: () => [] },
   // 圈选档：后端回显的区域几何（GeoJSON Polygon / MultiPolygon）。null = 不画
   region: { type: Object, default: null },
-  // 圈选档：命中轨迹，已经由 App 切成最多 DRAW_LIMIT 条 —— 地球不再自己截断
+  // 圈选档：命中轨迹，已经由 App 切成最多 DRAW_LIMIT 条 —— 地球不再自己截断。
+  // 元素形状：{ trackId, points: [{ lon, lat }, ...], selected?: true }
+  //   selected === true（App 在结果列表里点了某一条时传）→ 亮蓝 #7fd1ff、width 3，与其余橙线区分
+  //   —— 这就是规格 6.4.2 的"点某一条 → 把它补画上去并高亮"，缺了它这个语义在本组件里表达不出来
   withinTracks: { type: Array, default: () => [] },
   // 绘制模式：idle | rect | polygon | buffer。
   // 只认这个 prop、自己不切状态：ESC / 切档 / 取消三条退出路径都由 App 收口，
@@ -372,6 +375,12 @@ const PREVIEW_POLY_ID = 'draw-preview-polygon'
 const PREVIEW_COLOR = '#ffd166'    // 与"后端回显的区域轮廓"同色系：暗示预览和最终区域是一回事
 const CLOSE_PX = 12                // 屏幕像素：鼠标离起点这么近就算"回到起点"
 
+// 合法绘制模式的白名单。⚠️ 必须白名单，不能只挡假值：
+// mode = 'foo' / 'RECT' 这种"非空但不认识"的值一旦被当成"进入绘制"，enableRotate 就被关掉，
+// 而下面那个 handler 一个动作都不会注册（三个 if 全不成立）→ 左键旋转再也回不来，
+// 用户看到的就是"地图坏了"。不在这个列表里的一律按退出处理。
+const DRAW_MODES = ['rect', 'polygon', 'buffer']
+
 /** 统一开关「左键拖动旋转地球」。
  *  为什么包一层：所有恢复动作都走这一个出口，"漏掉某条退出路径"就只剩"忘了调用"一种可能 */
 function rotateEnabled(on) {
@@ -469,13 +478,13 @@ function clearDrawHandler() {
   clearDrawPreview()
 }
 
-/** 切换绘制模式。idle / 空值 / 地球还没就绪 → 只做收尾（关掉事件 + 恢复左键旋转） */
+/** 切换绘制模式。idle / 空值 / 非法模式 / 地球还没就绪 → 只做收尾（关掉事件 + 恢复左键旋转） */
 function setDrawingMode(mode) {
   // 先收尾旧的：既防重复注册，也保证切档（rect → polygon）时不会两套事件同时活着
   clearDrawHandler()
   const v = viewer.value
-  if (!v || v.isDestroyed() || !mode || mode === 'idle') {
-    rotateEnabled(true) // 出口 ①：退出 / 取消 / 切档 / 无效值（幂等，从没关过也没关系）
+  if (!v || v.isDestroyed() || !DRAW_MODES.includes(mode)) {
+    rotateEnabled(true) // 出口 ①：退出 / 取消 / 切档 / 非法模式（幂等，从没关过也没关系）
     return
   }
   rotateEnabled(false) // ⭐ 画之前先关掉左键旋转，否则拉框时地球跟着转
@@ -578,7 +587,11 @@ function drawRegion(region) {
   })
 }
 
-/** 命中轨迹：最多 DRAW_LIMIT 条（由调用方切好），橙色半透明，和"选中轨迹"的蓝色区分 */
+/** 命中轨迹：最多 DRAW_LIMIT 条（由调用方切好）。橙色半透明是"顺带命中"的底色，
+ *  和"选中轨迹"的蓝色区分；但元素里带 `selected: true` 的那条要反过来抢眼 ——
+ *  它是用户刚在列表里点过的那条，用亮蓝加粗（规格 6.4.2 的"补画并高亮"）。
+ *
+ *  ⚠️ 保持既有纪律：固定前缀 `within-track-` 先清后画、不进 clearTrack()（跨轨迹结果）。 */
 function drawWithinTracks(tracks) {
   const v = viewer.value
   if (!v || v.isDestroyed()) return
@@ -590,12 +603,16 @@ function drawWithinTracks(tracks) {
     if (!t.points || t.points.length < 2) continue // 少于 2 个点连不成线
     const positions = Cartesian3.fromDegreesArray(
       t.points.flatMap((p) => [p.lon, p.lat]))
+    // 只有明确的 true 才算选中（undefined / 别的值都当没选中），免得父组件传了个对象也亮起来
+    const selected = t.selected === true
     v.entities.add({
       id: `within-track-${t.trackId}`,
       polyline: {
         positions,
-        width: 2,
-        material: Color.fromCssColorString('#ff9f45').withAlpha(0.9),
+        // 选中的更粗更实：它要压过其它橙线，也要能被一眼从区域轮廓里认出来
+        width: selected ? 3 : 2,
+        material: Color.fromCssColorString(selected ? '#7fd1ff' : '#ff9f45')
+          .withAlpha(selected ? 1 : 0.9),
       },
     })
   }
