@@ -154,10 +154,27 @@ def main():
     # 所以相似度几乎不受影响（六组实测差 ≤ 0.6 个百分点）。
     # 断言必须打在这个性质上，不能打在 forwardPct 上（后者本来就对不上）。
     #
-    # ⚠️ 这里【必须】用一组真实存在的轨迹对 —— 曾经写死成 (20,39)，而 39 后来被
-    #    "数据编辑"功能删掉了（它的数据现在是 249），于是 SQL 里 count(*) 为 0 → **除以零**。
-    #    改成 PairsRef：既保留"跨采样密度"这个设计意图，又不会因为 id 变动而炸。
-    PAIRS = [(20, 249), (6, 18), (20, 35), (6, 16), (6, 24)]
+    # ⚠️ 这里【必须】用真实存在的轨迹对 —— 曾经写死成 (20,39)；39 被"数据编辑"删掉、
+    #    重导成 249；**249 又被验收脚本（verify-data-edit-api.py）删掉、重导成 652**
+    #    → SQL 里 count(*) 为 0 → **除以零**。（同一个坑踩了两次：上一轮"改成 PairsRef"
+    #    只改了这段注释，id 依然写在字面量里，所以照样会漂。）
+    #    ✅ 现在按 **external_id**（= 文件内容 SHA-256，删掉重导也不变）解析出当前 id，
+    #       从根上断掉"id 随重导漂移"这件事。
+    def id_by_external_id(ext):
+        """按内容指纹查当前 track id；查不到返回 None（调用方显式失败，不静默换一条）。"""
+        rows = psql_json("SELECT json_agg(row_to_json(t)) FROM ("
+                         f"SELECT id FROM track WHERE external_id = '{ext}') t;")
+        return rows[0]["id"] if rows and rows[0] else None
+
+    # 20081203151206 的内容指纹（历次 id：39 → 249 → 652）
+    PARTNER_EXT = "115c661a36fd8abd6137ec9d7a100f56"
+    partner = id_by_external_id(PARTNER_EXT)
+    if partner is None:
+        raise RuntimeError(
+            f"按 external_id={PARTNER_EXT}（20081203151206）找不到轨迹 —— 它被删了且没重导回来。"
+            "这条对拍不能用别的轨迹顶替（会改变『跨采样密度』这个前提）。")
+    print(f"  info: 对拍伙伴按内容指纹解析：external_id={PARTNER_EXT} → track {partner}")
+    PAIRS = [(20, partner), (6, 18), (20, 35), (6, 16), (6, 24)]
     # 逐个确认两端都还有点 —— 少了谁就明说，不要静默跳过（静默跳过 = 覆盖归零）
     for a, b in PAIRS:
         na = psql_json(f"SELECT json_agg(row_to_json(t)) FROM ("

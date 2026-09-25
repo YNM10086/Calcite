@@ -150,14 +150,19 @@ READ_DOM = r"""() => {
         noneText: pick('[data-testid="similarity-none-in-filter"]'),
         items: document.querySelectorAll('[data-testid="similarity-item"]').length,
         filter: sel ? String(sel.value) : null,
-        // 相似档的 h2 是面板的最后一个小标题（第一个是「轨迹列表」）
+        // 相似档的 h2 是面板的最后一个小标题（第一个是「轨迹列表」）。
+        // ⚠️ 这依赖的是「同一时刻只有一个档位的模板在渲染」（App.vue 里是 v-if / v-else-if 链），
+        //    **不是**「相似是最后一个档位」—— M3 加了第五档「圈选」后相似已不是最后一档，
+        //    但只有当前档的 h2 会进 DOM，所以取最后一个仍然拿到「相似」。
         title: h2s.length ? h2s[h2s.length - 1].textContent.replace(/\s+/g, ' ').trim() : '',
         panelRight: Math.round(pr.right),
         overflow: panel.scrollHeight - panel.clientHeight,
         spill: last ? Math.round(last.bottom - pr.bottom) : 0,
-        // 四个按钮挤爆的两种表现：横向溢出（scrollWidth）与换行（不在同一行）
+        // 五个按钮挤爆的两种表现：横向溢出（scrollWidth）与换行（不在同一行）
         modeOverflow: ms ? ms.scrollWidth - ms.clientWidth : null,
         modeCount: btns.length,
+        // 按钮文案：数量对不上时直接打印"实际有哪几档"，免得只知道"不是 5"
+        modeLabels: btns.map((b) => b.textContent.trim()),
         modeRowSpread: tops.length ? Math.round(Math.max(...tops) - Math.min(...tops)) : null,
     };
 }"""
@@ -240,21 +245,26 @@ async def main():
         dom = await read(page)
 
         visible = await page.is_visible('[data-testid="mode-similar"]')
-        check("1. 第四档「相似」按钮存在且可见", visible and dom["modeCount"] == 4,
-              f"按钮可见={visible}｜mode-switch 里按钮 {dom['modeCount']} 个")
+        # ⚠️ 档位数 4 → 5（M3 加了第五档「圈选」）。「相似」仍然是**第 4 档**，
+        #    但这个开关现在是五档，数量写死在这里 —— 以后再加档位时这条要跟着改。
+        check("1. 第 4 档「相似」按钮存在且可见（五档开关）",
+              visible and dom["modeCount"] == 5,
+              f"按钮可见={visible}｜mode-switch 里按钮 {dom['modeCount']} 个"
+              + (f"（{'/'.join(dom['modeLabels'])}）" if dom["modeLabels"] else ""))
 
         await page.click('[data-testid="mode-similar"]')
         await page.wait_for_timeout(2000)
         dom = await read(page)
 
-        # ⚠️ 判据同时要横向不溢出 + 四个按钮在同一行：
+        # ⚠️ 判据同时要横向不溢出 + 五个按钮在同一行：
         # 现在 .mode-switch 是 flex 不换行 + overflow:hidden，溢出了 scrollWidth 才变大；
         # 万一将来有人加 flex-wrap，"挤爆"会表现为**换行**而 scrollWidth 依然相等 ——
         # 那条判据就废了，所以同一行这件事必须单独量一次。
-        check("2. 四档按钮不折行（不横向溢出 + 四个在同一行）",
+        # 这条**与档位数无关**（量的是"所有按钮同一行 + 不溢出"），加档位后自动变成更强的判据。
+        check("2. 五档按钮不折行（不横向溢出 + 五个在同一行）",
               dom["modeOverflow"] is not None and dom["modeOverflow"] <= 0
               and dom["modeRowSpread"] is not None and dom["modeRowSpread"] <= 1,
-              f"scrollWidth-clientWidth={dom['modeOverflow']}｜四个按钮 top 差="
+              f"scrollWidth-clientWidth={dom['modeOverflow']}｜五个按钮 top 差="
               f"{dom['modeRowSpread']}px")
 
         need = dom["hasNeed"] and not dom["hasList"]
@@ -350,7 +360,7 @@ async def main():
             await page.set_viewport_size({"width": w, "height": h})
             await page.wait_for_timeout(1500)
             m = await read(page)
-            check(f"10.{w}x{h} 相似档面板不溢出且四档不折行",
+            check(f"10.{w}x{h} 相似档面板不溢出且五档不折行",
                   m["overflow"] <= 0 and m["spill"] <= 0
                   and m["modeOverflow"] is not None and m["modeOverflow"] <= 0
                   and m["modeRowSpread"] is not None and m["modeRowSpread"] <= 1,
