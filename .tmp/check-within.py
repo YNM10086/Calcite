@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""M3 Task 11（修复轮 4）—— 圈选（空间范围查询）的浏览器验收：Playwright 真实等待 + Pillow 像素统计。
+"""M3 Task 11（修复轮 5）—— 圈选（空间范围查询）的浏览器验收：Playwright 真实等待 + Pillow 像素统计。
 
 跑法（**必须提权 danger-full-access**，浏览器子进程靠管道通信；后端 8080 + 前端 5173 同时在跑）：
 
@@ -7,11 +7,67 @@
     $env:PYTHONIOENCODING='utf-8'
     & "E:\\python\\python_address\\python.exe" .tmp\\check-within.py
 
-四轮修复的净结果（历史细节见各段注释）：
+五轮修复的净结果（历史细节见各段注释）：
   轮 1：拉框前先点一条轨迹飞相机 / `draw-clear` 禁用兜底 / 用 `getRotateEnabled()` 拿硬证据
   轮 2：C 段旋转判据从"像素差"换成"视野包围盒位移" / `findViewer` 改走 `setupState.viewer`
   轮 3：5 个包围盒测量点先 `wait_view_stable()` 等相机停稳（消惯性余摆污染）
   轮 4：⭐ D 段"绘制中包围盒不动"**降级为信息输出**（理由见下）
+  轮 5：⭐ 补多边形交互 + ESC 出口；D/E 段的"有没有出结果"改成**数网络请求**（理由见下）
+
+== 修复轮 5：多边形交互补验 + ESC 出口 + "用请求计数代替看 DOM 文本" ==
+
+评审给的 4 条开放 finding，逐条：
+
+1) **多边形交互整条没验** —— 旧脚本只数了 `draw-polygon` 按钮存在（`count == 1`），
+   从没点过、没画过点、没双击过。于是 `RegionDrawer → App.onDrawPolygon → polygonGeometry
+   → queryWithin` 这条链**整条坏掉也全绿**。新增 **E2 段**：点「多边形」→ 在轨迹锚点位置
+   点 4 个点（围成边长 ~44px 的小四边形）→ 在最后一点 `dblclick` 闭合 → 断言
+   「`stat-tracks` 有数字 或 `within-empty` 有文字（至少一个有内容，不止元素存在）」
+   → 再断言 `draw-cancel` 消失。失败时打印 4 个坐标、闭合方式、GET/POST 计数。
+   ⚠️ Cesium 会把一次 `dblclick` 拆成**两次 LEFT_CLICK + 一次 LEFT_DOUBLE_CLICK**
+   （Build/CesiumUnminified/index.js 的 `handleMouseUp` 里 LEFT_CLICK 是 mouseup 时发的，
+   `handleDblClick` 另外发 LEFT_DOUBLE_CLICK），所以末尾会多一个**与第 4 点重合的顶点**。
+   实测确认无害：`SELECT ST_IsValid('POLYGON((…,第4点,第4点,第1点))')` → `t | Valid Geometry`
+   （PostGIS 3.6 / GEOS 容忍重复顶点）。
+
+2) **`:963-965` 是恒真断言**（本轮最要紧）—— 因果链：`draw-rect` 只 `emit('start')` →
+   `App.startDraw` **只改 `drawingMode`、不清 `withinStats`**；`WithinStats.vue` 的根 div
+   **没有 `v-if`**、`App.vue` 里也**无条件渲染**它。⇒ B 段查出来的 `stat-tracks`
+   **一直留在 DOM 里**，所以 D 段哪怕完全没被当成拉框（地球被转了），
+   `count('[data-testid="stat-tracks"]') == 1` 也照样成立 —— 这条 check 信息量为 0。
+   修法：**数网络请求**。新增 `http_log` + `req_count(method, url片段)`，
+   D 段拖拽前后各读一次 `POST /api/analysis/within` 的计数，断言**增加 ≥1**：
+   这既证明"这个手势被当成画区域并真的发了请求"，也顺带证明请求确实发出去了，
+   而且**完全不依赖 DOM 的新旧文本**（`wait_new_result` 的两个弱点就此不再影响判据：
+   空结果分支会看到**旧的** `within-empty` 就立即返回、`seen_busy` 靠 250ms 轮询
+   可能错过 ≈200–560ms 的"查询中"窗口 —— 它现在只用来取诊断文本）。
+   E2（多边形）与 E（缓冲区）段也做了同样的前后对比：**E 段原来那条
+   `within-stats==1 && (stat-tracks==1 || within-empty==1)` 在"E 段前的清除没点成、
+   D 段结果还留在 DOM 里"时会变成恒真**，所以把"新增请求 ≥1"折进同一条 check。
+   缓冲区单击若落在球外则不发请求 → 一眼能看出是哪一种。
+
+3) **实体投影探针是死代码 + 诊断误导** —— 旧代码写 `typeof Cesium !== 'undefined'`，
+   而页面里**没有全局 `Cesium`**（`index.html` 只加载 `main.js`，组件用具名 import，
+   vite 只 `define` 了 `CESIUM_BASE_URL`）→ 恒为 false；即便有，下一句
+   `s.entities.values` 也不成立（`entities` 是 **Viewer** 的属性，**Scene 没有**）。
+   于是投影点恒为空 → 拉框锚点永远回退画布中心，却打印"北京/上海 屏幕坐标：取不到
+   （**Viewer 未就绪**）"—— Viewer 其实是好的，这句把人带偏。修法：
+   · 实体取 `v.entities.values`（`findViewer()` 返回的 Viewer，本来就已经能拿到）；
+   · 投影用 **`scene.cartesianToCanvasCoordinates(position)`**（Cesium 1.145 的
+     `Scene` 自带方法，见 `node_modules/cesium/Source/Cesium.d.ts:45150`），
+     不再需要全局 `Cesium`；经纬度 → Cartesian3 走
+     `scene.globe.ellipsoid.cartographicToCartesian({longitude, latitude, height})`
+     （Ellipsoid 这个方法是**鸭子类型**的，普通对象即可，已核 `CesiumUnminified/index.js:23890`）；
+   · 实在取不到就**明确降级**：打印「实体投影不可用（原因：…），拉框锚点使用画布中心
+     （设计如此）」，**不再留一条"永远为 0 却看起来像环境没就绪"的诊断**。
+   探针新增 `proj_how`（投影走的是哪条能力），拿不到 Viewer / 投影函数 / 转换函数
+   会分别给出**具体原因**。
+
+4) **ESC 取消**（规格 9.5 明列的出口，旧脚本从不按 ESC）：新增 **E3 段**：
+   进入拉框模式（此时 `draw-cancel` 应在、`getRotateEnabled()===false`）→ 按 `Escape`
+   → 断言 `draw-cancel` 消失 **且** `getRotateEnabled()` 回到 `true`。
+   （`App.vue` 的 `onKeydown` 挂在 `window` 上，`Escape` 时把 `drawingMode` 收回 `idle`，
+   地球的 watcher 随之 `rotateEnabled(true)`。）
 
 == 修复轮 4：为什么 D 段那条不再是断言 ==
 
@@ -29,7 +85,10 @@
 非绘制态拖拽实测 46%，仍然有效且保留）。
 「绘制中左键不旋转」现在由两条可靠证据承担：
   ① `进入绘制模式后 getRotateEnabled() === false`（**直接**证据）
-  ② `绘制中的拖拽被当成拉框（产生了新查询结果）`（**行为**证据）
+  ② `绘制中的拖拽被当成拉框（发出了新的 within 请求）`（**行为**证据）
+     —— ⚠️ 修复轮 5 把 ② 从"看 DOM 里有没有 stat-tracks"换成**数网络请求**：
+     旧写法是**恒真**的（`App.startDraw` 不清 `withinStats`、`WithinStats` 根 div 没有 v-if），
+     详见本文件顶部"修复轮 5"一节。
 ⚠️ 以后若看到"绘制中包围盒动了"，**不要去改 CesiumGlobe** —— 先读 D 段那段注释。
    📌 这条已经被**正式记为已知限制**：设计文档 `docs/superpowers/specs/2026-09-25-m3-within-design.md`
    第 10 节「已知限制」里的 **"极快甩动绘制后地球会轻微跳一下"**（含同一批实测数据与"不修"的理由）。
@@ -103,6 +162,7 @@ notes = []         # 关键诊断值（报告要靠它判断失败原因）
 errors = []        # pageerror + console.error 合起来（"控制台零报错"用它）
 page_errors = []   # 只记 pageerror，单独看（切档断言用它）
 console_errors = []
+http_log = []      # 页面发出的每个请求 [(method, url)]（修复轮 5：数圈选请求，见 req_count）
 
 
 # ---------------------------------------------------------------- 断言基础设施
@@ -170,6 +230,62 @@ def click_clear(page):
     except Exception as e:                      # noqa: BLE001
         note(f"点清除按钮失败：{type(e).__name__}: {e}")
         return False
+
+
+# ---------------------------------------------------------------- 请求计数（修复轮 5）
+# ⭐ 为什么不看 DOM 文本：`App.startDraw()` 只改 `drawingMode`、**不清 `withinStats`**，
+#    而 `WithinStats.vue` 的根 div **没有 v-if**、`App.vue` 里也**无条件渲染**它 ——
+#    于是"上一次查询的 stat-tracks"会一直留在 DOM 里。
+#    后果：D 段拖拽**哪怕完全没被当成拉框**（地球被转了），
+#    `count('[data-testid="stat-tracks"]') == 1` 也照样成立 → 那条 check 信息量为 0（恒真）。
+#    所以改用**网络请求计数**：`POST /api/analysis/within` 的次数增加 ≥1，
+#    既证明"这个手势被当成画区域、并真的发出了请求"，也不依赖任何 DOM 的新旧文本。
+def on_request(req):
+    """`page.on("request")` 的回调：只记账，**绝不抛异常**（事件回调里抛异常会打断验收）"""
+    try:
+        http_log.append((req.method, req.url))
+    except Exception:                           # noqa: BLE001
+        pass
+
+
+def req_count(method=None, contains=None):
+    """页面发出过多少个请求，可按方法（GET/POST）和 URL 片段过滤。
+
+    `req_count("POST", "/api/analysis/within")` = 圈选查询一共发出去几次。
+    """
+    n = 0
+    for m, u in http_log:
+        if method is not None and m != method:
+            continue
+        if contains is not None and contains not in u:
+            continue
+        n += 1
+    return n
+
+
+def within_post_count():
+    """圈选查询（`POST /api/analysis/within`）的累计次数 —— 判据用的就是它"""
+    return req_count("POST", "/api/analysis/within")
+
+
+def req_summary():
+    """诊断一行：GET / POST 各多少次（多边形/缓冲区段失败时先看它）"""
+    return (f"GET×{req_count('GET')} POST×{req_count('POST')}"
+            f"（其中圈选 POST×{within_post_count()}）")
+
+
+def wait_new_within_request(page, before, timeout_ms=10000, step=200):
+    """等页面又发出了一次 `POST /api/analysis/within`。返回 (是否等到, 等了毫秒数)。
+
+    这是"这一次手势真的被当成画区域了"的**直接证据**，比读 DOM 文本可靠：
+    DOM 里的统计卡是上一次查询留下的，新旧文本又可能一模一样（命中数相同）。
+    """
+    t0 = time.time()
+    while (time.time() - t0) * 1000 < timeout_ms:
+        if within_post_count() > before:
+            return True, int((time.time() - t0) * 1000)
+        page.wait_for_timeout(step)
+    return False, int((time.time() - t0) * 1000)
 
 
 def count_color(img, rgb, tol=12, x_from=0):
@@ -284,6 +400,37 @@ function findViewer(inst) {
   }
   return { viewer: null, path: null, tried: tried };
 }
+// ⭐ 修复轮 5：投影**不能**再依赖全局 `Cesium` —— 页面里根本没有它
+//   （index.html 只加载 main.js，组件用具名 import，vite 只 define 了 CESIUM_BASE_URL），
+//   旧写法 `typeof Cesium !== 'undefined'` 恒为 false，于是"实体投影点"永远是 0、
+//   拉框锚点永远回退画布中心，却打印"Viewer 未就绪"（误导：Viewer 是好的）。
+//   改用 Cesium 1.145 里**确实存在**的两件事：
+//     ① `viewer.entities.values` —— `entities` 是 **Viewer** 的属性（Scene 没有！）
+//     ② `scene.cartesianToCanvasCoordinates(position)` —— **Scene 自带**的投影方法
+//        （node_modules/cesium/Source/Cesium.d.ts:45150，class Scene 的成员；
+//         不需要 Cesium.SceneTransforms 这个静态命名空间）
+function sceneProjector(v) {
+  try {
+    const s = v && v.scene;
+    if (!s) return null;
+    if (typeof s.cartesianToCanvasCoordinates === 'function') {
+      return { how: 'scene.cartesianToCanvasCoordinates',
+               f: function (p) { return s.cartesianToCanvasCoordinates(p); } };
+    }
+  } catch (e) {}
+  return null;
+}
+// 经纬度（度）→ Cartesian3：同样不依赖全局 Cesium —— Ellipsoid 实例上的
+// cartographicToCartesian 接受**普通对象** {longitude, latitude, height}（弧度，鸭子类型，
+// 见 Build/CesiumUnminified/index.js:23890 的 geodeticSurfaceNormalCartographic）。
+function lonLatToCartesian(v, lon, lat) {
+  try {
+    const ell = v && v.scene && v.scene.globe && v.scene.globe.ellipsoid;
+    if (!ell || typeof ell.cartographicToCartesian !== 'function') return null;
+    const R = Math.PI / 180;
+    return ell.cartographicToCartesian({ longitude: lon * R, latitude: lat * R, height: 0 });
+  } catch (e) { return null; }
+}
 """
 
 
@@ -303,7 +450,8 @@ def globe_probe(page):
             const inst = findGlobeInst();
             const g = globeApi(inst);
             const out = { have_globe: !!inst, has_api: !!g, rotate: null, keys: [],
-                          viewer_path: null, viewer_tried: [], cam: null, bbox: null, points: [] };
+                          viewer_path: null, viewer_tried: [], cam: null, bbox: null,
+                          proj_how: null, points: [] };
             if (!inst) return out;
             if (g) {
               out.keys = Object.keys(g);
@@ -325,18 +473,21 @@ def globe_probe(page):
               const c = v.camera.positionCartographic;
               if (c && isFinite(c.height)) out.cam = { lon: c.longitude, lat: c.latitude, h: c.height };
             } catch (e) {}
+            // ⭐ 修复轮 5：实体从 **Viewer** 上取（v.entities），投影用 **Scene 自带方法**。
+            //    旧代码用全局 Cesium.SceneTransforms + s.entities.values（Scene 没有 entities）
+            //    → 恒为死代码，投影点永远 0。拿不到就返回 proj_how=null，由调用方明确降级。
+            const proj = sceneProjector(v);
+            out.proj_how = proj ? proj.how : null;
+            if (!proj) return out;
             try {
-              const ST = (typeof Cesium !== 'undefined') ? Cesium.SceneTransforms : null;
-              const f = ST && (ST.worldToWindowCoordinates || ST.wgs84ToWindowCoordinates);
-              if (!f) return out;
               const rect = s.canvas.getBoundingClientRect();
-              const arr = s.entities.values;
+              const arr = (v.entities && v.entities.values) ? v.entities.values : [];
               for (let i = 0; i < arr.length && out.points.length < 200; i++) {
                 const e = arr[i];
-                if (!e.position) continue;
+                if (!e || !e.position || typeof e.position.getValue !== 'function') continue;
                 const t = e.position.getValue(v.clock.currentTime);
                 if (!t) continue;
-                const w = f(s, t);
+                const w = proj.f(t);
                 if (!w) continue;
                 const x = w.x + rect.left, y = w.y + rect.top;
                 if (x >= 0 && x <= rect.width && y >= 0 && y <= rect.height) {
@@ -349,7 +500,8 @@ def globe_probe(page):
     except Exception as e:                      # noqa: BLE001
         note(f"页面探针失败：{type(e).__name__}: {e}")
         return {"have_globe": False, "has_api": False, "rotate": None, "keys": [],
-                "viewer_path": None, "viewer_tried": [], "cam": None, "bbox": None, "points": []}
+                "viewer_path": None, "viewer_tried": [], "cam": None, "bbox": None,
+                "proj_how": None, "points": []}
 
 
 def globe_rotate(page):
@@ -465,22 +617,31 @@ def wait_view_stable(page, label, timeout_ms=STABLE_TIMEOUT_MS):
 
 
 def _screen_of(page, lon, lat):
-    """（尽力而为）经纬度 → 窗口坐标。拿不到 Viewer 时返回 None（只用于诊断输出）。"""
+    """（尽力而为）经纬度 → 窗口坐标，只用于诊断输出。
+
+    ⭐ 修复轮 5：**不再依赖全局 `Cesium`**（页面里没有它，旧写法恒为 false → 永远"取不到"，
+    却打印"Viewer 未就绪"，把人带偏：Viewer 其实是好的）。
+    返回 `{'ok': True, x, y, w, h, on}` 或 `{'ok': False, 'why': '具体原因'}`；
+    页面内 JS 整个失败时返回 None。
+    """
     try:
         return page.evaluate(r"""([lon, lat]) => {
             %s
             const inst = findGlobeInst();
             const found = findViewer(inst);
             const v = found && found.viewer;
-            if (!v) return null;
-            const s = v.scene;
-            const ST = (typeof Cesium !== 'undefined') ? Cesium.SceneTransforms : null;
-            const f = ST && (ST.worldToWindowCoordinates || ST.wgs84ToWindowCoordinates);
-            if (!f) return null;
-            const rect = s.canvas.getBoundingClientRect();
-            const win = f(s, Cesium.Cartesian3.fromDegrees(lon, lat, 0));
-            if (!win) return null;
-            return { x: win.x + rect.left, y: win.y + rect.top,
+            if (!v) return { ok: false, why: '拿不到 Viewer（试过的路径 '
+                              + JSON.stringify((found && found.tried) || []) + '）' };
+            const proj = sceneProjector(v);
+            if (!proj) return { ok: false,
+              why: '拿不到 Scene 的投影函数 scene.cartesianToCanvasCoordinates' };
+            const cart = lonLatToCartesian(v, lon, lat);
+            if (!cart) return { ok: false,
+              why: '拿不到 scene.globe.ellipsoid.cartographicToCartesian' };
+            const rect = v.scene.canvas.getBoundingClientRect();
+            const win = proj.f(cart);
+            if (!win) return { ok: false, why: '这一点的投影结果为空（在地球背面 / 球心附近）' };
+            return { ok: true, x: win.x + rect.left, y: win.y + rect.top,
                      w: rect.width, h: rect.height,
                      on: win.x >= 0 && win.x <= rect.width && win.y >= 0 && win.y <= rect.height };
         }""" % GL_JS, [lon, lat])
@@ -606,6 +767,8 @@ def main():
         page.on("pageerror", lambda e: (page_errors.append(str(e)), errors.append(str(e))))
         page.on("console", lambda m: (console_errors.append(m.text), errors.append(m.text))
                 if m.type == "error" else None)
+        # ⭐ 修复轮 5：数圈选请求（判据用，见 req_count 的注释）
+        page.on("request", on_request)
 
         page.goto(URL, wait_until="load")
 
@@ -651,10 +814,20 @@ def main():
                  "实体投影点会为空（拉框回退画布中心）；"
                  "「点列表后相机飞近了」与「绘制中不旋转（相机位移）」两条会 skip。"
                  "视野包围盒不依赖 Viewer，仍可用（getViewBbox）")
+        # ⭐ 修复轮 5：投影可用性必须**说清楚走的是哪条能力**，不能再打
+        #    "取不到（Viewer 未就绪）" 这种"看起来像环境没就绪"的误导文案。
+        if pr0["proj_how"]:
+            note(f"实体投影可用：{pr0['proj_how']}"
+                 "（页面里没有全局 Cesium → 实体取 v.entities.values、投影用 Scene 自带方法）")
+        else:
+            note("实体投影不可用（原因：拿不到 Scene 的投影函数 "
+                 "scene.cartesianToCanvasCoordinates），拉框锚点使用画布中心（设计如此）")
         for name, lon, lat in (("北京", 116.40, 39.90), ("上海", 121.47, 31.23)):
             s = _screen_of(page, lon, lat)
             if s is None:
-                note(f"{name} 屏幕坐标：取不到（Viewer 未就绪）")
+                note(f"{name} 屏幕坐标：探针整个失败（页面内 JS 抛异常，见上面的页面探针日志）")
+            elif not s.get("ok"):
+                note(f"{name} 屏幕坐标不可用（{s.get('why')}）")
             else:
                 note(f"{name} 屏幕坐标：x={s['x']:.0f} y={s['y']:.0f} "
                      f"画布 {s['w']:.0f}x{s['h']:.0f} 视野内={s['on']}")
@@ -707,7 +880,8 @@ def main():
                 cam_after_fly = pr_fly["cam"]
                 note(f"点第一条轨迹后：相机 {_fmt_cam(cam_after_fly)}；"
                      f"视野 {_bbox_txt(pr_fly['bbox'])}；"
-                     f"实体投影点 {len(pr_fly['points'])} 个")
+                     f"实体投影点 {len(pr_fly['points'])} 个"
+                     f"（投影方式 {pr_fly['proj_how'] or '不可用'}）")
                 if cam_before_fly and cam_after_fly:
                     h0, h1 = cam_before_fly["h"], cam_after_fly["h"]
                     check("点列表后相机确实飞近了（不是停在 12000 公里全球视野）",
@@ -723,6 +897,10 @@ def main():
             if anchor is None:
                 anchor = center_rect(canvas)
                 note("⚠️ 没有可用的实体投影点 → 回退「画布中心」拉框。"
+                     f"（投影方式 proj_how={pr_fly['proj_how']}；"
+                     "为 None 时看上面「实体投影不可用（原因…）」那行——"
+                     "**不要**再怀疑 Viewer：页面里没有全局 Cesium，旧版那句"
+                     "「Viewer 未就绪」是错的）。"
                      "若命中 0 条，先看上面「相机/视野/实体投影点」三行与 .tmp/shot-within.png")
             x0, y0, x1, y1 = anchor
             note(f"B 段拉框：( {x0},{y0} ) → ( {x1},{y1} ) 大小 {x1 - x0}x{y1 - y0}px")
@@ -876,6 +1054,9 @@ def main():
             dx0, dy0 = d_rect[0], d_rect[1]
             dx1, dy1 = d_rect[2], d_rect[3]
             note(f"D 段拉框：( {dx0},{dy0} ) → ( {dx1},{dy1} )")
+            # ⭐ 修复轮 5：这一次拖拽"有没有被当成拉框"用**请求计数**判（见下面那条 check）——
+            #    所以要在拖拽**之前**先读一次基线。
+            req_before_d = within_post_count()
             drag(page, dx0, dy0, dx1, dy1, steps=10)
             page.wait_for_timeout(500)
             # ⭐ 修复轮 3 采集点⑤：D 段拖拽后同样等停稳（理论上没有余摆，等一下更可比）
@@ -904,8 +1085,10 @@ def main():
             # ⚠️ 以后若看到"绘制中包围盒动了"，**不要**去改 CesiumGlobe —— 先读这段注释。
             # 「绘制中左键不旋转」现在由两条可靠证据承担（都在下面/上面，且都通过）：
             #   ① `进入绘制模式后 getRotateEnabled() === false`（**直接**证据，开关本身）
-            #   ② `绘制中的拖拽被当成拉框（产生了新查询结果）`（**行为**证据：这个手势
-            #      被拿去画框了、并真的发出了查询，而不是去转地球）
+            #   ② `绘制中的拖拽被当成拉框（发出了新的 within 请求）`（**行为**证据：
+            #      这个手势被拿去画区域并**真的发了一次新请求**，而不是去转地球）
+            #      —— 修复轮 5 把这条从"看 DOM 里有没有 stat-tracks"换成了数请求
+            #      （旧写法恒真，理由见下面那条 check 上方的长注释）。
             d_shift = bbox_shift_ratio(bbox_d_before, bbox_d_after)
             D_MAX_SHIFT = 0.03                       # 历史参考阈值（已不参与判定）
             if d_shift is None:
@@ -948,23 +1131,43 @@ def main():
 
             # ⚠️ 等"新"结果：B 段那张统计卡还在，不比对旧文本就会假绿
             state_d, txt_d = wait_new_result(page, prev_text=prev_tracks_text)
+            # ⭐ 修复轮 5：等这一次的请求真的发出去（在 wait_new_result 之前它多半已经发了，
+            #    这里只是个兜底等待，让下面的计数读数稳定）
+            got_req_d, req_waited_d = wait_new_within_request(page, req_before_d, timeout_ms=10000)
+            req_after_d = within_post_count()
             page.wait_for_timeout(600)         # 让区域轮廓/轨迹线画上去，像素比较才有意义
             page.screenshot(path=SHOT)
             img_b = Image.open(SHOT).convert("RGB")
 
             note(f"D 段查询收尾状态 = {state_d}，stat-tracks 文本 = {txt_d!r}"
                  f"（上一次 = {prev_tracks_text!r}）")
+            note(f"D 段圈选请求计数：拖拽前 {req_before_d} → 拖拽后 {req_after_d}"
+                 f"（新增 {req_after_d - req_before_d}，等新请求 {req_waited_d}ms/{got_req_d}）；"
+                 f"{req_summary()}")
             if state_d == "timeout":
                 note("⚠️ D 段等不到结果：最可能是拖拽两端没落在球面/当前视野内的数据上 → "
                      "看上面「D 段拉框」坐标与「C 段拖拽后 视野」，"
                      "也可能是请求失败（看 within-error）")
 
-            # 判据 1（任务书要求的直接判据）：这次拖动被当成"拉框"了 → 才会产生查询结果
-            check("绘制中的拖拽被当成拉框（产生了查询结果）",
-                  count_of(page, '[data-testid="stat-tracks"]') == 1
-                  or count_of(page, '[data-testid="within-empty"]') == 1,
-                  f"状态={state_d}：拖拽后既没有统计数字也没有空结果提示 —— "
-                  "要么事件没被当成拉框（地球被转了），要么请求失败")
+            # ⭐ 判据 1：这次拖动被当成"拉框"了 → 才会**真的发出**一次新的圈选查询。
+            #
+            # ⚠️⚠️ 修复轮 5 换判据的原因（评审 finding 2，本轮最要紧的一条）：
+            #   旧写法 `count('[stat-tracks]') == 1 or count('[within-empty]') == 1` 是**恒真**的：
+            #   `App.startDraw()` 只改 drawingMode、**不清 withinStats**，而 `WithinStats.vue` 的
+            #   根 div 没有 v-if、`App.vue` 里无条件渲染 —— B 段查出来的 stat-tracks **一直留在
+            #   DOM 里**。于是 D 段哪怕完全没被当成拉框（地球被转了），这条也照样"通过"，
+            #   信息量为 0（它正是上一轮用来支撑"D 段降级"的行为证据，其实不成立）。
+            #   现在改成数 `POST /api/analysis/within`：**增加 ≥1** 才说明这个手势被拿去画区域
+            #   并真的发了请求。它不依赖 DOM 文本的新旧，也不受 wait_new_result 两个弱点影响
+            #   （"空结果分支看到旧的 within-empty 就返回"、"seen_busy 250ms 轮询可能错过
+            #   ≈200–560ms 的查询中窗口"）——那两个弱点现在只影响诊断文本，不影响判据。
+            n_new_req_d = req_after_d - req_before_d
+            check("绘制中的拖拽被当成拉框（发出了新的 within 请求）",
+                  n_new_req_d >= 1,
+                  f"拖拽前后 POST /api/analysis/within 计数 {req_before_d} → {req_after_d}"
+                  f"（新增 {n_new_req_d}，期望 ≥1）；DOM 收尾状态={state_d} 文本={txt_d!r}。"
+                  "新增 0 = 这个手势**没有**被当成拉框（地球被转了 / 拖拽两端没落在球面上 "
+                  "→ CesiumGlobe 故意不 emit），或请求失败")
 
             # 判据 2（参考值，不参与断言）：同一手势在 C 段（非绘制态）转了很多，
             # 在 D 段（绘制中）应当几乎不动 —— "画上去的框和橙色轨迹"会带来一点变化，
@@ -1000,19 +1203,135 @@ def main():
             # 单击一个点 = 以该点为中心、当前半径 1000m 直接查（不必再点「查询」按钮）
             bcx, bcy = canvas["x"] + canvas["width"] * 0.60, canvas["y"] + canvas["height"] * 0.50
             note(f"缓冲区中心点：( {bcx:.0f},{bcy:.0f} )，半径 1000m")
+            # ⭐ 修复轮 5：这条也补上"请求计数"（与 D 段同款判据）。
+            #    原因：`within-stats==1 && (stat-tracks==1 || within-empty==1)` 在
+            #    "E 段前那次清除没点成、D 段结果还留在 DOM 里"时**会变成恒真**；
+            #    折进"新增请求 ≥1"之后，只有真的发了圈选查询才可能通过。
+            req_before_e = within_post_count()
             page.mouse.click(bcx, bcy)
             page.wait_for_timeout(600)
+            got_req_e, req_waited_e = wait_new_within_request(page, req_before_e, timeout_ms=10000)
+            req_after_e = within_post_count()
             state_e, txt_e = wait_result(page)
             note(f"E 段查询收尾状态 = {state_e}，stat-tracks 文本 = {txt_e!r}")
+            note(f"E 段圈选请求计数：单击前 {req_before_e} → 单击后 {req_after_e}"
+                 f"（新增 {req_after_e - req_before_e}，等新请求 {req_waited_e}ms/{got_req_e}）；"
+                 f"{req_summary()}")
 
             check("缓冲区查询出结果或明确为空（统计卡 / 空提示至少有一个）",
-                  count_of(page, '[data-testid="within-stats"]') == 1
+                  (req_after_e - req_before_e) >= 1
+                  and count_of(page, '[data-testid="within-stats"]') == 1
                   and (count_of(page, '[data-testid="stat-tracks"]') == 1
                        or count_of(page, '[data-testid="within-empty"]') == 1),
-                  f"状态={state_e} 文本={txt_e!r}")
+                  f"状态={state_e} 文本={txt_e!r}；POST /api/analysis/within 计数 "
+                  f"{req_before_e} → {req_after_e}（新增 {req_after_e - req_before_e}，期望 ≥1）"
+                  "；新增 0 = 这次单击没被当成缓冲区中心（点在球外 / 没进绘制模式）")
             err_e = try_text(page, '[data-testid="within-error"]')
             check("缓冲区查询没有报错（within-error 不存在）",
                   count_of(page, '[data-testid="within-error"]') == 0, err_e or "有 within-error")
+
+        # ------------------------------------------------ E2) 多边形：4 个点 + 双击闭合
+        # ⭐ 修复轮 5 新增（规格 9.5 第 3 条，旧脚本只数了「多边形」按钮存在、从没点过）：
+        #    这条链是 `RegionDrawer → App.onDrawPolygon → polygonGeometry → queryWithin`，
+        #    "自交多边形必须 400"这条用户最会碰的路径就在它上面 —— 整条坏掉旧脚本也全绿。
+        print("=== E2) 多边形：点 4 个点 + 双击闭合 ===")
+        if count_of(page, '[data-testid="draw-polygon"]') != 1:
+            skip("E2) 多边形断言", "draw-polygon 按钮不存在")
+        else:
+            if not click_clear(page):
+                note("E2 段前那次「清除」没点成 —— 若下面那条红，先看这里"
+                     "（旧结果留在 DOM 里会被当成新结果）")
+            page.wait_for_timeout(500)
+            pre_stat_p = count_of(page, '[data-testid="stat-tracks"]')
+            pre_empty_p = count_of(page, '[data-testid="within-empty"]')
+            note(f"多边形绘制前：stat-tracks={pre_stat_p}、within-empty={pre_empty_p}"
+                 "（期望都是 0）")
+            # 用**已有的锚点逻辑**（B 段从实体投影点挑出来的框，四角都在视口内、在面板右侧）
+            # 的中心当四边形中心：这样 4 个点一定落在轨迹上、也一定在球面上。
+            pcx = (b_anchor[0] + b_anchor[2]) / 2.0
+            pcy = (b_anchor[1] + b_anchor[3]) / 2.0
+            quad = [(pcx - 22, pcy - 22), (pcx + 22, pcy - 22),
+                    (pcx + 22, pcy + 22), (pcx - 22, pcy + 22)]
+            req_before_p = within_post_count()
+            page.click('[data-testid="draw-polygon"]')
+            page.wait_for_timeout(300)
+            rot_poly_in = globe_rotate(page)
+            n_cancel_p_in = count_of(page, '[data-testid="draw-cancel"]')
+            note(f"进多边形绘制态：rotate={rot_poly_in}（期望 false）、"
+                 f"draw-cancel={n_cancel_p_in}（期望 1）")
+            for i, (qx, qy) in enumerate(quad):
+                page.mouse.click(qx, qy)
+                page.wait_for_timeout(120)
+                note(f"多边形第 {i + 1} 个点：( {qx:.0f},{qy:.0f} )")
+            # 双击闭合。⚠️ Cesium 会把一次 dblclick 拆成**两次 LEFT_CLICK + 一次
+            # LEFT_DOUBLE_CLICK**（LEFT_CLICK 在 mouseup 里发、dblclick 另发），所以末尾会多一个
+            # **与第 4 点重合**的顶点。实测无害：PostGIS 3.6 对重复顶点
+            # `ST_IsValid` 仍返回 t/Valid Geometry（本轮已用 psql 实测确认）。
+            page.mouse.dblclick(quad[3][0], quad[3][1])
+            page.wait_for_timeout(600)
+            got_req_p, req_waited_p = wait_new_within_request(page, req_before_p, timeout_ms=10000)
+            req_after_p = within_post_count()
+            state_p, txt_p = wait_result(page)
+            txt_stat_p = try_text(page, '[data-testid="stat-tracks"]')
+            txt_empty_p = try_text(page, '[data-testid="within-empty"]')
+            txt_err_p = try_text(page, '[data-testid="within-error"]')
+            has_stat_p = count_of(page, '[data-testid="stat-tracks"]') == 1 \
+                and txt_stat_p not in ("", "—")
+            has_empty_p = count_of(page, '[data-testid="within-empty"]') == 1 and txt_empty_p != ""
+            note(f"E2 段查询收尾状态 = {state_p}；stat-tracks={txt_stat_p!r}；"
+                 f"within-empty={txt_empty_p!r}；within-error={txt_err_p!r}")
+            note(f"E2 段圈选请求计数：绘制前 {req_before_p} → 双击闭合后 {req_after_p}"
+                 f"（新增 {req_after_p - req_before_p}，等新请求 {req_waited_p}ms/{got_req_p}）；"
+                 f"{req_summary()}")
+            # 断言 1：**至少一个有内容**（不是"元素存在"）——stat-tracks 是数字（0 也是数字，
+            # 代表"这个区域里没有轨迹穿过"），或 within-empty 有提示文字。
+            check("多边形（4 点 + 双击闭合）查出了结果（stat-tracks 数字 或 within-empty 至少一个有内容）",
+                  (req_after_p - req_before_p) >= 1 and (has_stat_p or has_empty_p),
+                  f"状态={state_p}；stat-tracks={txt_stat_p!r}；within-empty={txt_empty_p!r}；"
+                  f"within-error={txt_err_p!r}；"
+                  f"4 个点={[(round(a), round(b)) for a, b in quad]}；"
+                  f"闭合方式=在第 4 点 ({quad[3][0]:.0f},{quad[3][1]:.0f}) 处 dblclick；"
+                  f"请求计数 {req_before_p} → {req_after_p}"
+                  f"（新增 {req_after_p - req_before_p}，期望 ≥1）；{req_summary()}")
+            # 断言 2：闭合后必须已经退出绘制态
+            n_cancel_p = count_of(page, '[data-testid="draw-cancel"]')
+            check("多边形闭合后已退出绘制态（draw-cancel 消失）", n_cancel_p == 0,
+                  f"draw-cancel 还有 {n_cancel_p} 个 —— 双击闭合后没收敛"
+                  "（App.onDrawPolygon 应把 drawingMode 收回 idle）")
+
+        # ------------------------------------------------ E3) ESC 取消绘制
+        # ⭐ 修复轮 5 新增（规格 9.5 第 5 条明列的出口，旧脚本从不按 ESC）：
+        #    进入绘制模式 → 按 Escape → draw-cancel 消失 + getRotateEnabled() 回到 true。
+        #    （App.vue 的 onKeydown 挂在 window 上：Escape 且 drawingMode !== 'idle' 时收回 'idle'，
+        #      CesiumGlobe 的 watcher 随之 clearDrawHandler() + rotateEnabled(true)。）
+        print("=== E3) ESC 取消绘制 ===")
+        if count_of(page, '[data-testid="draw-rect"]') != 1:
+            skip("E3) ESC 取消绘制", "draw-rect 按钮不存在")
+        else:
+            # ⚠️ 这里**故意不点「清除」**：E2 段刚查出来的结果要留在 DOM 里，
+            #    好让下面 F 段那条「清除后 stat-tracks 归 0」仍然是有内容的（否则会变成恒真）。
+            page.click('[data-testid="draw-rect"]')
+            page.wait_for_timeout(300)
+            cancel_before_esc = count_of(page, '[data-testid="draw-cancel"]')
+            rot_before_esc = globe_rotate(page)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+            cancel_after_esc = count_of(page, '[data-testid="draw-cancel"]')
+            rot_after_esc = globe_rotate(page)
+            note(f"ESC：按前 draw-cancel={cancel_before_esc}、rotate={rot_before_esc}；"
+                 f"按后 draw-cancel={cancel_after_esc}、rotate={rot_after_esc}")
+            check("ESC 取消绘制后退出绘制态（draw-cancel 消失）",
+                  cancel_before_esc == 1 and cancel_after_esc == 0,
+                  f"按 ESC 前 draw-cancel={cancel_before_esc}（期望 1，说明确实进了绘制态）、"
+                  f"按后={cancel_after_esc}（期望 0）")
+            if rot_after_esc is None:
+                skip("ESC 取消绘制后左键旋转恢复（getRotateEnabled = true）", "拿不到开关值")
+            else:
+                check("ESC 取消绘制后左键旋转恢复（getRotateEnabled = true）",
+                      rot_after_esc is True,
+                      f"按 ESC 后 getRotateEnabled() = {rot_after_esc}（期望 true）；"
+                      f"按前是 {rot_before_esc}（绘制中期望 false）——"
+                      "若这里还是 false，说明 ESC 只收了 UI、没恢复左键旋转")
 
         # ------------------------------------------------ F) 清除 + 切档
         print("=== F) 清除 + 切档 ===")
