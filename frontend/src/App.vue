@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import CesiumGlobe from './components/CesiumGlobe.vue'
 import SpeedChart from './components/SpeedChart.vue'
 import TrackList from './components/TrackList.vue'
@@ -9,10 +9,13 @@ import HotspotList from './components/HotspotList.vue'
 import DensityLegend from './components/DensityLegend.vue'
 import SimilarityList from './components/SimilarityList.vue'
 import DataManager from './components/DataManager.vue'
+import RegionDrawer from './components/RegionDrawer.vue'
+import WithinStats from './components/WithinStats.vue'
 import { canPlay, timeRange } from './lib/playback.js'
 import { sortHotspots } from './lib/hotspot.js'
 import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
 import { filterMatches } from './lib/similarity.js'
+import { polygonGeometry, pointGeometry, rectGeometry, visibleItems } from './lib/region.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -116,6 +119,11 @@ onMounted(() => {
   if (wanted > 0) selectTrack(wanted)
 })
 
+// Esc 取消绘制（全局）：绘制中按一下就把半成品清掉并恢复左键旋转，不发请求
+onMounted(() => window.addEventListener('keydown', onKeydown))
+// 组件卸载时必须摘掉，否则全局监听会随着热更新/重挂载越积越多
+onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+
 /* ============ 列表筛选 ============ */
 // 状态放在 App（唯一状态中心），TrackList 只负责回显 + 上报
 const sourceFilter = ref('')
@@ -188,9 +196,19 @@ const hotspotSort = ref('trackCount')
 /** 按当前口径排序后的热点（不改动 hotspots 本身） */
 const sortedHotspots = computed(() => sortHotspots(hotspots.value, hotspotSort.value))
 
-/** 切换模式：四档（停留点 / 热点 / 密度 / 相似）。只有热点、密度、相似需要懒加载 */
+/** 切换模式：五档（停留点 / 热点 / 密度 / 相似 / 圈选）。只有热点、密度、相似需要懒加载 */
 async function switchMode(mode) {
   viewMode.value = mode
+  /*
+   * ⚠️ 位置必须在**所有 await / return 之前**（进函数立刻判）：
+   * 后面的分支里有 await + 早退（热点那两处竞态守卫），放到函数末尾就永远走不到。
+   *
+   * 语义：离开圈选档 → 把图形、统计、列表、选中高亮全部清掉（与其它四档互斥的纪律一致）。
+   * resetWithin() 会把 drawingMode 复位成 'idle'，地球的 watcher 据此收尾
+   * （注销绘制事件 + 恢复左键旋转），所以不会留下"地球转不动"的状态。
+   * 注意判断是"新档位不是 within"，所以在圈选档里再点一次「圈选」是幂等的、不会自清。
+   */
+  if (viewMode.value !== 'within') resetWithin()
   if (mode === 'hotspot') {
     if (hotspots.value.length === 0) await loadHotspots()
 
@@ -484,6 +502,180 @@ async function focusSimilar(trackId) {
   globe.value?.focusOn(mid.lon, mid.lat, 500)
 }
 
+/* ============ 空间范围查询（第五档「圈选」）============ */
+
+const drawingMode = ref('idle')          // idle | rect | polygon | buffer
+const bufferM = ref(500)
+const bufferCenter = ref(null)            // 缓冲区中心（地图上点出来的），给"改半径重查"用
+const withinBusy = ref(false)
+const withinError = ref('')
+const withinStats = ref(null)
+const withinItems = ref([])
+const withinTotal = ref(0)
+const withinTruncated = ref(false)
+const withinRegion = ref(null)
+const withinTrackIds = ref([])            // 地图上当前画出来的 trackId（默认前 DRAW_LIMIT 条）
+const withinDetail = ref([])              // [{trackId, points:[{lon,lat}...]}]
+/*
+ * 列表里最后点过的那一条 —— 绑给 WithinStats 的 `selectedId`，也是传回地球的
+ * `withinTracks[].selected` 的来源（Task 9 的高亮就是要这个字段）。
+ *
+ * ⚠️ 绝不能写死 `:selected-id="null"`（计划原文的写法）：WithinStats 内部靠
+ * `it.trackId === selectedId` 决定 `li.on`，写死 null 时**点列表的高亮永远不亮**。
+ */
+const withinSelectedId = ref(null)
+
+function resetWithin() {
+  withinStats.value = null
+  withinItems.value = []
+  withinTotal.value = 0
+  withinTruncated.value = false
+  withinRegion.value = null
+  withinTrackIds.value = []
+  withinDetail.value = []
+  withinError.value = ''
+  withinSelectedId.value = null   // 清除/切档时选中高亮一并复位（规格 6.7）
+  drawingMode.value = 'idle'
+  bufferCenter.value = null
+}
+
+/*
+ * 乱序请求防护：圈选的结果是**整块替换**的（区域 + 统计 + 列表），
+ * 所以"旧请求后回来"的破坏力比别的档更大 —— 用户点了「清除」或切走之后，
+ * 挂起的那次请求一恢复就会把图形、统计、列表又整块画回来，看起来像"清除没生效"。
+ * 只认最后一次请求（和 densitySeq / similaritySeq 同一套写法）。
+ */
+let withinSeq = 0
+
+/** 拉框 / 多边形 / 缓冲区三种形状，最终都走这一个请求 */
+async function queryWithin(geometry, extra = {}) {
+  const mine = ++withinSeq
+  withinBusy.value = true
+  withinError.value = ''
+  try {
+    const res = await fetch('/api/analysis/within', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ geometry, ...extra }),
+    })
+    if (!res.ok) {
+      // 后端把原因写在 message 里（"区域有交叉，请重画"这种）
+      const text = await res.text()
+      let msg = text
+      try { msg = JSON.parse(text).message ?? text } catch { /* 保持原文 */ }
+      throw new Error(msg)
+    }
+    const data = await res.json()
+    if (mine !== withinSeq) return   // 已经清除 / 切档 / 又画了一笔，丢弃这次结果
+    withinStats.value = data.stats
+    withinItems.value = data.items
+    withinTotal.value = data.total
+    withinTruncated.value = data.truncated
+    withinRegion.value = data.region
+    withinSelectedId.value = null    // 新结果没有"点过的那条"
+    // 地图只画前 DRAW_LIMIT 条（visibleItems 就是"列表最前面 N 条"的纯函数），
+    // 其余的在列表里点一条加一条
+    withinTrackIds.value = visibleItems(data.items).map((i) => i.trackId)
+    await loadWithinDetail(withinTrackIds.value)
+  } catch (e) {
+    if (mine !== withinSeq) return
+    resetWithin()
+    withinError.value = e.message || String(e)
+  } finally {
+    // 只有最后一次请求才有资格关掉转圈（同密度档）
+    if (mine === withinSeq) withinBusy.value = false
+  }
+}
+
+/** 按需拉取要画的轨迹点（复用已有的轨迹详情接口） */
+async function loadWithinDetail(ids) {
+  const need = ids.filter((id) => !withinDetail.value.some((d) => d.trackId === id))
+  if (!need.length) {
+    withinDetail.value = withinDetail.value.filter((d) => ids.includes(d.trackId))
+    return
+  }
+  const fetched = await Promise.all(need.map(async (id) => {
+    const r = await fetch(`/api/tracks/${id}`)
+    if (!r.ok) return null
+    const d = await r.json()
+    return { trackId: id, points: d.points }
+  }))
+  const keep = withinDetail.value.filter((d) => ids.includes(d.trackId))
+  withinDetail.value = [...keep, ...fetched.filter(Boolean)]
+}
+
+/**
+ * 交给地球的命中轨迹。
+ *
+ * ⚠️ `selected` 这一条必须由**真实状态**算出来（Task 9 的实现配方）：
+ * 地球对带 `selected: true` 的那条用亮蓝 + 更粗画。写死就没有高亮。
+ * 用 computed 而不是在 onWithinSelect 里改数组：这样"清除 / 重新查询"时
+ * 只要 withinSelectedId 一复位，地球那边的 props 引用自然跟着变。
+ */
+const withinTracksForGlobe = computed(() =>
+  withinDetail.value.map((d) => ({ ...d, selected: d.trackId === withinSelectedId.value })),
+)
+
+function startDraw(mode) { drawingMode.value = mode }
+
+function onDrawRect(r) {
+  drawingMode.value = 'idle'
+  queryWithin(rectGeometry({ lon: r.west, lat: r.south }, { lon: r.east, lat: r.north }))
+}
+
+function onDrawPolygon(points) {
+  drawingMode.value = 'idle'
+  const g = polygonGeometry(points)
+  if (!g) { withinError.value = '至少点 3 个点才能围成一个区域'; return }
+  queryWithin(g)
+}
+
+function onDrawBuffer(center) {
+  bufferCenter.value = center
+  drawingMode.value = 'idle'
+  queryWithin(pointGeometry(center.lon, center.lat), { bufferM: bufferM.value })
+}
+
+/** 改完半径想用同一个中心重查（面板上的「查询」按钮） */
+function onQueryBuffer() {
+  if (!bufferCenter.value) return
+  queryWithin(pointGeometry(bufferCenter.value.lon, bufferCenter.value.lat), { bufferM: bufferM.value })
+}
+
+/**
+ * 半径输入框回写。
+ *
+ * ⚠️ 必须【夹取】并【强制把结果写回 bufferM】，不能只 reject 非法值：
+ * `RegionDrawer` 的输入框清空时 `Number('') === 0` 会 emit 0，而 `:value="bufferM"`
+ * 是单向绑定 —— 若这里拒绝该值（比如 return 不改状态），DOM 会停在 0、状态却还是 500，
+ * 表现为"输入框显示 0 米，查的却是 500 米"的静默不同步。
+ * 夹到 [1, 50000]（与输入框的 min/max 一致）后即使值没变也重新赋值，保证两边一致。
+ */
+function setBufferM(v) {
+  const n = Number(v)
+  const safe = Number.isFinite(n) ? Math.min(50000, Math.max(1, Math.round(n))) : bufferM.value
+  bufferM.value = safe
+}
+
+/** 列表里点一条 → 把它补画到地图上并高亮 */
+function onWithinSelect(trackId) {
+  // 再点同一条 = 取消高亮（规格 6.7 的"清掉选中高亮"要有出口，否则点了就再也退不出来）
+  if (withinSelectedId.value === trackId) {
+    withinSelectedId.value = null
+    return
+  }
+  withinSelectedId.value = trackId
+  if (!withinTrackIds.value.includes(trackId)) {
+    withinTrackIds.value = [...withinTrackIds.value, trackId]
+    loadWithinDetail(withinTrackIds.value)
+  }
+}
+
+/** Esc 取消绘制：地球的 drawingMode watcher 会恢复左键旋转 */
+function onKeydown(e) {
+  if (e.key === 'Escape' && drawingMode.value !== 'idle') drawingMode.value = 'idle'
+}
+
 /* ============ 数据编辑视图 ============ */
 /*
  * 面板有两个视图：
@@ -507,12 +699,16 @@ function backToAnalysis() {
 /**
  * 数据被改过（删除 / 改名 / 替换 / 新增）之后的统一刷新。
  *
- * ⚠️ 一条规则：**数据一改，四个分析功能的结果全部失效** —— 因为它们全都基于全库数据。
+ * ⚠️ 一条规则：**数据一改，五个分析功能的结果全部失效** —— 因为它们全都基于全库数据。
  * 后端那边的缓存已经在改的时候清了（StayPointCache / SimilarityCache），
  * 这里要清的是【前端已经拿到的旧结果】，否则切回分析档看到的还是改动前的数字。
  *
- * 为什么不"只清被改的那一条"：四个档里除了"停留点"以外都是跨轨迹的
- * （热点 / 密度 / 相似度全都要拿全库去比），改任何一条都可能影响别人 —— 宁可全清。
+ * 第五档「圈选」同样吃全库数据（命中的轨迹、统计全都要重算），而且它比别的档更"重"：
+ * 区域回显与叠画的命中轨迹都是旧结果的快照，不一起清就会留下"改完数据还画着旧线"的残影
+ * （规格 6.7 明写：数据被改过 → 清掉圈选结果）。
+ *
+ * 为什么不"只清被改的那一条"：五个档里除了"停留点"以外都是跨轨迹的
+ * （热点 / 密度 / 相似度 / 圈选全都要拿全库去比），改任何一条都可能影响别人 —— 宁可全清。
  */
 function resetAnalysisState() {
   stays.value = []
@@ -520,6 +716,7 @@ function resetAnalysisState() {
   densityCells.value = []
   similarityMatches.value = []
   similarityTracks.value = []
+  resetWithin()
   // 相似度的"分母"元信息（主线名字 / 比过多少条）也是旧数据，一并清掉
   similarityInfo.value = {}
 
@@ -592,8 +789,14 @@ async function selectTrack(id) {
       :similar-baseline="viewMode === 'similar' && similarityBaselinePoints.length
         ? { points: similarityBaselinePoints } : null"
       :similar-tracks="viewMode === 'similar' ? similarityTracks : []"
+      :region="viewMode === 'within' ? withinRegion : null"
+      :within-tracks="viewMode === 'within' ? withinTracksForGlobe : []"
+      :drawing-mode="viewMode === 'within' ? drawingMode : 'idle'"
       @time-change="onTimeChange"
       @camera-move-end="onCameraMoveEnd"
+      @draw-rect="onDrawRect"
+      @draw-polygon="onDrawPolygon"
+      @draw-buffer="onDrawBuffer"
     />
 
     <!-- 左上角浮层：标题 + 后端连通性 + 轨迹列表 -->
@@ -648,7 +851,7 @@ async function selectTrack(id) {
            最后一档原来是 `v-else`，而 `v-else` 在前面条件全不成立时也会渲染，
            漏掉它会让管理视图底下又多出一个「相似」面板。
            （没有用一个 <template> 包起来，是为了不动这 90 行原有的缩进。） -->
-      <!-- 停留点 / 热点 / 密度 / 相似 四档互斥：四者都会往地球上画画（圈 / 方格 / 线），
+      <!-- 停留点 / 热点 / 密度 / 相似 / 圈选 五档互斥：五者都会往地球上画画（圈 / 方格 / 线），
            同时画会糊在一起 -->
       <div v-if="panelView === 'analysis'" class="mode-switch" data-testid="mode-switch">
         <button
@@ -682,6 +885,14 @@ async function selectTrack(id) {
           @click="switchMode('similar')"
         >
           相似
+        </button>
+        <button
+          type="button"
+          :class="{ on: viewMode === 'within' }"
+          data-testid="mode-within"
+          @click="switchMode('within')"
+        >
+          圈选
         </button>
       </div>
 
@@ -739,6 +950,34 @@ async function selectTrack(id) {
           :filter="similarityFilter"
           @filter="similarityFilter = $event"
           @focus="focusSimilar"
+        />
+      </template>
+
+      <!-- 第五档「圈选」：三种画法（拉框 / 多边形 / 缓冲区）共用一个请求与一套结果。
+           `:selected-id` 绑的是真实状态 withinSelectedId —— 计划原文写死的 `null`
+           会让列表点选的高亮永远不亮（评审修订第 2 条）。
+           `total` 与 `truncated` 是并列 props，两个都必须传（只传一个会显示错误数字）。 -->
+      <template v-else-if="viewMode === 'within'">
+        <h2>圈选<span v-if="withinTotal"> （{{ withinTotal }} 条）</span></h2>
+        <RegionDrawer
+          :mode="drawingMode"
+          :buffer-m="bufferM"
+          :busy="withinBusy"
+          :has-result="!!withinStats"
+          @start="startDraw"
+          @cancel="drawingMode = 'idle'"
+          @clear="resetWithin"
+          @update:buffer-m="setBufferM"
+          @query-buffer="onQueryBuffer"
+        />
+        <p v-if="withinError" class="bad" data-testid="within-error">{{ withinError }}</p>
+        <WithinStats
+          :stats="withinStats"
+          :items="withinItems"
+          :total="withinTotal"
+          :truncated="withinTruncated"
+          :selected-id="withinSelectedId"
+          @select="onWithinSelect"
         />
       </template>
 
@@ -879,12 +1118,14 @@ async function selectTrack(id) {
    ⚠️ 每新增一个"要自己滚动的列表"都必须加进 :not(...)，否则它会被当成固定内容
    —— flex: 0 0 auto 下矮窗口里列表不滚动、直接被面板的 overflow:hidden 裁掉。
    .similarity-list 是第四档的列表，同一条规矩；
-   .data-manager 是数据编辑视图（它自己内部还有一层 .rows 在滚动）。 */
+   .data-manager 是数据编辑视图（它自己内部还有一层 .rows 在滚动）；
+   .within-stats 是第五档「圈选」的统计卡 + 列表容器（它内部那条 .items 才是滚动条），
+   漏掉它命中多条时列表会被面板直接裁掉 —— 而 Task 11 的零溢出断言先清了结果，测不到这里。 */
 .panel > h1,
 .panel > h2,
 .panel > p,
 .panel > .mode-switch,
-.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend):not(.similarity-list):not(.data-manager) {
+.panel > div:not(.track-list):not(.stay-list):not(.hotspot-list):not(.density-legend):not(.similarity-list):not(.data-manager):not(.within-stats) {
   flex: 0 0 auto;
 }
 
