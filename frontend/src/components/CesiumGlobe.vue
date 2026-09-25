@@ -349,11 +349,28 @@ function drawSimilarity(baseline, tracks) {
  * 状态方向仍然是「父 → 子」：App 通过 drawingMode prop 决定画不画、画哪种，
  * 地球只负责注册/注销鼠标事件。这样 ESC、切档、取消三条退出路径在 App 侧收口，
  * 不需要在两边各写一遍 —— 那种写法必漏其一。
+ *
+ * ⚠️ 第二条纪律：**"画的过程"由地球自己表现，父组件只在动作完成时收到一次事件**。
+ *   - 拖框中的矩形、"已画折线"、回到起点的高亮 → 全是地球本地的**预览实体**（固定 id，重绘先删旧）
+ *   - `draw-rect` 只在【松手】时 emit 一次（载荷 = 最终矩形）
+ *   - `draw-polygon` 只在【闭合】时 emit 一次（双击 / 点回起点）
+ *   - `draw-buffer` 单击即 emit 一次
+ * 为什么不能"每次 MOUSE_MOVE 都往上报"：父组件收到就会把 drawingMode 收回 'idle'
+ * （它没法在拖动过程中持续改状态），于是这边 setDrawingMode('idle') → clearDrawHandler()
+ * 当场销毁处理器，框只剩"按下点到第一次移动"那一小段。所以收敛点必须在松手。
  */
 
 const drawHandler = ref(null)      // ScreenSpaceEventHandler；null = 当前没在绘制
 const drawPoints = ref([])         // 多边形已加的点
 let rectStart = null               // 拉框起点（屏幕坐标）
+// 多边形已加点的【屏幕】坐标：只用来判断"鼠标回到起点附近了"（与经纬度无关，所以单独存一份）
+let drawScreenPoints = []
+
+// 预览实体的固定 id —— 拖动/逐点画的过程中不断重绘，结束时必须清掉（否则框会留在地图上）
+const PREVIEW_RECT_ID = 'draw-preview-rect'
+const PREVIEW_POLY_ID = 'draw-preview-polygon'
+const PREVIEW_COLOR = '#ffd166'    // 与"后端回显的区域轮廓"同色系：暗示预览和最终区域是一回事
+const CLOSE_PX = 12                // 屏幕像素：鼠标离起点这么近就算"回到起点"
 
 /** 统一开关「左键拖动旋转地球」。
  *  为什么包一层：所有恢复动作都走这一个出口，"漏掉某条退出路径"就只剩"忘了调用"一种可能 */
@@ -372,6 +389,70 @@ function pickLonLat(windowPosition) {
   return { lon: CesiumMath.toDegrees(c.longitude), lat: CesiumMath.toDegrees(c.latitude) }
 }
 
+/** 清掉两个预览实体。绘制结束 / 取消 / 切档 / 进入别的模式 / 卸载都可能调它，
+ *  viewer 已销毁时静默返回（用固定 id 重绘，所以清的时候不需要任何记账） */
+function clearDrawPreview() {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  v.entities.removeById(PREVIEW_RECT_ID)
+  v.entities.removeById(PREVIEW_POLY_ID)
+}
+
+/** 两个屏幕点的距离（像素）—— 判断"鼠标回到起点了"用 */
+function screenDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+/** 拉框拖动中的预览：4 个角 + 回到起点的闭合段。每次调用先删旧再画新 */
+function drawPreviewRect(a, b) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  v.entities.removeById(PREVIEW_RECT_ID)
+  const west = Math.min(a.lon, b.lon)
+  const east = Math.max(a.lon, b.lon)
+  const south = Math.min(a.lat, b.lat)
+  const north = Math.max(a.lat, b.lat)
+  v.entities.add({
+    id: PREVIEW_RECT_ID,
+    polyline: {
+      positions: Cartesian3.fromDegreesArray([
+        west, south, east, south, east, north, west, north, west, south,
+      ]),
+      width: 2,
+      material: Color.fromCssColorString(PREVIEW_COLOR),
+    },
+  })
+}
+
+/** 多边形的"已画折线"预览（规格 6.3：单击逐个加点、实时显示已画折线、回到起点时高亮）。
+ *  橡皮筋：未闭合时把鼠标当前位置接在最后，用户能看到"下一段会画到哪"。
+ *  回到起点附近（屏幕距离 ≤ CLOSE_PX）且已有 3 个点时改成高亮的闭合环
+ *  —— 提示"再点一下就是一个区域了"（与 LEFT_CLICK 里"点回起点即闭合"配对）。 */
+function drawPreviewPolygon(cursorWindow) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  v.entities.removeById(PREVIEW_POLY_ID)
+  const pts = drawPoints.value
+  if (pts.length === 0) return
+  const closing = !!cursorWindow && pts.length >= 3 && drawScreenPoints.length > 0
+    && screenDistance(cursorWindow, drawScreenPoints[0]) <= CLOSE_PX
+  const ring = closing ? [...pts, pts[0]] : [...pts]
+  const flat = ring.flatMap((p) => [p.lon, p.lat])
+  if (!closing && cursorWindow) {
+    const c = pickLonLat(cursorWindow) // 拾取不到（球外）就不接橡皮筋，不产生 NaN
+    if (c) flat.push(c.lon, c.lat)
+  }
+  if (flat.length < 4) return // 少于 2 个顶点连不成线
+  v.entities.add({
+    id: PREVIEW_POLY_ID,
+    polyline: {
+      positions: Cartesian3.fromDegreesArray(flat),
+      width: closing ? 4 : 2,
+      material: Color.fromCssColorString(closing ? '#ffffff' : PREVIEW_COLOR),
+    },
+  })
+}
+
 /** 注销鼠标事件。
  *  destroy() 会连同它注册的全部动作一起注销，所以重复进入绘制模式不会叠加注册
  *  —— 前提是每次进入前都先 clear（setDrawingMode 开头就调它） */
@@ -382,6 +463,10 @@ function clearDrawHandler() {
   }
   rectStart = null
   drawPoints.value = []
+  drawScreenPoints = []
+  // ⚠️ 预览实体在这里一并清：取消 / 切档 / 进入别的模式 / 组件卸载都走这个函数，
+  // 于是"每个出口都清预览"只需要维护这一处（卸载时它在 viewer.destroy() 之前被调用）
+  clearDrawPreview()
 }
 
 /** 切换绘制模式。idle / 空值 / 地球还没就绪 → 只做收尾（关掉事件 + 恢复左键旋转） */
@@ -398,31 +483,58 @@ function setDrawingMode(mode) {
   const h = new ScreenSpaceEventHandler(v.scene.canvas)
 
   if (mode === 'rect') {
-    h.setInputAction((m) => { rectStart = m.position }, ScreenSpaceEventType.LEFT_DOWN)
+    h.setInputAction((m) => {
+      rectStart = m.position
+      clearDrawPreview() // 上一笔理论上已被清；这里保险起见，保证新的一次拖动从干净状态开始
+    }, ScreenSpaceEventType.LEFT_DOWN)
+    // 拖动中【只画本地预览、绝不 emit】—— 父组件一收到就会把模式收回 idle（见本节顶部注释）
     h.setInputAction((m) => {
       if (!rectStart) return // 没按下就动鼠标 = 只是在看地图，不产生框
-      // 两端都拾取；任一端落在地球外就整次忽略，不要用半个合法值凑出一个框
+      // 两端都拾取；任一端落在地球外这一帧就不画，不要用半个合法值凑出一个框
       const a = pickLonLat(rectStart)
       const b = pickLonLat(m.endPosition)
       if (!a || !b) return
+      drawPreviewRect(a, b)
+    }, ScreenSpaceEventType.MOUSE_MOVE)
+    // ⭐ 收敛点在【松手】：整次拖动只 emit 一次，载荷是最终矩形
+    h.setInputAction((m) => {
+      const a = rectStart ? pickLonLat(rectStart) : null
+      const b = pickLonLat(m.position)
+      rectStart = null
+      clearDrawPreview() // 松手先撤掉预览，随后画上的是"后端回显的区域"（region prop）
+      if (!a || !b) return // 任一为空 → 这次作废、不 emit（宁可少查一次，也不要畸形的框）
       emit('draw-rect', {
         west: Math.min(a.lon, b.lon), east: Math.max(a.lon, b.lon),
         south: Math.min(a.lat, b.lat), north: Math.max(a.lat, b.lat),
       })
-    }, ScreenSpaceEventType.MOUSE_MOVE)
-    h.setInputAction(() => { rectStart = null }, ScreenSpaceEventType.LEFT_UP)
+    }, ScreenSpaceEventType.LEFT_UP)
   }
 
   if (mode === 'polygon') {
     h.setInputAction((m) => {
       const p = pickLonLat(m.position)
       if (!p) return // 点到地球之外 → 忽略这次点击（不要往点列里塞 NaN）
+      // 规格 6.3「点回起点」= 闭合：已有 3 个点又点在起点附近，就当闭合，不再加点
+      if (drawPoints.value.length >= 3 && drawScreenPoints.length > 0
+        && screenDistance(m.position, drawScreenPoints[0]) <= CLOSE_PX) {
+        emit('draw-polygon', drawPoints.value)
+        drawPoints.value = []
+        drawScreenPoints = []
+        clearDrawPreview()
+        return
+      }
       drawPoints.value = [...drawPoints.value, p]
+      drawScreenPoints = [...drawScreenPoints, m.position]
+      drawPreviewPolygon() // 本地预览：把已画的折线显示出来（不 emit）
     }, ScreenSpaceEventType.LEFT_CLICK)
+    // 鼠标移动：橡皮筋 + 回到起点时高亮，同样是纯本地表现，不 emit
+    h.setInputAction((m) => { drawPreviewPolygon(m.endPosition) }, ScreenSpaceEventType.MOUSE_MOVE)
     h.setInputAction(() => {
       // 少于 3 个点围不成面：不发事件，由 App 侧提示
       if (drawPoints.value.length >= 3) emit('draw-polygon', drawPoints.value)
       drawPoints.value = []
+      drawScreenPoints = []
+      clearDrawPreview()
     }, ScreenSpaceEventType.LEFT_DOUBLE_CLICK)
   }
 
