@@ -21,9 +21,6 @@ public final class RegionGeometry {
 
     private static final Set<String> ALLOWED = Set.of("Polygon", "MultiPolygon", "Point");
 
-    /** 无限宽时间窗的边界（PostgreSQL 的 timestamptz 能表示这个范围，而我们的数据是 2008~2009） */
-    public static final String WKT_TAG = "REGION";
-
     private RegionGeometry() {
     }
 
