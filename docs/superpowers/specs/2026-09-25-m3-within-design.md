@@ -422,11 +422,11 @@ public static Region parse(JsonNode geometry, Double bufferM, int maxVertices, d
 
 ```sql
 -- 拉框 / 自由多边形用这条
-SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g), ST_NPoints(g)
+SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g)
 FROM (SELECT ST_GeomFromText(:wkt, 4326) AS g) s;
 
 -- 缓冲区用这条（唯一的差别是 g 怎么来）
-SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g), ST_NPoints(g)
+SELECT ST_IsValid(g), ST_AsGeoJSON(g), ST_AsText(g)
 FROM (SELECT ST_Buffer(ST_GeomFromText(:wkt, 4326)::geography, :bufferM)::geometry AS g) s;
 ```
 
@@ -437,7 +437,6 @@ FROM (SELECT ST_Buffer(ST_GeomFromText(:wkt, 4326)::geography, :bufferM)::geomet
   **不是原始字符串** —— 否则响应里会是一段被转义的 JSON 文本，前端还得再 `JSON.parse` 一次
 - 回显**统一**走这条：连"拉框/自由多边形"也回显数据库吐出的几何（而不是前端自己算的那个），
   于是 11.4 说的"看到的 = 查到的"对**三种形状**都成立，**没有特例**
-- `ST_NPoints` 拿到的顶点数可用于日志/诊断（服务端缓冲区固定 33，2.6）
 
 ⚠️ **`::geography` 只在算缓冲区那一次用**：不加就是"按度缓冲 500 度"，加了才是"球面 500 米"。
 之后的相交判定**全是纯几何** —— 这正是 2.3 那个 38 倍性能的来源。
