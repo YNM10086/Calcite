@@ -16,7 +16,7 @@ Cesium 的几何体在 web worker 里异步生成，虚拟时钟会让截图提�
 
 用法：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\check-import-pixels.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\check-import-pixels.py
 """
 import asyncio
 import os

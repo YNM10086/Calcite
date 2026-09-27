@@ -23,7 +23,7 @@ POST /api/analysis/within 的接口对拍。
     $yaml = Get-Content backend/src/main/resources/application-local.yml -Raw
     if ($yaml -match '(?m)^\\s*password:\\s*(\\S+)') { $env:PGPASSWORD = $Matches[1] }
     $env:PYTHONIOENCODING='utf-8'; $env:LC_MESSAGES='C'
-    & "E:\\python\\python_address\\python.exe" .tmp\\verify-within-api.py
+    & "E:\\python\\python_address\\python.exe" scripts\\acceptance\\verify-within-api.py
 """
 import json
 import math
@@ -73,7 +73,7 @@ def sql(q):
     env = dict(os.environ)
     env["LC_MESSAGES"] = "C"
     env["PGCLIENTENCODING"] = "UTF8"
-    out = subprocess.run([PSQL, "-U", "postgres", "-h", "localhost", "-p", "5432",
+    out = subprocess.run([PSQL, "-U", "postgres", "-w", "-h", "localhost", "-p", "5432",
                           "-d", DB, "-At", "-c", q],
                          capture_output=True, text=True, encoding="utf-8",
                          errors="replace", env=env)

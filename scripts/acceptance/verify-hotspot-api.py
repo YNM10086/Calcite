@@ -6,7 +6,7 @@ r"""独立实现一遍聚类，和后端接口的结果逐个数字对拍。
 
 用法：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\verify-hotspot-api.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\verify-hotspot-api.py
 """
 import json
 import math

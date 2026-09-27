@@ -9,10 +9,11 @@ Java 单测只覆盖数学与参数校验，覆盖不到 SQL。这个脚本用�
 
 用法（需要提权 danger-full-access）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\verify-similarity-api.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\verify-similarity-api.py
 """
 import json
 import math
+import os
 import subprocess
 import sys
 import urllib.error
@@ -22,6 +23,15 @@ from datetime import date
 BASE = "http://localhost:8080"
 PSQL = r"E:\PostgreSQL\bin\psql.exe"
 fails = []
+
+# ⚠️ 本脚本用 psql 直接取真值当判据，所以必须有 PGPASSWORD。
+#    不检查的话 psql 会**停在密码提示上等输入**（不是报错）——
+#    2026-09-27 实测因此卡了 30 分钟。所有 psql 调用同时加了 `-w`（绝不提示）。
+if not os.environ.get("PGPASSWORD"):
+    print("PGPASSWORD 未设置 —— 先把 application-local.yml 里的密码放进环境变量再跑：")
+    print('  $y = Get-Content backend\\src\\main\\resources\\application-local.yml -Raw')
+    print('  if ($y -match \'(?m)^\\s*password:\\s*(\\S+)\') { $env:PGPASSWORD = $Matches[1] }')
+    sys.exit(2)
 
 
 def check(name, ok, detail=""):
@@ -38,7 +48,7 @@ def get(path):
 def psql_json(sql):
     """跑 SQL 并把结果当 JSON 拿回来（用 json_agg 包裹）。"""
     out = subprocess.run(
-        [PSQL, "-U", "postgres", "-h", "localhost", "-p", "5432",
+        [PSQL, "-U", "postgres", "-w", "-h", "localhost", "-p", "5432",
          "-d", "calcite", "-t", "-A", "-c", sql],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     if out.returncode != 0:

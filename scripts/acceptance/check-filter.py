@@ -3,7 +3,7 @@ r"""列表筛选功能的浏览器验收（共 7 项）。
 
 用法：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\check-filter.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\check-filter.py
 
 ⚠️ 期望值一律**当场问接口要**，脚本里不许再出现"共有多少条轨迹"这类写死的数量。
     2026-09-17 又导入了一批 GeoLife 之后，轨迹总数直接翻了一个量级，

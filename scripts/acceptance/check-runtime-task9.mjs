@@ -7,7 +7,7 @@
 //   ③ 点在球外不产生 NaN 坐标（不 emit、不推进点数、不画预览）
 //   ④ 三个 emit 的载荷形状 + 收敛点（拖动期间 0 次 emit；松手/闭合/单击各 1 次）
 //   ⑤ 预览实体（矩形 / 多边形折线）在每个出口都被清掉
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const { hooks } = await import('./vue-stub.mjs')
@@ -17,12 +17,21 @@ const { ScreenSpaceEventType, handlers, reset, seq, state } = await import('./ce
 //    "组件把 m.position 存进数组"这类缺陷就永远测不出来（2026-09-25 三角形事故）。
 const { clickAt, dblClickAt, downAt, moveTo, upAt } = await import('./cesium-stub.mjs')
 
-// ⚠️ 路径**从自身位置推**（不要写死 E:/…）：这样换机器 / 换盘符也能跑
-const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '')
+// ⚠️ 路径**从自身位置推**（不要写死 E:/…）：这样换机器 / 换盘符也能跑。
+//    ⚠️ 2026-09-25 迁移到 scripts/acceptance/ 时这里**必须从 '..' 改成 '../..'**：
+//       本文件原来在 `.tmp/`（仓库根下**一级**），所以 `new URL('..', import.meta.url)` 正好是仓库根；
+//       搬到 `scripts/acceptance/`（根下**两级**）后 `..` 只到 `scripts/`，
+//       `${ROOT}/frontend/...` 会解析成 `scripts/frontend/...`（不存在）→ 直接抛错。
+const ROOT = fileURLToPath(new URL('../..', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '')
+const HERE = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/').replace(/\/+$/, '')
 const { compileScript, parse } = await import(
   pathToFileURL(`${ROOT}/frontend/node_modules/vue/compiler-sfc/index.mjs`).href)
 const SFC = `${ROOT}/frontend/src/components/CesiumGlobe.vue`
-const OUT = `${ROOT}/.tmp/task9-compiled.mjs`
+// ⚠️ 编译产物必须落在**本目录**（而不是 .tmp/）：下面生成的代码里写着 `from './vue-stub.mjs'`
+//    / `from './cesium-stub.mjs'`，替身与本文件同处 scripts/acceptance/。
+//    若仍写进 .tmp/，这些相对 import 会去找 .tmp/vue-stub.mjs（已随迁移搬走）→ ERR_MODULE_NOT_FOUND。
+//    副作用：本目录会临时多一个 task9-compiled.mjs（仓库根运行结束后已删除，不残留）。
+const OUT = `${HERE}/task9-compiled.mjs`
 
 const { descriptor } = parse(readFileSync(SFC, 'utf8'), { filename: SFC })
 let code = compileScript(descriptor, { id: 'task9' }).content
@@ -354,3 +363,9 @@ check('A4 挂载时 drawingMode 已是 rect → getRotateEnabled() === false（�
 
 console.log(`\nRESULT: ${pass} 通过 / ${fail} 失败`)
 process.exitCode = fail === 0 ? 0 : 1
+
+// 清掉上面落在本目录的临时编译产物：本目录是**入库目录**，不该留下运行时文件。
+// （用 exit 钩子而不是 finally —— 中间任何断言抛错时也照样清理；ESM 模块已加载进内存，删文件不影响本次运行。）
+process.on('exit', () => {
+  try { unlinkSync(OUT) } catch { /* 本来就不存在就算了 */ }
+})

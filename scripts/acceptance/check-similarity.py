@@ -4,7 +4,7 @@ r"""轨迹相似度（M2 第四阶段）的浏览器验收。
 用法（**必须提权 danger-full-access** —— Playwright 的浏览器子进程靠命名管道通信，
 沙箱内 launch 直接 `PermissionError: [WinError 5] 拒绝访问`，和上一阶段一模一样）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp/check-similarity.py
+    & "E:\python\python_address\python.exe" scripts/acceptance/check-similarity.py
 
 前置条件：后端 8080 + 前端 5173 都在跑。
 

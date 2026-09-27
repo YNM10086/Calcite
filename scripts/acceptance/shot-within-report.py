@@ -10,7 +10,7 @@
 
     cd E:\\JAVA_IDEA_package\\JAVA_Project\\Calcite
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\\python\\python_address\\python.exe" .tmp\\shot-within-report.py
+    & "E:\\python\\python_address\\python.exe" scripts\\acceptance\\shot-within-report.py
 """
 import json
 import math

@@ -3,7 +3,7 @@ r"""抓几张相似档的截图，肉眼确认 Task 7+8 真的接起来了。
 
 用法（需要提权 danger-full-access）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\shot-similarity.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\shot-similarity.py
 """
 import asyncio
 import json

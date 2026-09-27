@@ -6,7 +6,7 @@ r"""停留点功能的浏览器验收。
 
 用法：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\check-stay-points.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\check-stay-points.py
 """
 import asyncio
 import sys

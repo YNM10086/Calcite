@@ -5,7 +5,7 @@
 
     cd E:\\JAVA_IDEA_package\\JAVA_Project\\Calcite
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\\python\\python_address\\python.exe" .tmp\\check-within.py
+    & "E:\\python\\python_address\\python.exe" scripts\\acceptance\\check-within.py
 
 五轮修复的净结果（历史细节见各段注释）：
   轮 1：拉框前先点一条轨迹飞相机 / `draw-clear` 禁用兜底 / 用 `getRotateEnabled()` 拿硬证据

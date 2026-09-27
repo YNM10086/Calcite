@@ -3,7 +3,7 @@ r"""网格密度（M2 第三阶段）的浏览器像素验收。
 
 用法（需要提权 danger-full-access，Playwright 的浏览器子进程要管道通信）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp/check-density.py
+    & "E:\python\python_address\python.exe" scripts/acceptance/check-density.py
 
 前置条件：后端 8080 + 前端 5173 都在跑。
 

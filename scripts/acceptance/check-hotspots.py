@@ -26,7 +26,7 @@ r"""停留热点功能的浏览器像素验收（共 16 项）。
 
 用法（需要提权 danger-full-access，Playwright 靠命名管道通信）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\check-hotspots.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\check-hotspots.py
 """
 import asyncio
 import json

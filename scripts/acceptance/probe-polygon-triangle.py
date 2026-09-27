@@ -13,7 +13,7 @@
 
     cd E:\\JAVA_IDEA_package\\JAVA_Project\\Calcite
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\\python\\python_address\\python.exe" .tmp\\probe-polygon-triangle.py
+    & "E:\\python\\python_address\\python.exe" scripts\\acceptance\\probe-polygon-triangle.py
 """
 import json
 import sys

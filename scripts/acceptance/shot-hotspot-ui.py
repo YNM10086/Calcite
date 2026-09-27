@@ -3,7 +3,7 @@ r"""抓一张「热点模式」下的前端截图，给学习文档当操作示�
 
 用法（需要提权 danger-full-access）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\shot-hotspot-ui.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\shot-hotspot-ui.py
 """
 import asyncio
 import json

@@ -3,7 +3,7 @@ r"""数据管理（添加 / 替换 / 改名 / 删除）的浏览器验收（任�
 
 用法（需要提权 danger-full-access，Playwright 的浏览器子进程要管道通信）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp/check-data-edit.py
+    & "E:\python\python_address\python.exe" scripts/acceptance/check-data-edit.py
 
 前置条件：后端 8080 + 前端 5173 都在跑。
 
@@ -11,7 +11,7 @@ r"""数据管理（添加 / 替换 / 改名 / 删除）的浏览器验收（任�
 
 ⚠️ 两条**刻意画的边界**（不要"顺手补上"）：
 
-  1. **本脚本绝不真的删轨迹。** 删除的**成功路径**由 `.tmp/verify-data-edit-api.py` 覆盖；
+  1. **本脚本绝不真的删轨迹。** 删除的**成功路径**由 `scripts/acceptance/verify-data-edit-api.py` 覆盖；
      而且当前会话里回收站目录 `D:\Calcite-note\backups\deleted` 写不进去 ——
      后端的设计是"导出失败就不删"（fail-safe），所以真的点「删除」只会拿到 500。
      于是第 7、8 项只验证「弹窗出现 + 文案带接口给的真实点数 + 取消有效」，

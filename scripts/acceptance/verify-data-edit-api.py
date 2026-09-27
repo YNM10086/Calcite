@@ -21,7 +21,7 @@ r"""数据管理的对拍：改名 / 删除 / 新增导入 + 【缓存真的失�
 
 用法：
     $env:PYTHONIOENCODING='utf-8'; $env:LC_MESSAGES='C'
-    & "E:\python\python_address\python.exe" .tmp\verify-data-edit-api.py
+    & "E:\python\python_address\python.exe" scripts\acceptance\verify-data-edit-api.py
 
     # 回收站目录默认取 application.yml 里的 calcite.data.recycle-dir。
     # 如果后端是用 [--calcite.data.recycle-dir=...] 覆盖过的（沙箱里必须这么干，
@@ -73,7 +73,12 @@ RECYCLE = Path(os.environ.get("CALCITE_RECYCLE_DIR", r"D:\Calcite-note\backups\d
 BACKUPS = Path(r"D:\Calcite-note\backups")
 # GeoLife 原始数据（只读，绝不修改原文件）
 GEOLIFE = Path(r"D:\Calcite-note\GPX-Data\Geolife Trajectories 1.3\Data")
-TMP = Path(__file__).resolve().parent
+TMP = Path(__file__).resolve().parent.parent.parent / ".tmp"
+# ⚠️ 2026-09-25 从 .tmp/ 搬到 scripts/acceptance/：原来是 `Path(__file__).parent`
+#    （那时的"自己所在目录"就是 .tmp），搬到 scripts/acceptance/ 后会往
+#    scripts/acceptance/ 里写临时 .plt 文件 —— 那是**被入库跟踪的目录**，不能放运行时产物。
+#    改成"往上三级 + .tmp"（scripts/acceptance → scripts → 仓库根 → .tmp），
+#    与规格「脚本里的输出路径一律留在 .tmp/」一致。
 # 主线：拿它当"别人"，验证删 / 改名 / 新增之后它看到的名单有没有跟着变
 BASE_TRACK = 20
 fails = []
