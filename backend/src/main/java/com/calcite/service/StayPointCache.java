@@ -45,7 +45,10 @@ public class StayPointCache {
         return cache.computeIfAbsent(trackId, k -> compute.get());
     }
 
-    /** 清理某条轨迹的缓存。当前生产代码没有调用 —— 见类注释里的三种情形。 */
+    /** 清理某条轨迹的缓存。
+     *  ⚠️ 2026-09-27 更正：原注释写"当前生产代码没有调用"——**已过时**。
+     *  数据管理阶段（2026-09-21）把这条欠账兑现了：{@code ImportService}（替换/新增导入）
+     *  与 {@code TrackEditService}（删除 / 改名 / 替换）都会调用它。 */
     public void invalidate(Long trackId) {
         cache.remove(trackId);
     }

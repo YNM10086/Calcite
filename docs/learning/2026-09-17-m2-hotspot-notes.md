@@ -241,8 +241,8 @@ package.json                     加 npm run check:hotspot
 
 **验收脚本**
 ```
-.tmp/verify-hotspot-api.py       独立 Python 实现，和后端接口逐个数字对拍（判据随数据变，见第 10 节）
-.tmp/check-hotspots.py           浏览器像素验收（17 项）
+scripts/acceptance/verify-hotspot-api.py       独立 Python 实现，和后端接口逐个数字对拍（判据随数据变，见第 10 节）
+scripts/acceptance/check-hotspots.py           浏览器像素验收（17 项）
 ```
 
 ---
@@ -253,11 +253,11 @@ package.json                     加 npm run check:hotspot
 |---|---|---|
 | 后端单测 | `mvn test` | **96** |
 | 回放 / 曲线 / 热点 / 密度 纯函数 | `node scripts/check-*.mjs` | 17 / 37 / 25 / 25 |
-| 浏览器验收 | `.tmp/check-*.py` 六个 | 7 / 10 / 5 / 7 / 17 / 15 |
-| 密度接口对拍 | `.tmp/verify-density-api.py` | 51 |
+| 浏览器验收 | `scripts/acceptance/check-*.py` 六个 | 7 / 10 / 5 / 7 / 17 / 15 |
+| 密度接口对拍 | `scripts/acceptance/verify-density-api.py` | 51 |
 | | **合计** | **312 项 + 热点接口对拍** |
 
-> 312 项里**不含** `.tmp/verify-hotspot-api.py` —— 它的判据数量跟着热点个数走，
+> 312 项里**不含** `scripts/acceptance/verify-hotspot-api.py` —— 它的判据数量跟着热点个数走，
 > 而且现在**自己从接口取期望值**（不再写死数字，原因见第 10 节）。
 
 ---

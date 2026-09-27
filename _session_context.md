@@ -112,7 +112,7 @@ PowerShell 只负责启动和查错，不显示图形。
 - 整条轨迹固定约 60 秒播完：`clock.multiplier = 轨迹总秒数 ÷ 60`（示例轨迹 = 50 倍）；循环用 `ClockRange.LOOP_STOP` / `CLAMPED` 切换
 - **回归命令**：`cd frontend && node scripts/check-playback.mjs`（17 项断言，零依赖，秒级出结果）
 - **生产构建已验证**：`cd frontend && npm run build` 通过（`✓ built in 1.57s`）；Vite 构建需提权 danger-full-access（它要 spawn 子进程探测路径，沙箱内报 `spawn EPERM`）
-- **验收证据（Playwright + Pillow）**：`.tmp/pw-playback.py` + `.tmp/analyze-playback.py`
+- **验收证据（Playwright + Pillow）**：`scripts/acceptance/pw-playback.py` + `.tmp/analyze-playback.py`
   - 时刻推进 `07:30:00 → 07:33:20 → 07:36:43`；拖动到 80% 得 `08:10:00`（精确）
   - 白色移动点：播放中位移 50.5 px、暂停后 0.9 px；控制台零报错
   - 取消选中后播放条消失；121 个点全有时间戳
@@ -127,7 +127,7 @@ PowerShell 只负责启动和查错，不显示图形。
 - 游标：1px 半透明虚线（`stroke-dasharray: 4 3`, opacity .7）+ 交点 r=2 白点；**游标画在数据线之前（下层）所以物理上不可能遮挡数据线**（实测只遮 4px，保留 99.9%）
 - 交点用 `valueAt` 线性插值（不是最近的真实点），保证正好落在游标线与数据线的交叉处
 - **回归命令**：`cd frontend && npm run check:chart`（37 项断言）；回放仍是 `npm run check:playback`（17 项）
-- **验收证据（Playwright + Pillow）**：`.tmp/check-chart-pixels.py`（10 项）
+- **验收证据（Playwright + Pillow）**：`scripts/acceptance/check-chart-pixels.py`（10 项）
   - 速度线 2888 px / 海拔线 2360 px；播放 4 秒游标位移 46→148 px
   - 点 80% 处时钟 `08:09:58`（期望 `08:10:00`，±3 秒内——1px ≈ 2 秒，鼠标无亚像素）
   - 控制台零报错
@@ -159,7 +159,7 @@ PowerShell 只负责启动和查错，不显示图形。
 - **后端首次引入 JUnit 单元测试**：`mvn test` 一条命令，41 项
 - **坐标系已实测确认 WGS84**：轨迹中心与 OSM「东区操场」相差 **10 米**（若是 GCJ-02 会偏 400–600 米）
 - 实测证据（真实 2342 点 GPX）：`pointCount=2342`、`distanceM=3933.46`、`durationS=2348`、`outlierCount=**8**`（seq 精确为 1128/1129/1135/1136/1144/1145/1585/1586）、点与线 SRID 均 = 4326、重复上传返回 `skippedDuplicate=true`、海拔全为 NULL
-- **回归总览（全绿）**：后端 `mvn test` 41 项 + `check:playback` 17 项 + `check:chart` 37 项 + `.tmp/check-import-pixels.py` 5 项 = **100 项**
+- **回归总览（全绿）**：后端 `mvn test` 41 项 + `check:playback` 17 项 + `check:chart` 37 项 + `scripts/acceptance/check-import-pixels.py` 5 项 = **100 项**
 - ⚠️ **两个环境坑（已解决，记录备查）**：
   1. Mockito 在沙箱内 `self-attach` 失败（要 fork 外部进程 attach JVM）→ `pom.xml` 的 surefire 预挂 `-javaagent:byte-buddy-agent`
   2. `@Value` **绑不了 YAML 列表** → 必须用 `@ConfigurationProperties`
@@ -213,7 +213,7 @@ PowerShell 只负责启动和查错，不显示图形。
   `20081115010133` → **0 段**；操场跑圈那条（2342 点）→ **0 段**
 - **真实数据指纹测试**：`sample-real.plt` 默认参数下正好 **1 段**（306 秒 / 半径 24.2 米 / 71 点），
   离两个阈值都很近，算法一改就红
-- **回归总览（全绿）**：后端 `mvn test` **58 项** + `check:playback` 17 + `check:chart` 37 + `.tmp/check-stay-points.py` **7 项** = **119 项**
+- **回归总览（全绿）**：后端 `mvn test` **58 项** + `check:playback` 17 + `check:chart` 37 + `scripts/acceptance/check-stay-points.py` **7 项** = **119 项**
 - ⚠️ **浏览器验收抓到一个布局 bug**：面板 z-index 是 10、底部曲线是 15，面板变高后伸进曲线区就被盖住、点不到。
   修法：面板 z-index → 20，`max-height` → `calc(100vh - 220px)`
 - ⚠️ **算法的两个"非直觉但正确"行为**（已写成测试钉住）：① 停留窗口会"多吃"接近的那几秒；
@@ -239,10 +239,10 @@ PowerShell 只负责启动和查错，不显示图形。
   - 1600×600：面板 397px，列表各 96px
   - 1366×660（笔记本，最常见的矮窗口）：面板 457px，列表各 126px，副标题自动隐藏
 - ⚠️ **顺手修了两个 bug**
-  1. `.tmp/check-chart-pixels.py` 一直在**假红**：判据写的是「绿色速度线/橙色海拔线」，
+  1. `scripts/acceptance/check-chart-pixels.py` 一直在**假红**：判据写的是「绿色速度线/橙色海拔线」，
      但练习提交 `8548f50` 换过配色（现在是 `#722ED1` 紫 / `#165DFF` 蓝），
      那个"绿色 215 像素"其实是地球底色透过来的。已改成**从 DOM 读 stroke 实际颜色**再数像素
-  2. `.tmp/check-stay-points.py` 和 `check-import-pixels.py` 里排除面板用的是写死的
+  2. `scripts/acceptance/check-stay-points.py` 和 `check-import-pixels.py` 里排除面板用的是写死的
      `x >= 400`，面板加宽到 432px 后会把面板的蓝字/橙色条目误算成地图上的线。
      已改成**问 DOM 要 `.panel` 的右边界**（以后改宽度不会再假红/假绿）
 - 回归：后端 58 + check:playback 17 + check:chart 37 + check-stay-points 7 +
@@ -430,7 +430,7 @@ PowerShell 只负责启动和查错，不显示图形。
     **写进同一个对象**）⇒ handler 每次收到的 `m.position` 是**同一个 `Cartesian2` 实例**。
     组件把 `m.position` 原样存进 `drawScreenPoints` ⇒ 数组每一项都是同一个引用
     ⇒ `screenDistance(本次点击, drawScreenPoints[0])` **恒为 0** ⇒ 第 4 次点击必然"闭合"
-  - **实测证据**（探针 `.tmp/probe-polygon-triangle.py`，判据 = `POST /api/analysis/within` 请求体）：
+  - **实测证据**（探针 `scripts/acceptance/probe-polygon-triangle.py`，判据 = `POST /api/analysis/within` 请求体）：
     修复前"点 4 个顶点"→ 第 4 次点击就发请求、外环 **4 个坐标 = 3 个顶点**；
     修复后"点 4 个顶点"→ **一个请求都不发**，闭合后外环 7 个坐标 / **去重 4 个顶点**
   - **解法**：`screenCopy(p) = new Cartesian2(p.x, p.y)`，`rectStart` 与 `drawScreenPoints` **只存副本**
@@ -438,11 +438,11 @@ PowerShell 只负责启动和查错，不显示图形。
   - **为什么四层验收都没抓住**：① 判据问的是"**有没有结果**"而不是"结果对不对"——
     三角形照样能查出数字，`stat-tracks` 照样有值；② 组件级桩测试**自己造 `{position:{x,y}}` 字面量**
     （每次都是新对象），替身比运行时**更宽容** ⇒ 这类缺陷在夹具里永远不红（**与上一次 enableRotate
-    Critical 是同一个病根**）。两处都补上了：`.tmp/cesium-stub.mjs` 新增
+    Critical 是同一个病根**）。两处都补上了：`scripts/acceptance/cesium-stub.mjs` 新增
     `clickAt/moveTo/downAt/upAt/dblClickAt`（复用同一对象），`check-within.py` 新增两条硬判据
   - **修复后的全量回归（2026-09-25 实测全绿）**：后端 `mvn test` **162** / 前端 node **157** /
     浏览器 8 脚本 **123**（stay 7、chart-pixels 10、import-pixels 6、filter 7、hotspots 17、
-    density 15、similarity 17、**within 44**）/ 组件级桩 `.tmp/check-runtime-task9.mjs` **67** /
+    density 15、similarity 17、**within 44**）/ 组件级桩 `scripts/acceptance/check-runtime-task9.mjs` **67** /
     `vite build` **1506 modules**
 - **回归基线（2026-09-25 实测，全绿）**：
   - 后端 `mvn test` **162**（基线 133 → 162 = +`RegionGeometryTest 16` +`WithinServiceTest 13`）
@@ -454,7 +454,7 @@ PowerShell 只负责启动和查错，不显示图形。
     hotspots **17** / density **15** / similarity **17** / **within 44**（最终审查修复波后从 31 升到 42；
     修复轮 7 再 +2 条多边形硬判据 → **44**，含"有结果时面板零溢出"四种组合、区域/命中轨迹实体断言、
     列表↔地图高亮）
-  - 组件级桩测试（`.tmp/check-runtime-task9.mjs`，不属基线计数但每次改地球都要跑）：**67 项 0 失败**
+  - 组件级桩测试（`scripts/acceptance/check-runtime-task9.mjs`，不属基线计数但每次改地球都要跑）：**67 项 0 失败**
     （修复轮 7 前是 64/3 —— 3 条红的正是这个缺陷）
   - **接口对拍 5 个全绿**：`verify-within-api` **105** / `verify-hotspot-api` **375** /
     `verify-density-api` **51** / `verify-similarity-api` **45** / `verify-data-edit-api`（提权下全绿）
@@ -470,14 +470,48 @@ PowerShell 只负责启动和查错，不显示图形。
 - ✅ **M3 的 Word 报告已交（2026-09-25）**：
   `D:\Calcite-note\2026-09-25-M3-圈选空间范围查询笔记.docx`（**581 KB / 190 段落 / 14 表格 / 5 张图**），
   仓库里也有 `docs/learning/2026-09-25-m3-within-notes.{md,docx}`；
-  配图脚本 `docs/learning/figs/make_within_figs.py`（3 张原理图）+ 截图脚本 `.tmp/shot-within-report.py`（2 张真实界面）。
+  配图脚本 `docs/learning/figs/make_within_figs.py`（3 张原理图）+ 截图脚本 `scripts/acceptance/shot-within-report.py`（2 张真实界面）。
   ⚠️ 重做/改写规则：**先写 `.md`**，再在**仓库根目录**跑
   `python scripts/tools/md2docx.py <md> <docx>`（图路径是相对的，必须在根目录跑），最后 Copy 到 `D:\Calcite-note\`；
   ⚠️ **绝不用 officecli 写 docx**（本机写不进、还假报通过 —— 见 global-knowledge）
   ⭐ **用户 2026-09-25 明确的报告基调**：他做这个项目是**边做边学**，所以报告要讲
   **做了什么 / 为什么做 / 算法原理 / 报错处理**，不是 API 文档（这两份 M3 报告都按这个写）
 
-### ▶ 下次接着做（2026-09-25 M3 收工时的状态）
+### M4 · 收尾（交付与文档，2026-09-27 完成）
+
+- 设计文档 `docs/superpowers/specs/2026-09-25-m4-wrapup-design.md`（7 个任务）；
+  **代码零改动**（只更正了 `StayPointCache.invalidate` 一条**过期注释**，审计发现的）
+- **五件交付**：
+  - **README 重写**（16 节）：从 M1 时代刷到 M4 —— 能力表按 M1/M2/M3 + 数据管理分组、
+    5 张真实截图、技术栈版本表、四层回归基线、演示数据、文档索引、已知限制、路线图
+  - **全景架构图** `docs/images/arch-overview.png`（1000×1569；脚本 `docs/learning/figs/make_readme_figs.py`）。
+    为"在 GitHub 按 ~900px 显示仍可读"做过**二次改版**（正文 13.5px、每框压到标题 + 2~3 行）
+  - **部署文档** `docs/DEPLOY.md`（1156 行 / 10 节 / **常见报错表 21 条**），并在**空库 `calcite_demo`**
+    上真实走了一遍"建库 → 初始化（含 PostGIS 扩展）→ 验证 → 导入演示数据"
+  - **演示数据集**：`scripts/demo/make-demo-data.py` → `scripts/db/04-demo-data.sql`
+    （**14 条合成轨迹 / 4,592 点 / 155.2 km**；固定种子两次生成**字节一致**；导入幂等）
+    + `scripts/demo/import-geolife.py`（自己下载 GeoLife 后批量导入）
+  - **技术要点自检** `docs/learning/技术要点自检.md`（436 行 / **28 题**，每题"为什么 / 不用它行不行 / 出处"）
+    + Word 交付 `D:\Calcite-note\2026-09-27-M4-技术要点自检.docx`（56 KB / 355 段落 / 33 标题）
+- **脚手架整理**：`.tmp/` 里 42 个**强制入库**的文件三桶归位 ——
+  22 个验收脚本 → `scripts/acceptance/`（+ 迁移说明与对照表 `scripts/acceptance/README.md`）、
+  1 个图生成器 → `docs/learning/figs/render-density-scales.py`、
+  19 个一次性工具 `git rm --cached`（**本地文件保留**）；`git ls-files .tmp` **42 → 0**；
+  加 `LICENSE`(MIT)；旧交接件 → `docs/archive/`
+- **M4 特有的四条验收（全绿）**：
+  - 从零跑通：空库 `calcite_demo` 演练通过（本机 psql 在 `E:\PostgreSQL\bin\psql.exe`，非默认安装目录）
+  - 五个面板都有东西看：`scripts/acceptance/verify-demo-data.py` **13 项 / 0 失败**
+    （在**只装演示数据**的库上跑：再起一个后端实例 `SERVER_PORT=8081` + `SPRING_DATASOURCE_URL=…calcite_demo`）
+  - 链接与图片：`scripts/acceptance/check-doc-links.py` —— README 21 个链接/图片 **0 失效**、0 过时表述
+  - 既有基线不退化：后端 **162** / node 7 套件 **157** / 浏览器 8 脚本 **123** /
+    接口对拍（within **105**、density **51**、similarity 全绿、hotspot 全绿）
+- ⚠️ **本轮踩到的 4 个真问题**（逐个记在下面「踩坑记录 · M4」里）：生成器自检把错误一起"过滤"、
+  裸 `NULL` 让整列被推断成 text、psql 缺 `-w` 静默停在密码提示、我的验收脚本读错响应字段名
+- ⚠️ **两个刻意保留的东西**：① `calcite_demo` 演练库**没删**（一条命令就能重建，想删见 DEPLOY 第 9.3 节）；
+  ② `verify-data-edit-api.py` / `check-data-edit.py` 是**破坏性**脚本（真删一条轨迹，**id 会变**），
+  本轮**没有**纳入等价性重跑，已在 `scripts/acceptance/README.md` 里写明
+
+### ▶ 下次接着做（2026-09-27 M4 收工时的状态）
 - ✅ **M2 全部完成**（四个阶段：停留点识别 → 停留热点 → 网格密度 → 轨迹相似度）；
   前端**四档**「停留点 / 热点 / 密度 / 相似」可用
 - ✅ **已推送到 GitHub（2026-09-17）** —— `e62b1c8..7e6fe23  main -> main`，
@@ -498,13 +532,17 @@ PowerShell 只负责启动和查错，不显示图形。
   第 142 行「M4 收尾（第 12 周）」那一行，**不是**这里新造的阶段
   ⚠️ **用户 2026-09-25 明确：写 Word 文档不算 M4** —— Word 报告是"阶段交付物"这一既有惯例
   （见本文件「文档工具决策」与计划里的 Task 11），与 M4 的四项是两回事
+  ✅ **2026-09-27 已完成**（见上一节「M4 · 收尾」），五项交付 + 脚手架整理全部落地
 - ✅ **合并已完成**（2026-09-25）：`feat/m3-within` 已**快进合并回 `main`**（`55f8a3a..301d686`，28 文件 / +5974 −137），
   特性分支已删除。合并后又在 `main` 上做了**修复轮 7**（多边形三角形缺陷）+ 文档同步。
 - ✅ **已推送（2026-09-25，用户确认"M3 里程碑"后）**：`1c2b4e3..2f8056a  main -> main`，
   **62 个提交**上传；`git fetch` 后本地与 `origin/main` **0 / 0 完全同步**，`origin/main = 2f8056a`。
   推送命令在沙箱内**必须提权 `danger-full-access`**（否则 `sh.exe: couldn't create signal pipe, Win32 error 5`）。
   ⚠️ 该次推送里包含**两个**提交：`f48ad46`（多边形三角形修复）+ `2f8056a`（M3 Word 学习笔记）。
-- 📌 **下一个推送节点**：M4 收尾（README + 架构图 + 部署文档 + 演示数据集）完成后。
+- 📌 **下一个推送节点**：✅ M4 已于 2026-09-27 完成 → **M4 里程碑推送待用户发话**
+  （本地 `main` 领先 `origin/main`；推送命令见上面的推送说明，沙箱内必须提权）。
+  这是总设计文档里**最后一个里程碑**（M1→M4 全部完成），推完即"项目收尾"。
+  可选：用户若还要一份 **M4 阶段 Word 报告**（像 M3 那样的"讲做了什么/为什么"），一条 `md2docx.py` 即可生成。
 
 - ✅ **用户点名的 Word 交付物已交**（2026-09-21）——
   `D:\Calcite-note\2026-09-21-数据管理改动报告.docx`（40 KB / 61 段落 / 5 表格），
@@ -542,7 +580,7 @@ PowerShell 只负责启动和查错，不显示图形。
      对方轨迹稀疏时会**低估**（实测 GeoLife 采样间距 5~42 米，真值 100% 能算成 43%）；
      但 ⭐ **相似度本身是可靠的**（取小那一路恰好是本来更大的那一路，六组实测差 ≤ 0.6pp）。
      要更准就得上点到折线，**代价 19 倍**（0.79 秒 → 12.8 秒），当前不做
-- 跑浏览器验收（`.tmp/check-*.py` 系列）必须**后端 8080 + 前端 5173 同时运行**；
+- 跑浏览器验收（`scripts/acceptance/check-*.py` 系列）必须**后端 8080 + 前端 5173 同时运行**；
   重启后端的命令见实施计划里的 `spring-boot:run`（Vite 在沙箱内要提权 `danger-full-access`）
 
 **⚠️ 第二阶段结尾审查提出、但决定推迟的两件事**（不是缺陷，是下一阶段顺手补的债）：
@@ -550,7 +588,7 @@ PowerShell 只负责启动和查错，不显示图形。
    `findAllByTrackIds` 没有任何 `@WebMvcTest`。后果很具体：**把 `HotspotDto.centerLat` 改个名，
    后端 72 项 + 前端 25 项全都还是绿的**；`?radiusM` / `?minVisits` / `from` / `to` 四条参数路径
    和 400 分支一次都没被自动化测过；`params` 回显字段全仓库无人断言。
-   现在只靠**手工**的 `.tmp/verify-hotspot-api.py` 兜着（它需要活的后端 + 数据库 + 那 25 条特定轨迹）。
+   现在只靠**手工**的 `scripts/acceptance/verify-hotspot-api.py` 兜着（它需要活的后端 + 数据库 + 那 25 条特定轨迹）。
    → 建议在第三阶段开工时顺手加一个 MockMvc 用例（service 用 mock，不需要数据库）。
 2. **排序下拉在现有数据上"看不出效果"** —— 三个热点在三个口径下**本来就同序**
    （1730/4/3 → 1228/3/3 → 650/2/1），所以切排序时列表顺序不变。
@@ -638,6 +676,34 @@ PowerShell 只负责启动和查错，不显示图形。
    ③ **判据要问"结果对不对"，不能只问"有没有结果"** —— M3 四层验收全绿却漏掉它，
    因为每条断言都只要求"查出了数字"（三角形照样有数字）。**用户手工用一次就发现了**：
    ⭐ **自动化验收要盯住"用户能做什么"，而不是"接口回了什么"**。
+
+### M4 · 收尾（2026-09-27，四条）
+
+1. **⚠️ 自检如果"假设本身是错的"，它会把同一处错误一起放过去** ——
+   **现象**：演示数据 SQL 导入报 `INSERT 的表达式多于指定的字段数`（SELECT 把 `v.lon, v.lat` 当成
+   独立列选了出来，而目标列里没有它们，它们只用来拼 `geom`）。
+   **根因**：生成器里的 `check_sql_shape()` **在期望列表里主动过滤掉了 `lon/lat`**
+   （`[c for c in select_cols if c not in ("lon","lat")]`）—— 检查规则和生成逻辑犯了**同一个错误假设**，
+   于是这条"结构性自检"照样通过。**教训**：自检必须写成**硬断言**（"lon/lat 不得作为独立列出现"），
+   而不是"把可疑项从期望里剔掉"——**过滤掉的那一刻，检查就失效了**。
+2. **裸 `NULL` 会让 PostgreSQL 把整列推断成 text** ——
+   **现象**：海拔全 NULL 的那条轨迹插 `double precision` 报 `表达式的类型为 text`。
+   **根因**：`VALUES` 里该列**全是 `NULL`** 时类型推断为 text（混有数字时不会）。
+   **解法**：一律写 `NULL::double precision`；并加一条通用自检"生成物里不允许出现裸 NULL"。
+   ⭐ **教训：模板化 SQL 的"列名/列数/列类型"三件事都要有断言，光看"生成成功"不算数。**
+3. **`psql` 不加 `-w` 会静默停在密码提示上** ——
+   **现象**：`verify-similarity-api.py` 卡了 **30 分钟**没有任何输出；`Get-Process python` 显示
+   **CPU 只有 0.2s**（在等而不是在算），`Get-Process psql` 才看到两个零 CPU 的 psql 子进程。
+   **根因**：脚本用 `subprocess` 调 psql 而没有 `PGPASSWORD` → psql 进入交互式密码提示，永远等下去。
+   **解法**：三个用 psql 的验收脚本一律加 `-w`（绝不提示）+ 缺变量时立刻 `exit 2` 并打印怎么设。
+   ⭐ **教训：给自动化脚本调用交互式 CLI 时，必须显式禁止它等待输入**（否则"卡住"和"在算"外观一样）。
+4. **验收脚本自己读错响应字段名，会伪装成"功能坏了"** ——
+   **现象**：演示数据五面板验收首轮 **9 过 4 失败**（停留点 0、热点 0、密度最密格 0）。
+   **根因**：数据与接口都是对的，是我的脚本按错的键名取值 ——
+   停留点接口返回 `{trackId, count, stays[]}`（我读 `stayPoints`）、热点返回 `{…, hotspots[]}`（我读 `clusters`）、
+   密度格子是 `{lon, lat, points, tracks, value}`（我读 `count`）。
+   **解法**：先打印真实响应的键名再断言；改完 **13/13 全绿**。
+   ⭐ **教训：写验收脚本前先 `curl` 一次真实响应看字段名；"红了"先怀疑判据，再怀疑实现。**
 
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS

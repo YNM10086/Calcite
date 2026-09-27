@@ -443,7 +443,7 @@ M1 三个阶段，各自解决一个问题：
 | 后端 JUnit `mvn test` | 41 |
 | 回放纯逻辑 `npm run check:playback` | 17 |
 | 曲线纯逻辑 `npm run check:chart` | 37 |
-| 浏览器验收 `.tmp/check-import-pixels.py` | 5 |
+| 浏览器验收 `scripts/acceptance/check-import-pixels.py` | 5 |
 | **合计** | **100** |
 
 ### 今天新增的概念，一句话各记一个

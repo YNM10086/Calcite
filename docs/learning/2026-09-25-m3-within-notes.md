@@ -266,7 +266,7 @@ SELECT ST_IsValid(区域) AS ok, ST_AsGeoJSON(区域) AS region, ...
 
 ### 7.2 第一步：先把"感觉"变成一条可判定的证据
 
-我没有先读代码，而是先写了探针 `.tmp/probe-polygon-triangle.py`，把判据定成
+我没有先读代码，而是先写了探针 `scripts/acceptance/probe-polygon-triangle.py`，把判据定成
 **`POST /api/analysis/within` 的请求体**（不是"看起来对不对"）：
 
 | | 点第 4 个顶点（离起点 120 px） | 闭合后请求体外环 |
@@ -334,7 +334,7 @@ drawScreenPoints = [...drawScreenPoints, screenCopy(m.position)]
 
 - 后端 162 项 JUnit；
 - 前端 node 157 项（含 `check-region.mjs` 23 项纯逻辑）；
-- 浏览器验收 `.tmp/check-within.py` 42 项（**它确实画过多边形**）；
+- 浏览器验收 `scripts/acceptance/check-within.py` 42 项（**它确实画过多边形**）；
 - 接口对拍 5 个脚本。
 
 **两个原因，性质完全不同：**
@@ -351,7 +351,7 @@ drawScreenPoints = [...drawScreenPoints, screenCopy(m.position)]
 **对象字面量** `{ position: { x: 100, y: 100 } }` —— **每次都是新对象**，
 于是"存引用"这种写法在假环境里永远是对的。
 → 改法：替身必须**照抄运行时的形状** ——
-`.tmp/cesium-stub.mjs` 新增 `clickAt / moveTo / downAt / upAt / dblClickAt`，
+`scripts/acceptance/cesium-stub.mjs` 新增 `clickAt / moveTo / downAt / upAt / dblClickAt`，
 它们**复用同一个对象**（复刻 Cesium 的单例语义），测试全部改用它们。
 结果是同一套断言立刻变红：**64 通过 / 3 失败** →（修复后）**67 通过 / 0 失败**。
 

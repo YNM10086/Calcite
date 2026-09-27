@@ -20,8 +20,8 @@
 | **路网匹配评估** | ✅ 完成 —— **结论：不做（不实现）**，理由见设计文档第 12 节 |
 
 其他：空间查询优化（`EXPLAIN ANALYZE`）也已在设计文档第 2.3 / 2.5 节给出实测结论与取舍。
-**回归基线**：后端 `mvn test` 162 / 前端 node 7 套件 **157** / 浏览器 `.tmp/check-within.py` **44** 项
-（组件级桩测试 `.tmp/check-runtime-task9.mjs` **67** 项，不属基线计数）。
+**回归基线**：后端 `mvn test` 162 / 前端 node 7 套件 **157** / 浏览器 `scripts/acceptance/check-within.py` **44** 项
+（组件级桩测试 `scripts/acceptance/check-runtime-task9.mjs` **67** 项，不属基线计数）。
 **下一步 = M4 收尾**（README + 架构图 + 部署文档 + 演示数据集）。
 
 > ⭐ **合并之后的修复轮 7（2026-09-25）**：用户手工试用时发现**自由多边形只能画出三角形**
@@ -200,7 +200,7 @@ netstat -ano | Select-String ":8080\s" | Select-String "LISTENING"
 2. **跑验收前必须确认后端是当前源码**（判别：JVM 启动时间 vs class 编译时间）
 3. 沙箱写不进 `D:\Calcite-note\`（WinError 5，环境限制不是代码问题）
 4. `@Value` **绑不了 YAML 列表** —— 必须 `@ConfigurationProperties`
-5. **`.tmp/` 被 gitignore**，加文件必须 `git add -f`
+5. **`.tmp/` 被 gitignore**，加文件必须 `git add -f`（⚠️ 2026-09-25 起**别再把验收脚本放进 `.tmp/`** —— 可重复运行的脚本统一放 `scripts/acceptance/`，见该目录 `README.md`）
 6. **验收判据不要写死数据量** —— 从接口取期望值（否则导一次数据就废一片）
 
 ### 退路（做"会让数据变少"的操作之前确认）

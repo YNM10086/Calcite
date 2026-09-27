@@ -6,17 +6,19 @@ r"""把真实网格数据用【三种色阶】各画一遍，并排对比。
 
 输入的 .tmp/density-grid.json 由 psql 导出（北京范围 0.002° 网格，1294 个非空格子）。
 
-用法：
+用法（**从仓库根目录运行**，因为 SRC/OUT 是仓库根相对路径）：
     $env:PYTHONIOENCODING='utf-8'
-    & "E:\python\python_address\python.exe" .tmp\render-density-scales.py
+    & "E:\python\python_address\python.exe" docs\learning\figs\render-density-scales.py
 """
 import json
 import math
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "..", "docs", "learning", "figs"))
+# ⚠️ 2026-09-25 从 .tmp/ 搬到 docs/learning/figs/（与 make_figs.py 同目录）后，
+#    原来那句 ".."/"docs"/"learning"/"figs" 会解析成 docs/learning/figs/../docs/learning/figs
+#    （即 docs/learning/docs/learning/figs）—— 不存在。同目录后直接用本目录即可。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_figs import Fig, INK, GRAY, RED, GREEN, ORANGE, BLUE  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 

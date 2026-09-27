@@ -836,7 +836,7 @@ http://localhost:8080/api/tracks/999
 
 ## 练习 4：在 psql 里验证「度 vs 米」
 
-把下面存成 `E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\test-degree.sql`：
+把下面存成 `E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp/test-degree.sql`：
 
 ```sql
 \encoding UTF8
@@ -853,7 +853,7 @@ WHERE external_id = 'SAMPLE-001';
 # 数据库密码见 backend/src/main/resources/application-local.yml（该文件已 gitignore，不会进仓库）
 $env:PGPASSWORD='<你的数据库密码>'
 $env:LC_MESSAGES='C'
-& "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp\test-degree.sql"
+& "E:\PostgreSQL\bin\psql.exe" -U postgres -d calcite -P pager=off -f "E:\JAVA_IDEA_package\JAVA_Project\Calcite\.tmp/test-degree.sql"
 ```
 
 看到 0.085967 和 9444.24 两个数。**这一步的目的**：亲手体验单位差异。

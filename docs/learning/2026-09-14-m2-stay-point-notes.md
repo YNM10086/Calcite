@@ -497,7 +497,7 @@ assertEquals(OffsetDateTime.parse("2008-10-23T09:55:06Z"), s.endTime());
 
 ### 第三层 · 端到端（浏览器里真的点一遍）
 
-`.tmp/check-stay-points.py`（Playwright + Pillow），**7 项断言**，在真实浏览器里验证：
+`scripts/acceptance/check-stay-points.py`（Playwright + Pillow），**7 项断言**，在真实浏览器里验证：
 
 - 停留点列表真的渲染出来了
 - 地球上真的出现了橙色圆圈
@@ -510,7 +510,7 @@ assertEquals(OffsetDateTime.parse("2008-10-23T09:55:06Z"), s.endTime());
 | 后端单测 | `mvn test` | **58** |
 | 回放回归 | `npm run check:playback` | 17 |
 | 曲线回归 | `npm run check:chart` | 37 |
-| 浏览器验收 | `python .tmp/check-stay-points.py` | **7** |
+| 浏览器验收 | `python scripts/acceptance/check-stay-points.py` | **7** |
 | | **合计** | **119** |
 
 > 💡 **这 119 项的意义**：以后你改任何一处代码，只要跑一遍就知道有没有把别的功能弄坏。
@@ -576,7 +576,7 @@ node scripts/check-playback.mjs
 node scripts/check-chart.mjs
 
 # 浏览器验收（7 项，需要后端和前端都在跑）
-& "E:\python\python_address\python.exe" .tmp/check-stay-points.py
+& "E:\python\python_address\python.exe" scripts/acceptance/check-stay-points.py
 
 # 直接调接口看结果（把 5 换成任意轨迹 id）
 Invoke-RestMethod "http://localhost:8080/api/tracks/5/stay-points" | ConvertTo-Json -Depth 5
