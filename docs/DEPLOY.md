@@ -1,11 +1,20 @@
 # Calcite 部署指南
 
 > **本文状态**：第 **1~10 节已全部写完**（适用范围 / 前置条件 / 数据库 / 后端配置 / 启动后端 /
-> 启动前端 / 演示数据 / 常见报错表 / 停止与清理 / 跑验收）。其中**第 5~10 节的命令本轮未实测**，
-> 输出一律标「预期输出（待实测）」；等主控做完真实演练后再替换成实测结果。
+> 启动前端 / 演示数据 / 常见报错表 / 停止与清理 / 跑验收）。
 >
-> **硬规则**：凡是本文里**没有真正执行过**的命令，输出一律写成「预期输出（待实测）」，
-> 不许当成实测结果。已实测的会标「✅ 实测」并注明机器与日期（2026-09-27，Windows）。
+> **实测进度（2026-09-27，Windows 11 + PostgreSQL 18.3 + PostGIS 3.6 + JDK 25 + Node 24）**：
+> 已在**空库 `calcite_demo`** 上真实走通 ——
+> **§3 数据库（建库 → 初始化 → 验证）、§3.4 找 psql、§5.1 `GET /api/health`、§6.2 起 Vite、
+> §7.1 演示数据导入、§10 的测试与构建数字**。这些位置的实测输出集中在文末
+> **「附录 · 实测记录（2026-09-27）」**，正文里对应的「（待实测）」以附录为准。
+>
+> **仍未实测**（正文里继续标「（待实测）」，这就是本文的诚实边界）：GeoLife 官方下载链接可达性、
+> macOS / Linux 分支命令、`npm install` 的输出、§9.2 清理演示数据、§9.3 `DROP DATABASE …
+> WITH (FORCE)` 与 `pg_dump`。
+>
+> **硬规则（不变）**：凡是本文里**没有真正执行过**的命令，输出一律写成「预期输出（待实测）」，
+> 不许当成实测结果。已实测的标「✅ 实测」并注明机器与日期。
 
 ---
 
@@ -1162,3 +1171,96 @@ python scripts/acceptance/verify-density-api.py
 >
 > **第 1~4 节的正文一个字没改**（只更新了文首的状态块 —— 它原来写着「第 5 节之后尚未编写」；
 > 那部分里原有的「待实测」标记也保持不变）。
+
+---
+
+## 附录 · 实测记录（2026-09-27）
+
+> 环境：Windows 11 · PostgreSQL 18.3（装在**非默认目录** `E:\PostgreSQL`）· PostGIS 3.6 · JDK 25.0.2 ·
+> Node v24.14.0 · Maven 3.9+。演练用一个**全新的空库 `calcite_demo`**（不碰主库 `calcite`）。
+
+**① §3.2 初始化（`psql -f scripts/db/01-schema.sql`）** —— 退出码 0，输出含：
+
+```
+CREATE EXTENSION          （postgis）
+CREATE EXTENSION          （btree_gist）
+CREATE TABLE × 4          （track / track_point / stay_point / …）
+CREATE INDEX × 8
+########## 补列（对已存在的老库生效）##########
+注意:  关系 "track_point" 的列 "is_outlier" 已经存在，跳过
+ALTER TABLE
+```
+
+⚠️ 最后那段「补列」在**新建库**上也会打印 —— 它是幂等脚本的正常输出，不是错误。
+
+**② §3.3 验证**
+
+```
+$ psql -d calcite_demo -c "\dt"
+ Schema |     Name        | Type  |  Owner          ← 4 行
+ public | spatial_ref_sys | table | postgres        （PostGIS 自带）
+ public | stay_point      | table | postgres
+ public | track           | table | postgres
+ public | track_point     | table | postgres
+
+$ psql -d calcite_demo -c "SELECT PostGIS_Version();"
+ 3.6 USE_GEOS=1 USE_PROJ=1 USE_STATS=1
+```
+
+**③ §3.4 找 psql（本机实测）**
+
+```
+$ sc.exe qc postgresql-x64-18
+BINARY_PATH_NAME : "E:\PostgreSQL\bin\pg_ctl.exe" runservice -N "postgresql-x64-18" -D "E:\PostgreSQL\data" -w
+$ & "E:\PostgreSQL\bin\psql.exe" --version
+psql (PostgreSQL) 18.3
+```
+
+**④ §5.1 `GET /api/health`（真实响应体）**
+
+```json
+{"status":"UP","application":"calcite-backend",
+ "database":"PostgreSQL 18.3 on x86_64-windows, compiled by msvc-19.44.35225, 64-bit",
+ "postgis":"3.6 USE_GEOS=1 USE_PROJ=1 USE_STATS=1"}
+```
+
+**⑤ §6.2 前端启动（真实输出片段）**
+
+```
+> calcite-frontend@0.0.1 dev
+> vite
+
+  VITE v8.2.2  ready in 907 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+[vite-plugin-static-copy] Collected 389 items.
+```
+
+（`npm install` 的输出本轮未实测 —— 本机 `node_modules` 已存在。）
+
+**⑥ §7.1 演示数据导入（真实结果）** —— `psql -f scripts/db/04-demo-data.sql`，退出码 0：
+
+```
+tracks = 14    points = 4592    km = 155.2
+is_outlier 的点 = 9            elevation_m IS NULL 的点 = 1525
+```
+
+- 概览表打印 14 行（`DEMO-001` … `DEMO-014`，含每条的点数/距离/时长/漂移点数/有海拔点数）；
+- **连续执行两次结果一致**（文件幂等：开头 `DELETE FROM track WHERE external_id LIKE 'DEMO-%'`）；
+- 生成器 `scripts/demo/make-demo-data.py` 连跑两次**字节一致**（643,185 字节，SHA-256 相同）；
+- 五面板验收 `scripts/acceptance/verify-demo-data.py`（在只装演示数据的库上跑，后端实例
+  `SERVER_PORT=8081` + `SPRING_DATASOURCE_URL=…calcite_demo`）：**13 项通过 / 0 失败**。
+
+**⑦ §10 测试与构建（本轮真跑的数字）**
+
+| 命令 | 实测 |
+|---|---|
+| `mvn -f backend/pom.xml test` | **162 项，0 失败**（不需要数据库） |
+| `cd frontend && npm run build` | **1506 modules / built** |
+| 前端纯逻辑 `npm run check:*`（7 个套件） | **157 项**（playback 17 / chart 37 / hotspot 25 / density 25 / similarity 19 / region 23 / data-edit 11） |
+| 浏览器验收 `scripts/acceptance/check-*.py`（8 个） | **123 项**（stay 7 / chart-pixels 10 / import-pixels 6 / filter 7 / hotspots 17 / density 15 / similarity 17 / within 44） |
+| 接口对拍 `scripts/acceptance/verify-*-api.py` | within **105** / density **51** / similarity 全绿 / hotspot 全绿 |
+
+⚠️ 两个**破坏性**脚本（`verify-data-edit-api.py`、`check-data-edit.py`）本轮**没跑** ——
+它们按设计会真删一条轨迹（跑完 id 会变），见 `scripts/acceptance/README.md`。
