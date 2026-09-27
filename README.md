@@ -4,11 +4,7 @@
 >
 > *A personal GPS trajectory analysis platform — PostGIS + Spring Boot 3 + Vue 3 + Cesium.*
 
-![Calcite 界面：轨迹列表、三维地球上的轨迹、速度曲线与回放控制条](docs/images/screenshot-m1.png)
-
-*上图是 M1 完成时的实际界面：左侧导入并选中的是一条真实校园跑步轨迹（2342 个点 / 3.93 km / 39 分钟），
-底部是速度曲线——中间两处尖刺是**真实存在的 GPS 漂移**，已被程序自动标记；海拔面板显示
-「这条轨迹没有海拔数据」，因为数据源（手机运动 App）没有记录海拔。*
+![Calcite 全景：四层架构、数据流、已实现能力与三条最硬的技术取舍](docs/images/arch-overview.png)
 
 ---
 
@@ -21,48 +17,76 @@
         ↓  导入：解析 → 清洗（标记 GPS 漂移）→ 入库
 PostgreSQL + PostGIS（空间索引、时空联合索引）
         ↓  REST API
-Spring Boot 3 后端
+Spring Boot 3 后端（web / service / repository / domain）
         ↓  HTTP / JSON
-Vue 3 + Cesium 前端（三维回放 + 速度/海拔曲线 + 时空分析）
+Vue 3 + Cesium 前端（三维回放 + 曲线 + 空间分析 + 圈选）
 ```
 
-不是教程跟做，也不是现成模板改造——**设计文档、实施计划、单元测试、架构图都在仓库里**。
+不是教程跟做，也不是现成模板改造——**设计文档、实施计划、单元测试、回归脚本、架构图都在仓库里**，
+每个阶段的取舍都写了"为什么这么做、不用它行不行"（见 [技术要点自检](docs/learning/技术要点自检.md)）。
+
+**当前数据量**：**246 条轨迹 / 286,019 个点**（GeoLIFE 北京 user 000、上海 user 001、京沪长途 3 条、自采 GPX 3 条）。
 
 ---
 
-## 已完成的功能（M1 · 看得见）
+## 已实现的功能
+
+### M1 · 看得见（导入与可视化）
 
 | 功能 | 说明 |
 | --- | --- |
 | **轨迹导入（网页上传）** | 上传 GPX 文件，自动识别格式、解析、清洗、入库。**按文件内容识别格式，不看扩展名** |
-| **轨迹导入（批量）** | 读取本地 GeoLife 数据集目录，批量灌入 `.plt` 轨迹（供大数据量演示） |
+| **轨迹导入（批量）** | 读取本地 GeoLife 数据集目录，批量灌入 `.plt` 轨迹 |
 | **数据清洗** | 自动标记疑似 GPS 漂移点（**自适应阈值**，见下）；海拔缺失时归 NULL 而不是填 0 |
 | **幂等导入** | 同一文件重复上传不会产生第二条轨迹（按**文件内容 SHA-256** 判重，改文件名也认得出） |
 | **三维可视化** | Cesium 地球绘制轨迹线、起点/终点标记，相机自动飞到轨迹范围 |
 | **时间轴回放** | 可变倍速播放（整条轨迹固定约 60 秒播完）、可拖动进度、循环开关、移动标记点 |
-| **速度 / 海拔曲线** | 手写 SVG 双图，与回放游标**双向联动**：拖进度条曲线游标跟着走，点曲线能跳到那一刻；悬停显示该时刻读数 |
+| **速度 / 海拔曲线** | 手写 SVG 双图，与回放游标**双向联动**；悬停显示该时刻读数 |
 | **轨迹列表与详情** | 距离、时长、点数；支持 `?track=<id>` 深链接 |
 
-### 数据清洗：为什么用自适应阈值
+### M2 · 算得出（四项时空分析）
 
-真实 GPS 数据一定脏。我那份 2342 个点的校园跑步数据里，有 **4 段速度超过 8 m/s，最高 12.13 m/s（43.7 km/h）**
-——人跑不出这个速度，这是城市环境下的 GPS 漂移。
+| 功能 | 说明 | 关键取舍 |
+| --- | --- | --- |
+| **停留点识别** | 从轨迹里找出"人在哪停过、停了多久" | 半径 + 时长 + **断档**三个条件；阈值自适应 |
+| **停留热点** | 把多次到访的停留点聚类成"热点"（点大小=次数，颜色=来过几条轨迹） | 聚类半径 200 m；**按 trackId 缓存停留点，缓存永不失效** |
+| **网格密度** | 视野内的格网热力图，支持早/午/晚时段筛选 | **按视野裁剪**（全量最细档会有 75,970 格 / 3.3 MB）+ **对数色阶** |
+| **轨迹相似度** | 给定一条轨迹，找出走向相似的其他轨迹（重合度 %） | 取 `min(正向, 反向)` 而不是平均；容差有上限 |
 
-判定规则不是写死的阈值，而是：
+### M3 · 圈得准（空间范围查询）
 
-```
-异常段 = 速度 > max(8 m/s, 3 × 该轨迹速度的中位数)
-```
+| 功能 | 说明 | 关键取舍 |
+| --- | --- | --- |
+| **圈选（第五档）** | 在地球上**拉框 / 画自由多边形 / 点中心给半径**，立刻知道哪些轨迹穿过它、区域内有多少点、累计多长、跨越什么时间，并把命中轨迹叠在地球上 | 缓冲区由**后端算成圆多边形**再走同一条判定（7.9 ms，代替 `ST_DWithin` 的 303 ms）；`region` **回显后端真正用过的几何**；非法几何（自交）一律 400 而不是静默给错数字 |
 
-**为什么不能用固定阈值**：GeoLife 数据集里包含**汽车（约 20 m/s）甚至火车（约 80 m/s）**的轨迹，
-一刀切 8 m/s 会把它们全部误标。用中位数能让阈值**自动适应轨迹类型**：
+### 数据管理
 
-| 轨迹类型 | 速度中位数 | 实际阈值 | 效果 |
-| --- | --- | --- | --- |
-| 校园跑步 | 1.63 m/s | 8.0 m/s | 12.13 m/s 那段被准确标出 |
-| GeoLife 汽车 | ~12 m/s | 36 m/s | 正常行驶 20 m/s 不误标 |
+添加 / 替换 / 改名 / 删除都能在界面上做：删除**先导出 GeoJSON 到回收站再删库**（导出失败就不删）；
+同名上传返回 409 让你选「替换 / 新增 / 取消」；任何写操作都会清掉相关缓存（相似度与停留点缓存）。
 
-实测在 2342 个点中**精确标记 8 个**（占 0.34%），位置与独立用 Python 复算的结果完全一致。
+---
+
+## 真实界面
+
+圈选（五边形区域 + 命中轨迹 + 面板统计）：
+
+![圈选：自由多边形选区与统计卡](docs/learning/figs/fig-within-shot-polygon.png)
+
+缓冲区（半径 1 km，后端把圆算成多边形再判定）：
+
+![圈选：缓冲区圆形区域](docs/learning/figs/fig-within-shot-buffer.png)
+
+网格密度（同一座城市，早高峰 vs 全天）：
+
+![密度：早高峰](docs/learning/figs/2026-09-17-density/density-morning.png)
+
+轨迹相似度：
+
+![相似度：主线与匹配轨迹叠在地球上](docs/learning/figs/2026-09-17-m2-similarity/similarity-shot.png)
+
+M1 界面（回放 + 速度曲线，曲线中间的尖刺是真实存在的 GPS 漂移）：
+
+![M1 界面：轨迹列表、三维地球、速度曲线与回放控制条](docs/images/screenshot-m1.png)
 
 ---
 
@@ -70,12 +94,12 @@ Vue 3 + Cesium 前端（三维回放 + 速度/海拔曲线 + 时空分析）
 
 | 层 | 技术 | 版本 |
 | --- | --- | --- |
-| 后端 | Spring Boot / Java / Maven | 3.5.16 / 25 / 3.9.11 |
-| 持久层 | Spring Data JPA + Hibernate Spatial | 6.6.53.Final |
+| 后端 | Spring Boot / Java / Maven | 3.5.16 / 25 / 3.9+ |
+| 持久层 | Spring Data JPA + Hibernate Spatial | 6.6.x |
 | 数据库 | PostgreSQL + PostGIS | 18.3 / 3.6 |
 | 前端 | Vue 3 + Vite | 3.5.42 / 8.2.2 |
 | 三维 | Cesium | 1.145.0 |
-| 测试 | JUnit 5 + Mockito（后端）、Node 内置 assert（前端纯逻辑）、Playwright + Pillow（浏览器像素验收） | — |
+| 测试 | JUnit 5 + Mockito（后端）、Node 内置 `assert`（前端纯逻辑）、Playwright + Pillow（浏览器像素验收） | — |
 
 **前端运行时依赖只有 `vue` + `cesium` 两个**——速度/海拔曲线是手写 SVG，没有引入任何图表库。
 
@@ -83,17 +107,17 @@ Vue 3 + Cesium 前端（三维回放 + 速度/海拔曲线 + 时空分析）
 
 ## 架构
 
-![四层架构](docs/learning/figs/fig1-arch.png)
+![四层架构（M1 时代的分层图）](docs/learning/figs/fig1-arch.png)
 
 | 层 | 职责 | 不该做的事 |
 | --- | --- | --- |
 | `web/` | 收 HTTP 请求、决定返回什么 | 不写 SQL |
-| `service/` | 算法与编排（解析、清洗、导入流程） | 不碰 HTTP |
-| `repository/` | 查/存数据库（方法名即 SQL） | 不碰 HTTP |
+| `service/` | 算法与编排（解析、清洗、导入、空间分析） | 不碰 HTTP |
+| `repository/` | 查/存数据库（方法名即 SQL，空间查询用 native SQL） | 不碰 HTTP |
 | `domain/` | 数据库表的 Java 影子 | 不认识前端 |
 
-完整的目录结构、请求链路、分层理由都画在图里：
-[项目结构地图](docs/learning/2026-09-10-calcite-structure-map.md)（7 张流程图）
+完整的目录结构、请求链路、分层理由画在 7 张图里：
+[项目结构地图](docs/learning/2026-09-10-calcite-structure-map.md)。
 
 ---
 
@@ -108,7 +132,7 @@ Vue 3 + Cesium 前端（三维回放 + 速度/海拔曲线 + 时空分析）
 ### 1. 建库建表
 
 ```bash
-psql -U postgres -d calcite -f scripts/db/01-schema.sql   # 建表 + 索引（可重复执行）
+psql -U postgres -d calcite -f scripts/db/01-schema.sql   # 建表 + 索引 + PostGIS 扩展（可重复执行）
 psql -U postgres -d calcite -f scripts/db/02-sample-track.sql   # 灌一条示例轨迹
 ```
 
@@ -126,6 +150,7 @@ cp backend/src/main/resources/application-local.yml.example \
 
 ```bash
 mvn -f backend/pom.xml spring-boot:run
+curl http://localhost:8080/api/health   # 期望返回数据库与 PostGIS 版本
 ```
 
 ### 4. 启动前端（:5173）
@@ -134,32 +159,51 @@ mvn -f backend/pom.xml spring-boot:run
 cd frontend && npm install && npm run dev
 ```
 
-打开 <http://localhost:5173>，点左侧轨迹列表里的任意一条即可看到回放和曲线；
-点「导入轨迹」可以上传自己的 GPX 文件。
+打开 <http://localhost:5173>（⚠️ 用 `localhost` 而不是 `127.0.0.1`：Vite 只绑 IPv6）。
+
+**更详细的一步步部署（含常见报错排查）：[docs/DEPLOY.md](docs/DEPLOY.md)**
 
 ---
 
-## 测试
+## 演示数据
+
+没有数据也能马上看到效果——仓库里带一份**合成的演示数据集**（14 条轨迹，覆盖五个分析面板）：
 
 ```bash
-# 后端单元测试（41 项）
+psql -U postgres -d calcite -f scripts/db/04-demo-data.sql
+```
+
+导入后：停留点 / 热点 / 密度 / 相似度 / 圈选 每一档都有东西看（含一条带 GPS 漂移的轨迹、一条无海拔的轨迹、
+三条多次到访同一广场造出的热点、两条互为相似第一名的通勤往返）。数据由 `scripts/demo/make-demo-data.py`
+生成（**固定随机种子**，连跑两次输出字节一致）；清理只需 `DELETE FROM track WHERE external_id LIKE 'DEMO-%'`。
+
+想要**真实大数据量**：从 [GeoLIFE 官网](https://www.microsoft.com/en-us/research/project/geolife-building-social-networks-using-human-location-history/)
+下载数据集，再用批量导入接口灌入（路径必须在 `calcite.import.allowed-roots` 白名单内）。
+
+---
+
+## 测试与验收
+
+四层回归，全部可重复执行（数字是 2026-09-27 的实测基线）：
+
+```bash
+# ① 后端单元测试（162 项，不需要数据库）
 mvn -f backend/pom.xml test
 
-# 前端纯逻辑回归（17 + 37 项）
-cd frontend && npm run check:playback && npm run check:chart
+# ② 前端纯逻辑回归（7 个套件 157 项，零依赖）
+cd frontend
+npm run check:playback && npm run check:chart && npm run check:hotspot && npm run check:density \
+  && npm run check:similarity && npm run check:region && npm run check:data-edit
 ```
 
-浏览器像素级验收脚本（需要前后端都在跑）：
-
-```bash
-python .tmp/check-import-pixels.py     # 导入功能
-python .tmp/check-chart-pixels.py      # 曲线渲染
-```
+③ **浏览器像素级验收（8 个脚本 123 项）** 与 ④ **接口对拍（5 个脚本）** 在 `scripts/acceptance/`，
+需要**后端 8080 + 前端 5173 同时在跑**；脚本清单与预期数字见该目录的 README。
 
 > **为什么要像素验收**：Cesium 的几何体在 Web Worker 里**异步**生成，
-> 无头浏览器的虚拟时钟截图会在几何体就绪前就截，截出来是空白——
-> 必须用真实浏览器 + 真实等待。这是踩过的坑，记在
-> [结构地图的「已知的坑」一章](docs/learning/2026-09-10-calcite-structure-map.md)。
+> 无头浏览器的虚拟时钟截图会在几何体就绪前就截，截出来是空白——必须用真实浏览器 + 真实等待。
+> 这是踩过的坑，记在[结构地图的「已知的坑」一章](docs/learning/2026-09-10-calcite-structure-map.md)。
+
+生产构建：`cd frontend && npm run build`（1506 modules）。
 
 ---
 
@@ -173,6 +217,12 @@ python .tmp/check-chart-pixels.py      # 曲线渲染
   一条坏数据会把后面全部拖垮——所以改成每个文件用 `TransactionTemplate` 单独开事务。
 - **XXE 防护**：解析外部上传的 XML 时关闭外部实体，避免恶意文件读取服务器本地文件。
 - **零依赖的图表**：手写 SVG，把"坐标映射 / 刻度算法 / 线性插值"当成纯函数抽到 `lib/`，可以用 Node 直接断言。
+- **缓存永不失效的前提是数据不可变**：停留点按 `trackId` 缓存，因为轨迹导入后只读；一旦有了删除 / 改名 / 替换，
+  就必须显式 `invalidate`（数据管理阶段把这条欠账补上了）。
+- **缓冲区不是"距离判断"**：`ST_DWithin(::geography)` 实测 303 ms 且用不上索引（瓶颈是逐顶点算椭球距离），
+  改成"后端把圆算成多边形 + `ST_Intersects`"后 **7.9 ms**——而且让三种圈选形状共用同一条判定路径。
+- **判据要能区分"做对了"和"什么都没发生"**：一个"多边形只能画三角形"的缺陷穿过了四层验收，
+  因为每条断言只要求"查出了数字"；修完补的判据是"请求体里去掉重复点后有 4 个顶点"。
 
 ---
 
@@ -183,24 +233,29 @@ python .tmp/check-chart-pixels.py      # 曲线渲染
 | 文档 | 内容 |
 | --- | --- |
 | [项目设计文档](docs/superpowers/specs/2026-09-08-calcite-trajectory-analysis-design.md) | 目标、范围、数据模型、接口清单、里程碑规划 |
+| [部署文档](docs/DEPLOY.md) | 从零跑起来：数据库、配置、启动、演示数据、常见报错排查 |
 | [项目结构地图](docs/learning/2026-09-10-calcite-structure-map.md) | 目录职责、请求链路、分层理由、7 张流程图、**踩过的坑** |
-| [M1 导入功能设计](docs/superpowers/specs/2026-09-12-m1-import-design.md) | 接口定义、清洗规则、错误处理、验收标准 |
-| [M1 导入实施计划](docs/superpowers/plans/2026-09-12-m1-import.md) | 12 个任务、69 个步骤、TDD、完整代码 |
-| [学习笔记](docs/learning/) | 边做边学的知识点整理（PostGIS / Spring / Cesium / 真实数据清洗） |
+| [技术要点自检](docs/learning/技术要点自检.md) | 28 个技术点的"为什么这么做 / 不用它行不行 / 出处" |
+| [各阶段设计文档](docs/superpowers/specs/) | M1 导入、M2 停留点 / 热点 / 密度 / 相似度、数据管理、M3 圈选、M4 收尾 |
+| [各阶段实施计划](docs/superpowers/plans/) | 每个阶段的任务拆解、TDD 步骤、验收标准 |
+| [学习笔记](docs/learning/) | 边做边学的知识点整理（PostGIS / Spring / Cesium / 真实数据清洗）+ 各阶段 Word 报告 |
+| [验收脚本](scripts/acceptance/) | 浏览器像素验收、接口对拍、组件级桩测试 |
 
 ---
 
 ## 已知限制
 
-诚实地列出来：
+诚实地列出来（每条都实测过，不是猜测）：
 
+- **平面几何与球面距离的分歧**：3 条含超长边（>1000 km 的跳跃记录）的轨迹上最大差 **13.4 km**。
+  改成球面判定就得放弃空间索引（回到 300 ms 级），**有意不修**，用测试钉住。
+- **热点接口热态约 3.2 秒**：它每次要读 28.6 万个点，这部分不受缓存影响。
+- **圈选的"区域内点数"统计 180~456 ms**：同一个 SQL，用绑定参数会走通用计划、多付一次外部排序落盘。
 - **离线底图在市区尺度是一片绿色**：Cesium 自带的 NaturalEarthII 底图分辨率低（好处是**不需要 token、不需要联网**）。
-  后续计划加一个可切换的在线影像图层。
-- **中国地区的 GCJ-02 偏移**：本项目的轨迹数据经实测确认是 **WGS84**（与 Cesium 一致，无需转换）。
-  但如果接入高德/腾讯等 GCJ-02 数据源，需要做坐标转换。
-- **GeoLife 数据集尚未导入**：批量导入接口已完成并用自造样本测试通过，
-  等数据集下载完成后即可灌入 5-10 个用户（约百万点级）来演示大数据量。
-- **没有做轨迹抽稀**：目前接口返回全部点。上万点的轨迹需要加 `?simplify=` 参数。
+- **中国地区的 GCJ-02 偏移**：本项目的轨迹数据经实测确认是 **WGS84**（与 Cesium 一致，无需转换）；
+  接入高德 / 腾讯等 GCJ-02 数据源时需要做坐标转换。
+- **没有做轨迹抽稀**：接口返回全部点。上万点的轨迹需要加 `?simplify=` 参数。
+- **区域统计里没有"停留点数"**：加了会把接口从 0.2 s 拖到约 2.5 s，将来要做得走异步二段式。
 
 ---
 
@@ -208,9 +263,11 @@ python .tmp/check-chart-pixels.py      # 曲线渲染
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| **M1 看得见** | 轨迹导入、列表详情、三维回放、速度/海拔曲线 | ✅ 完成 |
-| **M2 算得出** | 停留点识别、轨迹统计（爬升/最高速）、热点区域网格分析 | 进行中 |
-| **M3 讲得透** | 空间范围查询（画多边形查穿过的轨迹）、轨迹相似度（`ST_FrechetDistance`）、分析结果叠加到地球 | 计划中 |
+| **M1 看得见** | 轨迹导入、列表详情、三维回放、速度 / 海拔曲线 | ✅ 完成 |
+| **M2 算得出** | 停留点识别、停留热点、网格密度、轨迹相似度 | ✅ 完成 |
+| **数据管理** | 添加 / 替换 / 改名 / 删除（含回收站与缓存失效） | ✅ 完成 |
+| **M3 圈得准** | 空间范围查询（拉框 / 多边形 / 缓冲区）+ 空间查询优化 + 路网匹配可行性评估 | ✅ 完成 |
+| **M4 收尾** | README、架构图、部署文档、演示数据集、技术要点自检 | ✅ 完成 |
 
 ---
 
@@ -222,3 +279,7 @@ python .tmp/check-chart-pixels.py      # 曲线渲染
 每个阶段的笔记都保留在 [`docs/learning/`](docs/learning/)。
 
 > 项目名 **Calcite**（方解石）——一种在偏光下会呈现双折射的矿物。
+
+## 许可
+
+[MIT](LICENSE) © 2026 YNM10086
