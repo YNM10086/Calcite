@@ -5,8 +5,9 @@
 // 只表现为"地图没变"，非常难查；所以把它钉在纯函数这一层。
 import assert from 'node:assert/strict'
 import {
-  DEFAULT_MAX_LEVEL, tiandituUrlTemplate, tiandituTileUrl,
-  layerDescriptors, missingTokenHint, basemapLabel,
+  DEFAULT_MAX_LEVEL, DEFAULT_STYLE, LEVEL_ZERO_TILES_X, LEVEL_ZERO_TILES_Y, TIANDITU_STYLES,
+  tiandituUrlTemplate, tiandituTileUrl, layerDescriptors, styleOptions,
+  missingTokenHint, basemapLabel,
 } from '../src/lib/basemap.js'
 
 let ok = 0
@@ -106,6 +107,47 @@ t('maxLevel 缺失时用默认 18（低于 16 级看不到建筑轮廓）', () =
   assert.equal(layers[0].maximumLevel, DEFAULT_MAX_LEVEL)
   assert.equal(DEFAULT_MAX_LEVEL, 18)
 })
+
+// ---------------------------------------------------------------- 剖分方案（踩过的坑，必须钉死）
+t('⭐ 0 级必须是 1×1 瓦片（天地图 _w 的基准，不是 Cesium 默认的 2×1）', () => {
+  // 写错的后果：列号大一倍 → 请求越界瓦片 → 天地图回「此级别下，该区域无影像」占位图，
+  // 而且四个相距很远的城市返回逐字节相同的图；页面"看起来变了"，只看截图抓不到。
+  assert.equal(LEVEL_ZERO_TILES_X, 1)
+  assert.equal(LEVEL_ZERO_TILES_Y, 1)
+})
+
+// ---------------------------------------------------------------- 样式（街道 / 影像）
+t('两套样式都在，默认是街道图', () => {
+  const opts = styleOptions()
+  assert.deepEqual(opts.map((o) => o.key), ['street', 'image'])
+  assert.equal(DEFAULT_STYLE, 'street')
+  assert.equal(TIANDITU_STYLES.street.layers[0].layer, 'vec')
+  assert.equal(TIANDITU_STYLES.image.layers[0].layer, 'img')
+})
+
+t('街道样式 = vec + cva，上限 18', () => {
+  const layers = layerDescriptors(withToken, 'street')
+  assert.deepEqual(layers.map((l) => l.layer), ['vec', 'cva'])
+  assert.equal(layers[0].maximumLevel, 18)
+})
+
+t('⭐ 影像样式 = img + cia，上限被压到 12（L13+ 天地图只给占位图）', () => {
+  const layers = layerDescriptors(withToken, 'image')
+  assert.deepEqual(layers.map((l) => l.layer), ['img', 'cia'])
+  assert.equal(layers[0].maximumLevel, 12)
+  assert.equal(TIANDITU_STYLES.image.maxLevel, 12)
+})
+
+t('没配 token 时，两种样式都返回空数组', () => {
+  assert.deepEqual(layerDescriptors({ enabled: false, token: null }, 'street'), [])
+  assert.deepEqual(layerDescriptors({ enabled: false, token: null }, 'image'), [])
+})
+
+t('样式键写错时退回默认样式（不抛异常、也不是空）', () => {
+  const layers = layerDescriptors(withToken, '不存在的样式')
+  assert.deepEqual(layers.map((l) => l.layer), ['vec', 'cva'])
+})
+
 
 // ---------------------------------------------------------------- 界面文案
 t('缺 key 的提示要说清"没配置"和去哪看', () => {

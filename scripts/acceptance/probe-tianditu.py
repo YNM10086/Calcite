@@ -62,10 +62,17 @@ def load_token():
 
 
 def tile_xy(lon, lat, level):
-    """天地图 _w（经纬度）矩阵集：level 0 = 2 列 × 1 行，每级翻倍"""
-    cols, rows = 2 ** (level + 1), 2 ** level
-    return (min(int((lon + 180) / 360 * cols), cols - 1),
-            min(int((90 - lat) / 180 * rows), rows - 1))
+    """经纬度 → 瓦片行列（天地图 **_w** 矩阵集）。
+
+    ⚠️⚠️ 实测更正（2026-09-27）：天地图 `_w` 的**0 级是 1×1**（每级 2^level × 2^level，方格网），
+    **不是** Cesium `GeographicTilingScheme` 默认的 2×1。写错过一次的后果非常隐蔽：
+    列号算大一倍 → 每次都请求到"越界"的瓦片 → 天地图返回 **200 + 「此级别下，该区域无影像」占位图**，
+    而且四个相距很远的城市返回**逐字节相同**的图（因为它压根不是按位置给的）。
+    ⇒ 正确基准：cols = rows = 2^level。
+    """
+    n = 2 ** level
+    return (min(int((lon + 180) / 360 * n), n - 1),
+            min(int((90 - lat) / 180 * n), n - 1))
 
 
 def fetch(layer, level, col, row, token, headers):
@@ -89,16 +96,22 @@ def judge(body):
     """
     if not body:
         return "无响应", ""
-    if body[:4] != b"\x89PNG":
-        return "不是 PNG", f"{len(body)} 字节"
+    # ⚠️ 别硬判 PNG：天地图的**影像**层（img）即使 URL 写 FORMAT=tiles 也返回 **JPEG**，
+    #    矢量层（vec）才是 PNG。只认 PNG magic 会把真影像误判成"不是 PNG"。
+    is_png, is_jpg = body[:4] == b"\x89PNG", body[:3] == b"\xff\xd8\xff"
+    if not (is_png or is_jpg):
+        return "不是图片", f"{len(body)} 字节 / 头部 {body[:8]!r}"
     p = os.path.join(OUT, "_probe_tmp.png")
     with open(p, "wb") as f:
         f.write(body)
     im = Image.open(p).convert("RGB")
     colors = len(set(zip(im.tobytes()[0::3], im.tobytes()[1::3], im.tobytes()[2::3])))
+    fmt = "PNG" if is_png else "JPEG"
     if colors <= 2:
-        return "空白图（权限/服务问题）", f"{len(body)} 字节 / {colors} 种颜色"
-    return "有内容 ✓", f"{len(body)} 字节 / {colors} 种颜色"
+        return "空白图（权限/服务问题）", f"{fmt} {len(body)} 字节 / {colors} 种颜色"
+    if colors < 2000:
+        return "疑似占位图（权限/服务问题）", f"{fmt} {len(body)} 字节 / {colors} 种颜色"
+    return "有内容 ✓", f"{fmt} {len(body)} 字节 / {colors} 种颜色"
 
 
 def fingerprint(layer, level, token, headers, points):

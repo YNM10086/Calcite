@@ -511,6 +511,55 @@ PowerShell 只负责启动和查错，不显示图形。
   ② `verify-data-edit-api.py` / `check-data-edit.py` 是**破坏性**脚本（真删一条轨迹，**id 会变**），
   本轮**没有**纳入等价性重跑，已在 `scripts/acceptance/README.md` 里写明
 
+### 增强 · 天地图在线底图（2026-09-27 完成）
+
+- **需求**（用户）：演示时轨迹周围能看见建筑轮廓 / 路名，而不是离线底图那种一片模糊；
+  **纯为展示拿分**，所以必须能一键开关、默认关、不常驻拖性能
+- **实现**：后端 `GET /api/map/tianditu`（`config/MapProperties` + `application.yml` 的 `calcite.map.*`；
+  **未配 key 时响应里连 token 字段都不出现**）；前端 `src/lib/basemap.js`（纯函数：URL 模板/图层顺序/缺 key 行为）+
+  `CesiumGlobe.applyOnlineBasemap`（叠加 / 撤销 imageryLayers，`remove(layer, true)` 连贴图销毁）+
+  `App.vue` 地球右上角开关（**默认关；只在打开那一刻才 fetch 配置**）
+- **关键取舍**：离线 NaturalEarthII 永远在最底层兜底（没网/key 失效也不会是空白地球）；
+  **关闭态对 tianditu 零请求**（浏览器验收数请求数证实）；token 走"运行时后端下发"，
+  既不进仓库、也不进前端构建产物（**不能用 `VITE_*`**，那是构建期注入）
+- **验收**：后端 **166**（+`MapConfigTest` 4）/ 前端 8 套件 **171**（+`check:basemap` 14）/
+  浏览器 `scripts/acceptance/check-basemap.py`（默认关 + 关闭态零请求 + 缺 key 优雅降级 → **9/0**；
+  再注入假 token 验接线 → **13/0**，影像图层 **1→3→1**）
+  ⚠️ **仍待实测**（等本机 key）：真实瓦片的 **CORS 头**与"画面真的变成街道图"的像素对比 ——
+  跑 `scripts/acceptance/probe-tianditu.py`（会存一张真瓦片供人眼确认是不是北京）
+- 🔴 **2026-09-27 用户填了 key，但结论是「key 类型/授权不对」**（代码与坐标都没问题）：
+  - 用户建的是**服务端 key** ⇒ 带 `Origin`/`Referer` 请求（浏览器端风格）返回 **403**，
+    响应体原文：`{"resolve":"Key权限类型为:服务器端，请使用服务器端访问！","code":301013}`
+  - 换成服务端风格（不带 Origin/Referer）虽 200，但拿到的是**占位图**：
+    `vec` 恒 **103 B 全白**、`img` 恒 **4769 B**（图上是「此级别下，该区域无影像」）；
+    **北京/上海/广州/乌鲁木齐四城逐字节相同** ⇒ 与坐标无关
+  - ✅ **CORS 已确认可用**：`Access-Control-Allow-Origin: *`（连 403 响应都带）⇒ **前端直连路线成立，不需要后端代理**
+- 🟢 **2026-09-27 第二轮：用户换成「浏览器端」key → 端到端打通**
+  - 类型校验反过来印证了：服务端风格现在返回 `Key权限类型为:浏览器端，请使用浏览器访问！`（301012）
+  - 真正卡住的其实是**我自己的 bug**：天地图 **`_w` 矩阵集 0 级是 1×1**，
+    而 Cesium `GeographicTilingScheme` **默认 2×1**（d.ts 默认值就写着 2/1）⇒ 列号算大一倍
+    ⇒ 每次请求越界瓦片 ⇒ 天地图回「此区域无影像」占位图（**四城逐字节相同**）。
+    修法：`new GeographicTilingScheme({ numberOfLevelZeroTilesX: 1, numberOfLevelZeroTilesY: 1 })`；
+    `npm run check:basemap` 已加断言钉死（LEVEL_ZERO_TILES_X/Y === 1），**别再改回默认**
+  - **天地图公开服务的层级上限（北京实测）**：`img` 影像 **L10/L12 是真图，L13+ 全是占位图**；
+    L12 一张瓦片≈10 km ⇒ 贴近看会**明显拉伸模糊**，看不到建筑
+  - **这个 key 没有开通矢量底图**：`vec`/`cva`/`cia` 任何层级都是占位/空白
+    ⇒ **要"看清建筑轮廓"必须让用户在控制台给 key 勾选「矢量底图 + 矢量注记」**
+  - 因此加了**样式切换**（`lib/basemap.js` 的 `TIANDITU_STYLES`：street=vec+cva 上限 18、
+    image=img+cia 上限 **12**；`App.vue` 右上角多了个「样式」下拉）
+  - 验收：前端 8 套件 **177** 项（basemap 14→**20**）；浏览器 `check-basemap.py` **14/0/1**，
+    其中新增的硬判据是「**把瓦片取回来数像素**」（颜色 <2000 判占位）——原来只看"画面变了"
+    会被占位图**假绿**，已堵掉；`check-basemap.py` 还会先**飞近城市**（默认 12000 km 视角的层级本来就没影像）
+- ⭐ **两条方法论教训**（已写进探针注释）：
+  ① **HTTP 200 + image/png ≠ 有内容** —— 天地图权限不足时返回 200 + 占位图；
+  ② **位置指纹**是识别占位图最狠的一招：同一图层取四个相距很远的点，内容逐字节相同 ⇒ 必是占位图；
+  ③ **自动检查不能替代人眼**：改图的子代理自检"通过"，主控逐张看图才发现 fig2 文字重叠（`dataE辑`）、
+  fig6 字段名重叠（`eq`）+ 一个**豆腐块**
+- **交付物**：`docs/DEPLOY.md` **第 11 节**（key 放哪、域名白名单、取舍表、两条自查命令）、
+  README 的「可选增强」与已知限制各一条；提交 **`f8f771b`**
+- **顺带**：结构地图 docx 已刷新到 M4（`docs/learning/2026-09-10-calcite-structure-map.md` 521→630 行），
+  并修了 4 张与正文不一致的图（fig1/fig2/fig5/fig6）
+
 ### ▶ 下次接着做（2026-09-27 M4 收工时的状态）
 - ✅ **M2 全部完成**（四个阶段：停留点识别 → 停留热点 → 网格密度 → 轨迹相似度）；
   前端**四档**「停留点 / 热点 / 密度 / 相似」可用
@@ -704,6 +753,29 @@ PowerShell 只负责启动和查错，不显示图形。
    密度格子是 `{lon, lat, points, tracks, value}`（我读 `count`）。
    **解法**：先打印真实响应的键名再断言；改完 **13/13 全绿**。
    ⭐ **教训：写验收脚本前先 `curl` 一次真实响应看字段名；"红了"先怀疑判据，再怀疑实现。**
+
+### 在线底图（天地图，2026-09-27，四条）
+
+1. **⚠️ `WebMapTileServiceImageryProvider` 的 URL 变量不是 `{x}/{y}/{z}`** ——
+   网上大量"天地图 + Cesium"配方写的是 `TILECOL={y}&TILEROW={x}&TILEMATRIX={z}`；
+   **事实**（`frontend/node_modules/cesium/Source/Cesium.d.ts:47727`）：这个 provider 的模板变量只有
+   `{style}` `{TileMatrixSet}` `{TileMatrix}` `{TileRow}` `{TileCol}` 加子域 `{s}` ——
+   `{x}/{y}/{z}` 不会被替换，拼出来就是一串字面量，**表现只是"地图没变"，极难查**。
+   解法：模板写 `TILEMATRIX={TileMatrix}&TILEROW={TileRow}&TILECOL={TileCol}`，并用 node 断言钉住。
+2. **`enablePickFeatures` 默认 `true`**（KVP 编码时）—— 底图会为每次点击多发一次 GetFeatureInfo；
+   底图没有可拾取要素，**显式关掉**。
+3. **矩阵集与 tilingScheme 必须配对**：天地图 `_w`（经纬度矩阵集 `w`）配 `new GeographicTilingScheme()`，
+   `_c`（球面墨卡托）才配 `WebMercatorTilingScheme`；配错的表现是**瓦片整体错位**（有图但不对）。
+4. **token 通道别用 Vite 的 `VITE_*`** —— 那是**构建期**注入，会把 key 打进前端产物（F12 可见）。
+   改成"运行时向后端要"（`GET /api/map/tianditu`，key 存 gitignored 的 `application-local.yml`）；
+   代价是 token 仍会下发到浏览器（瓦片 URL 必须前端拼）⇒ **别把带 key 的后端暴露到公网**。
+   另：用环境变量 `CALCITE_MAP_TIANDITU_TOKEN=xxx` 覆盖配置，可在**不碰用户本地配置文件**的前提下验接线
+   （本轮就是这么用假 token 验出"图层 1→3→1"的）。
+
+> 📌 **环境故障记录（本轮遇到）**：**DSH 沙箱给工作区授权会失败** ——
+> `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<工作区>)`，此后**每条 pwsh 命令**（连 `node`/`npm`）都起不来。
+> 处置：① `sandbox_permissions: danger-full-access` 提权重试同一条命令（有效）；② 按 AGENTS.md 让
+> `good_assistant` 代跑（它不受沙箱限制）；③ **重启 DSH 可恢复**。
 
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS

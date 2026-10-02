@@ -888,10 +888,15 @@ function applyOnlineBasemap(layers) {
       layer: spec.layer,                // 天地图的 LAYER：vec（街道矢量）/ cva（注记）
       style: 'default',
       format: 'tiles',                  // 与 URL 里的 FORMAT=tiles 对齐
-      // 矩阵集 w = 经纬度，与 lib/basemap.js 的 TILE_MATRIX_SET 必须一致；
-      // ⚠️ 矩阵集与 tilingScheme 不匹配时瓦片会整体错位（地图看着"有图但不对"）
+      // 矩阵集 w = 经纬度，与 lib/basemap.js 的 TILE_MATRIX_SET 一致；
+      // ⚠️⚠️ 天地图 `_w` 的 0 级是 **1×1**，而 GeographicTilingScheme 默认是 **2×1**
+      //    —— 不显式覆盖就会把列号算大一倍，请求到越界瓦片，天地图返回
+      //    「此级别下，该区域无影像」占位图（页面看起来"变了"，所以只看截图抓不到）。
       tileMatrixSetID: 'w',
-      tilingScheme: new GeographicTilingScheme(),
+      tilingScheme: new GeographicTilingScheme({
+        numberOfLevelZeroTilesX: 1,
+        numberOfLevelZeroTilesY: 1,
+      }),
       maximumLevel: spec.maximumLevel,
       subdomains: spec.subdomains,      // t0~t7
       // 底图没有可拾取要素：关掉能省掉每次点击的 GetFeatureInfo 请求（这个开关默认是 true）

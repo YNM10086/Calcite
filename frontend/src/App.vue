@@ -16,7 +16,7 @@ import { sortHotspots } from './lib/hotspot.js'
 import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
 import { filterMatches } from './lib/similarity.js'
 import { polygonGeometry, pointGeometry, rectGeometry, visibleItems } from './lib/region.js'
-import { basemapLabel, layerDescriptors, missingTokenHint } from './lib/basemap.js'
+import { basemapLabel, DEFAULT_STYLE, layerDescriptors, missingTokenHint, styleOptions } from './lib/basemap.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -513,6 +513,9 @@ const basemapOn = ref(false)
 const basemapBusy = ref(false)
 const basemapLayers = ref([])            // 空数组 = 地球那边一层在线底图都不画
 const basemapHint = ref('')              // 缺 key / 取配置失败时给用户看的一句提示
+const basemapStyle = ref(DEFAULT_STYLE)  // street（街道矢量，能看见建筑轮廓）/ image（卫星影像）
+const basemapConfig = ref(null)          // 缓存后端配置：切样式时不用再请求一次
+const styleChoices = styleOptions()
 const bufferM = ref(500)
 const bufferCenter = ref(null)            // 缓冲区中心（地图上点出来的），给"改半径重查"用
 const withinBusy = ref(false)
@@ -720,6 +723,17 @@ function onQueryBuffer() {
  *    这正是"开关不拖性能"的可验证证据（浏览器验收里数网络请求条数）。
  * 关掉时把图层描述置成空数组 —— 地球那边会撤掉图层连贴图一起销毁。
  */
+/** 按当前样式把图层描述算出来（切换样式时复用缓存的配置，不再请求后端） */
+function applyBasemapStyle() {
+  basemapLayers.value = layerDescriptors(basemapConfig.value, basemapStyle.value)
+}
+
+/** 切换样式（街道 / 影像）：开着的时候立刻换图层，关着的时候只记住选择 */
+function onStyleChange(key) {
+  basemapStyle.value = key
+  if (basemapOn.value) applyBasemapStyle()
+}
+
 async function toggleBasemap() {
   if (basemapBusy.value) return
   if (basemapOn.value) {                 // 关：立刻撤层，不留任何残留
@@ -732,7 +746,8 @@ async function toggleBasemap() {
   try {
     const res = await fetch('/api/map/tianditu')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const layers = layerDescriptors(await res.json())
+    basemapConfig.value = await res.json()
+    const layers = layerDescriptors(basemapConfig.value, basemapStyle.value)
     if (layers.length === 0) {           // 没配 key：给提示、不开图层（不发注定 403 的瓦片）
       basemapHint.value = missingTokenHint()
       return
@@ -928,6 +943,18 @@ async function selectTrack(id) {
           : '切到天地图在线底图：看得见建筑轮廓与路名（需要网络 + 已配置 key）'"
         @click="toggleBasemap"
       >🗺 {{ basemapLabel(basemapOn) }}</button>
+      <!-- 样式：默认街道矢量图（看得见建筑轮廓与路名）；卫星影像在天地图公开服务里
+           北京市区只到 12 级，看不清建筑，所以只当备选 -->
+      <label v-if="basemapOn" class="basemap-style">
+        样式
+        <select
+          data-testid="basemap-style"
+          :value="basemapStyle"
+          @change="onStyleChange($event.target.value)"
+        >
+          <option v-for="o in styleChoices" :key="o.key" :value="o.key">{{ o.label }}</option>
+        </select>
+      </label>
       <p v-if="basemapHint" class="basemap-hint" data-testid="basemap-hint">{{ basemapHint }}</p>
     </div>
 
@@ -1194,6 +1221,23 @@ async function selectTrack(id) {
 .basemap-btn:disabled { opacity: 0.6; cursor: progress; }
 /* 打开时明确"亮着"：演示时一眼看出当前用的是哪张底图 */
 .basemap-btn.on { color: #0a101a; background: #7fd1ff; border-color: #7fd1ff; }
+
+.basemap-style {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #cfe3f5;
+}
+
+.basemap-style select {
+  padding: 3px 6px;
+  font-size: 11px;
+  color: #cfe3f5;
+  background: rgba(10, 16, 26, 0.9);
+  border: 1px solid rgba(127, 209, 255, 0.28);
+  border-radius: 6px;
+}
 
 .basemap-hint {
   max-width: 260px;
