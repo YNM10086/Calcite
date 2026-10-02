@@ -130,11 +130,39 @@
 ⑥ 同一时间，App.vue 的 onMounted 发起两个请求：
      fetch('/api/health')  → 底部状态条显示「后端已连接」
      fetch('/api/tracks')  → 左侧列表显示轨迹
+⑦ 地球右上角还有一个「底图」开关，默认关 —— 关着的时候一条天地图请求都不会发；
+   打开它才会去 fetch('/api/map/tianditu')，把天地图叠到离线地球上面
 ```
 
 **第 ④ 步解释了一个常见困惑**：`index.html` 里为什么几乎是空的？因为**页面是 JS 现场生成的**，不是写死在 HTML 里的。这也是为什么「查看网页源代码」看不到内容——那是 `index.html` 的原文，而你看到的画面是 Vue 后来画上去的。
 
 **第 ⑤ 步解释了一个小坑**：Cesium 的很多文件（Web Worker、地球贴图）**不能被打包器处理**，必须原样拷贝出来。这就是 `vite.config.js` 里 `viteStaticCopy` 存在的原因。少了它，地球会变成一片黑。
+
+### 4.1 底图：默认离线，需要时才叠一层在线底图（2026-09-27 新增，现有四套样式）
+
+上面第 ⑤ 步取的那张贴图是 **Cesium 自带的离线 NaturalEarthII**——不需要 token、不需要联网，打开就有画面。这是**默认**，也是断网或 key 失效时的兜底。
+
+2026-09-27 在地球右上角加了一个「底图」开关，**默认关**：
+
+| 开关状态 | 发生什么 |
+| --- | --- |
+| 关（默认） | 什么都不做——**一条天地图请求都不会发**，也不会多出图层占内存 |
+| 打开 | 先向后端要配置（`GET /api/map/tianditu`），拿到 key 与参数后，在离线地球**上面叠**两个在线图层：`vec`（街道矢量）+ `cva`（注记） |
+| 再关掉 | 把刚叠上去的图层**连贴图一起撤掉销毁**，地球回到只有离线底图的样子 |
+
+几个「为什么」：
+
+- **为什么是「叠加」而不是「换掉」**：离线底图永远留在最底下。没网、key 失效、瓦片还没到时，用户看到的是一张粗但可用的世界地图，而不是**一片空白的地球**。
+- **为什么要有这个开关**：离线底图缩到校园尺度就是一片绿色，演示时讲"这条轨迹绕过哪栋楼"讲不下去。
+  **2026-09-27 起共有四套在线样式**：高德·街道图（默认，免 key，有建筑轮廓与中文路名）、高德·高清影像
+  （免 key，z18 能看清单栋建筑）、天地图·街道图（要 key 且需开通矢量底图服务，**坐标无偏移**）、
+  天地图·卫星影像（要 key，公开影像**只到 12 级**）。
+  ⚠️ 高德是 **GCJ-02 火星坐标**，直接用会让 WGS84 轨迹偏 300~600 米 ⇒ 本项目在影像 `rectangle`
+  上做**反向补偿**（`lib/basemap.js` 的 `gcj02Offset`），并用一条真实 GeoLife 轨迹压在高德街道图上目视验收过。
+- **为什么 key 放在后端**：它在 `backend/src/main/resources/application-local.yml` 的 `calcite.map.tianditu-token`（这个文件在 `.gitignore` 里）。**不写进 `application.yml`**（那个文件要入库），也不进前端构建产物——前端若用 `VITE_*` 变量，key 会被编进最终 JS，谁都能按 F12 看到；改成运行时向接口要，key 就只留在你本机。
+- **为什么默认关**：关着的时候后端那个接口一次都不会被访问，所以**没有 key 也照样能完整跑这个项目**。
+
+申请 key、控制台配授权域名、常见报错，见 `docs/DEPLOY.md` 第 11 节。
 
 ---
 
@@ -429,25 +457,40 @@ docs/
 | 加一个 Java 库 | `backend/pom.xml` |
 | 改后端端口 | `application.yml` 的 `server.port` + `vite.config.js` 的代理目标 |
 | 换底图 | `CesiumGlobe.vue` 里的 imageryProvider |
+| **M2 · 改停留点识别（停多久 / 多近算停留）** | 算法 `backend/.../service/StayPointService.java`；阈值 `application.yml` 的 `calcite.stay-point.*`（`@Value` 注入，没有单独的配置类）；前端这一档 `frontend/src/components/StayPointList.vue`（`frontend/src/lib/` 下没有它的纯计算文件）；设计文档 `docs/superpowers/specs/2026-09-14-m2-stay-point-design.md` |
+| **M2 · 改停留热点（跨轨迹聚类）** | `backend/.../service/HotspotService.java`（聚类本身）；`backend/.../service/StayPointCache.java`（停留点缓存）；阈值 `application.yml` 的 `calcite.hotspot.*` |
+| **M2 · 改网格密度** | `backend/.../service/DensityService.java`（查询）+ `backend/.../service/DensityGrid.java`（格子档位）；配置类 `backend/.../config/DensityProperties.java`（参数 `calcite.density.*`）；前端 `frontend/src/lib/density.js` |
+| **M2 · 改轨迹相似度** | `backend/.../service/SimilarityService.java`（查询）+ `backend/.../service/SimilarityMath.java`（算法）+ `backend/.../service/SimilarityCache.java`（缓存）；参数 `calcite.similarity.*`；前端 `frontend/src/lib/similarity.js` |
+| **M3 · 改空间范围查询（圈选）** | `backend/.../service/WithinService.java` + `backend/.../service/RegionGeometry.java`（几何校验）+ `backend/.../web/AnalysisController.java` 的 `POST /api/analysis/within` + `backend/.../config/WithinProperties.java`（`calcite.within.*`）；前端 `frontend/src/lib/region.js` + `components/RegionDrawer.vue` + `components/WithinStats.vue` |
+| **数据管理 · 改增删改查** | `backend/.../service/ImportService.java`（新增 / 替换）+ `backend/.../service/TrackEditService.java`（改名 / 删除）+ `backend/.../web/ImportController.java` + `backend/.../web/TrackController.java`；参数 `calcite.data.*`；界面 `frontend/src/components/DataManager.vue` |
+| **在线底图（2026-09-27 新增）· 改底图开关/样式** | `backend/.../web/MapController.java` 的 `GET /api/map/tianditu` + `backend/.../config/MapProperties.java`（`calcite.map.*`）；前端 `frontend/src/lib/basemap.js`（四套样式的 URL、剖分、GCJ-02 补偿）+ `components/CesiumGlobe.vue` 的 `applyOnlineBasemap` + `App.vue` 的 `toggleBasemap` |
+| **跑 / 加验收脚本** | `scripts/acceptance/`：浏览器 `check-*.py`、接口对拍 `verify-*-api.py`、桩测试 `*-stub.mjs` |
+
+> 上面每一条都是同一套动作的产物——第 12.7 节把这条规律总结了一遍。
 
 ---
 
-## 12. 后面的模块会加在哪里
+## 12. 后面的模块加在了哪里
 
-设计文档里规划的功能，提前知道它们会落在哪一层，就不会慌：
+这一章以前写的是「规划」——现在 M1~M4 都落地了，所以这里记的是**实际位置**。以后要改动它们，照着这一章找就行。
 
-### 12.1 M2 · 停留点分析
+### 12.1 M2 · 四项分析 —— ✅ **2026-09-14 ~ 09-17 已完成**
 
-| 要加的东西 | 放哪里 | 备注 |
-| --- | --- | --- |
-| 停留点算法 | `backend/.../service/StayPointService.java` | `service/` 包**已经存在**（M1 导入功能建的），直接往里加类即可 |
-| 查询接口 | `backend/.../web/StayPointController.java` | 新文件 |
-| 数据表 | `stay_point` | ✅ **已经建好了**，`scripts/db/01-schema.sql` 里 |
-| 地图上的停留圆圈 | `CesiumGlobe.vue` 里加图层 | 或新建 `StayPointLayer.vue` |
-| 停留点列表 | 新建 `StayPointList.vue` | 在 `App.vue` 挂上 |
+四件事是**依次**落地的：停留点识别 → 停留热点 → 网格密度 → 轨迹相似度。落点很一致：
+**算法都在 `service/`、纯计算都在 `lib/`、参数都在 `application.yml`**。
+参数多的大件（密度、相似度）各自多了一个 `config/*Properties` 配置类；
+参数少的（停留点、热点）就直接 `@Value` 注入，没有再单开类。
 
-> 📌 **上一版这里写着"要新建 `service/` 包"——现在它已经存在了。**
-> M1 的导入功能就是那个"算法复杂到需要中间层"的时刻（见第 6 章）。
+| 做的东西 | 实际放在哪 |
+| --- | --- |
+| 停留点识别 | 算法 `backend/.../service/StayPointService.java`（+ `StayPoint` 结果）；参数 `calcite.stay-point.*`；设计文档 `docs/superpowers/specs/2026-09-14-m2-stay-point-design.md` |
+| 停留热点（跨轨迹聚类） | `backend/.../service/HotspotService.java`（+ `Hotspot` / `TrackedStay`）；停留点缓存 `backend/.../service/StayPointCache.java`；参数 `calcite.hotspot.*` |
+| 网格密度 | `backend/.../service/DensityService.java` + `backend/.../service/DensityGrid.java`；配置类 `backend/.../config/DensityProperties.java`（参数 `calcite.density.*`）；前端 `frontend/src/lib/density.js` |
+| 轨迹相似度 | `backend/.../service/SimilarityService.java` + `backend/.../service/SimilarityMath.java` + `backend/.../service/SimilarityCache.java`；配置类 `backend/.../config/SimilarityProperties.java`（参数 `calcite.similarity.*`）；前端 `frontend/src/lib/similarity.js` |
+
+前端面板跟着从一档长到**四档**「停留点 / 热点 / 密度 / 相似」（M3 又加了第五档「圈选」）。
+
+> 📌 `stay_point` 表**至今没有用上**：停留点一直是**现场算 + 缓存**，触发入库的条件（轨迹数 > 500 条或热点接口 > 2 秒）还没到——当前数据是 **246 条轨迹 / 286,019 个点**。
 
 ### 12.2 轨迹导入 —— ✅ **2026-09-12 已完成**
 
@@ -463,15 +506,87 @@ docs/
 | 清洗规则 | `service/TrackCleaner.java`（**所有规则只此一处**） |
 | 前端上传按钮 | `TrackList.vue` 里加了按钮（没有单独开组件——就一个按钮，不值得） |
 
-### 12.3 M3 · 轨迹相似度
+### 12.3 M3 · 空间范围查询（圈选，2026-09-25 完成）
 
-| 要加的东西 | 放哪里 |
+**先更正一件事：M3 不是「轨迹相似度」** —— 相似度在 M2 第四阶段就做完了（见 12.1）。
+M3 做的是**圈选**：在地图上圈一块地方，问「哪些轨迹穿过它 / 里面有多少点 / 一共多长距离」。
+
+| 做的东西 | 实际放在哪 |
 | --- | --- |
-| 相似度算法 | `service/SimilarityService.java` |
-| 结果缓存表 | `scripts/db/05-xxx.sql` |
-| 对比界面 | 新建 `CompareView.vue` |
+| 接口 | `backend/.../web/AnalysisController.java` 的 `POST /api/analysis/within` |
+| 判定与统计 | `backend/.../service/WithinService.java` |
+| 几何校验 | `backend/.../service/RegionGeometry.java`（结构问题在这一层就挡成 400） |
+| 参数 | `backend/.../config/WithinProperties.java`（`calcite.within.*`） |
+| 前端第五档 | `frontend/src/lib/region.js`（纯计算）+ `components/RegionDrawer.vue`（三种画法）+ `components/WithinStats.vue`（统计卡 + 列表） |
 
-### 12.4 一个规律
+三件值得记住的事（都是**实测**出来的，不是设计时想当然）：
+
+1. **三种画法最后只剩一条判定路径**：拉框 / 自由多边形 / 缓冲区在后端**统一成一条 `ST_Intersects`**。
+   缓冲区不是另写一段代码，而是后端把「点 + 半径」**算成圆多边形**再交给同一条判定——实测 **7.9 ms**；
+   而让数据库现算半径的那条路（`ST_DWithin`）要 **303 ms**（它用不上空间索引）。
+2. **非法几何不静默出错**：自交的多边形（蝴蝶结）在数据库里**不报错**，只返回一个用户无从察觉的数字，
+   所以加了一道 `ST_IsValid` 守卫：一律 **400 + 中文原因**（「区域有交叉，请重画」），**不自动修复**。
+3. **`region` 回显后端真正用过的几何**：「校验的几何 / 查询的几何 / 回显的几何」由同一个来源产出，
+   所以「**看到的圈 = 查的范围**」是结构上的保证，而不是靠写代码时记得对齐。
+
+> 📌 **路网匹配评估的结论是「不做」**——前置空缺太大（零路网数据、无 pgRouting，光把 OSM 导进 PostGIS 就要一周以上）、
+> 数据形态与算法假设不匹配（采样 5~42 米偏稀，还有 3 段 >1000 km 的跳变会被强制断链），
+> 而且对现有能力**零增益**。完整结论在设计文档第 12 节，调研底稿在 `docs/map-matching-assessment.md`。
+
+### 12.4 数据管理（2026-09-21 完成）
+
+M3 之前落地的是**增删改查**：能改名、能删除、能替换、能新增（同名会先问你要哪种）。
+
+| 做的东西 | 实际放在哪 |
+| --- | --- |
+| 改名 / 删除的编排 | `backend/.../service/TrackEditService.java`（+ `backend/.../service/TrackExporter.java` 负责导出 GeoJSON） |
+| 新增 / 替换 / 同名判重 | `backend/.../service/ImportService.java` + `backend/.../web/ImportController.java` |
+| 改名 / 删除接口 | `backend/.../web/TrackController.java` |
+| 回收站等参数 | `backend/.../config/DataProperties.java`（`calcite.data.*`） |
+| 管理界面 | `frontend/src/components/DataManager.vue`（+ `ConfirmDialog.vue`、`lib/dataEdit.js`） |
+
+三条「为什么」（每条都有实测依据）：
+
+1. **删除前先导出到回收站，导出失败就不删**（fail-safe）——实测回收站写不进去时，删除返回 500 **且轨迹原样保留**。
+2. **同名上传返回 409**，让用户自己决定「替换 / 新增 / 取消」——同名是**意图**问题，系统猜不准；自动替换不可逆。
+3. **任何写操作都清缓存**（新增 / 替换 / 改名 / 删除）——`StayPointCache` / `SimilarityCache` 的注释里一直写着这条欠账，这次接上了。
+   原则是**宁可全清不要漏清**：漏一个就是「界面显示一条已经不存在的轨迹」，全清的代价只是下次点相似度等 2 秒。
+
+### 12.5 M4 · 收尾（2026-09-27 完成）
+
+这是总设计文档里的**最后一个里程碑**，而且**代码零改动**（只更正了一条过期注释）——它交付的是「别人能接手」这件事：
+
+| 交付物 | 落在哪 |
+| --- | --- |
+| 项目说明 | `README.md`（重写：能力表 / 截图 / 技术栈 / 回归基线 / 文档索引 / 已知限制） |
+| 全景架构图 | `docs/images/arch-overview.png`（画图脚本 `docs/learning/figs/make_readme_figs.py`） |
+| 部署文档 | `docs/DEPLOY.md`（在**空库** `calcite_demo` 上真走了一遍「建库 → 初始化 → 验证 → 导入演示数据」） |
+| 演示数据集 | `scripts/demo/make-demo-data.py` → `scripts/db/04-demo-data.sql`（**14 条合成轨迹 / 4,592 个点**，固定种子两次生成字节一致） |
+| 技术要点自检 | `docs/learning/技术要点自检.md`（每题回答「为什么 / 不用它行不行 / 出处」） |
+
+顺手把脚手架归了位：原先堆在 `.tmp/` 的 42 个脚本搬进 `scripts/acceptance/`
+（浏览器 `check-*.py` / 接口对拍 `verify-*-api.py` / 桩测试 `*-stub.mjs`），以后加验收脚本就往这一个目录放。
+
+回归基线（全绿，见 `README.md`）：后端 `mvn test` **166 项**（M4 时的 162 + 在线底图那 4 项）；前端 node **177 项（8 套件）**；浏览器 **138 项（9 个脚本，含 `check-basemap.py` 15 项）**。
+
+### 12.6 在线底图（2026-09-27 增强）
+
+这是 M4 之后顺手加的一个**演示用**增强（默认关，不影响别人跑这个项目）：
+
+| 做的东西 | 实际放在哪 |
+| --- | --- |
+| 配置接口 | `backend/.../web/MapController.java` 的 `GET /api/map/tianditu` |
+| key 与参数 | `backend/.../config/MapProperties.java`（`calcite.map.*`；key 在 `application-local.yml`，见第 4.1 节） |
+| 拼瓦片 URL | `frontend/src/lib/basemap.js`（纯计算，能用 node 直接断言；四套样式的 URL + 1×1 剖分 + GCJ-02 补偿都在这里） |
+| 叠 / 撤图层 | `frontend/src/components/CesiumGlobe.vue` 的 `applyOnlineBasemap`（关掉时连贴图一起销毁；按 `kind` 分 WMTS / XYZ 两种 provider） |
+| 开关与样式 | `frontend/src/App.vue` 的 `toggleBasemap` / `onStyleChange`（默认关；关着时一条瓦片请求都不发） |
+
+浏览器验收在 `scripts/acceptance/check-basemap.py`——它数的是「**关着时对瓦片服务的请求数 = 0**」，不是凭感觉说「没请求」；
+而且**不只看状态码**：天地图权限不足时会返回 `200 + 全白/占位图`，所以它把瓦片取回来按「最常见颜色占比」判定
+（实测：天地图空白 100%、占位 98.2%；高德市区真图 <70%、乡野真图 96.4%），并要求**先飞到市中心**再验
+——这两条判据是连续被"假绿"骗过之后才定下来的，细节见 `_session_context.md` 的踩坑记录。
+
+### 12.7 一个规律
 
 看出来了吗？**每次加功能，都是同一套动作**：
 
@@ -485,6 +600,8 @@ docs/
 ```
 
 **这套动作你做三五次就成肌肉记忆了。** 到那时候，你就不再需要这份地图了——但在此之前，迷路就回来看第 11 章那张表。
+
+> ✅ 这套动作在 **M2 / M3 / M4 又验证了三遍**：上面每一节列出来的文件，都是照它摆的，没有一个功能跳出过这六行。
 
 ---
 

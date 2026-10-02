@@ -41,6 +41,22 @@ def f(size, bold=False, mono=False):
     return _cache[key]
 
 
+def missing_glyphs(s, size=17, bold=False, mono=False):
+    """找出字体里根本没有字形的字符（画出来就是豆腐块 □）。
+
+    ⚠ 只查「没有字形」，查不出「字形本身长得像方块」的字符；所以文案里
+    不要用 emoji / 变体选择符（U+FE0F 之类），那些在不同字体下的表现不稳。
+    """
+    font = f(size, bold, mono)
+    bad = []
+    for ch in s:
+        if ch.isspace():
+            continue
+        if not font.getmask(ch).getbbox():   # 无墨迹 = 没有字形（空白除外）
+            bad.append(ch + "(U+%04X)" % ord(ch))
+    return bad
+
+
 class Fig:
     def __init__(self, height, width=W):
         self.w, self.h = width, height
@@ -58,6 +74,9 @@ class Fig:
         # 直接 for 会逐字符画成竖排。这里兜一下。
         if isinstance(subs, str):
             subs = (subs,)
+        self._check(title, ts, True)
+        for s in subs:
+            self._check(s, ss)
         if dash:
             # 先填底色再画虚线边，否则填充会把先画的虚线盖掉
             self.d.rounded_rectangle([x, y, x + w, y + h], radius=radius, fill=fill)
@@ -85,7 +104,15 @@ class Fig:
         # Consolas 没有中文字形，混了中文还强行用等宽字体会画成豆腐块（□□）
         if mono and re.search(r"[\u4e00-\u9fff]", s):
             mono = False
+        self._check(s, size, bold, mono)
         self.d.text((x, y), s, font=f(size, bold, mono), fill=color, anchor=anchor)
+
+    def _check(self, s, size, bold=False, mono=False):
+        if not hasattr(self, "tofu"):
+            self.tofu = []
+        for ch in missing_glyphs(s, size, bold, mono):
+            if ch not in self.tofu:
+                self.tofu.append(ch)
 
     def _dashed_round_rect(self, x, y, w, h, r, color, width=3, seg=12, gap=8):
         pts = []
@@ -116,6 +143,7 @@ class Fig:
             self.d.line([x2, y2, x2 + L * math.cos(ang + da),
                          y2 + L * math.sin(ang + da)], fill=color, width=width)
         if label:
+            self._check(label, 17)
             mx, my = (x1 + x2) / 2 + label_dx, (y1 + y2) / 2 + label_dy
             bb = self.d.textbbox((mx, my), label, font=f(17), anchor="mm")
             self.d.rectangle([bb[0] - 6, bb[1] - 3, bb[2] + 6, bb[3] + 3], fill=BG)
@@ -138,8 +166,16 @@ class Fig:
             if bbox[3] >= self.h - 2:
                 warn.append("下边贴边(内容被裁)")
         self.im.save(path)
-        flag = ("  ⚠ " + "、".join(warn)) if warn else ""
-        print("  " + name, self.im.size, "内容范围", bbox, flag)
+        tofu = getattr(self, "tofu", None)
+        flag = ("  [!] " + "、".join(warn)) if warn else ""
+        if tofu:
+            flag += "  [!] 豆腐块字符：" + " ".join(tofu)
+        line = "  " + name + " " + str(self.im.size) + " 内容范围 " + str(bbox) + flag
+        try:
+            print(line)
+        except UnicodeEncodeError:
+            # 控制台是 GBK 时，中文 / 符号可能编不出来。打印失败绝不能连累后面的图。
+            print(line.encode("utf-8", "replace").decode("ascii", "replace"))
 
 
 # ---------------------------------------------------------------- 图 1 总体架构
@@ -153,9 +189,11 @@ def fig1():
           border=PURPLE, fill=PURPLE_F)
     # 前端
     g.box(150, 300, 1100, 190, "前端 · Vue 3（开发时跑在 Vite 上，端口 5173）",
-          ("App.vue 负责状态（选中了哪条轨迹、播到第几秒）",
-           "CesiumGlobe 画地球和轨迹 · TrackList 画列表 · TrackPlayer 画播放条 · SpeedChart 画曲线",
-           "lib/ 里是纯计算函数（playback.js 算倍速、chart.js 算刻度），不碰浏览器"), border=BLUE, fill=BLUE_F, align="left")
+          ("App.vue 是唯一的状态中心；11 个组件只是代表（地球 / 列表 / 播放条 / 曲线 / 五档分析面板 / 数据管理）",
+           "CesiumGlobe 画地球与轨迹 · TrackList 画轨迹列表 · TrackPlayer 画播放条 · SpeedChart 画曲线",
+           "lib/ 里是 8 个纯模块：playback / chart / hotspot / density / similarity / region / basemap / dataEdit",
+           "在线底图：lib/basemap.js 拼天地图瓦片 URL；地球右上角是「底图」开关，默认关（关着零请求）"),
+          border=BLUE, fill=BLUE_F, align="left", ss=16)
     # 后端
     g.box(150, 570, 1100, 160, "后端 · Spring Boot（端口 8080）",
           ("web/TrackController 收 HTTP 请求、决定返回什么",
@@ -179,7 +217,7 @@ def fig1():
 
 # ------------------------------------------------------------ 图 2 目录结构
 def fig2():
-    g = Fig(1280)
+    g = Fig(1730)
     g.title("图 2 · 目录结构地图",
             "每个格子里写的是「这个目录负责什么」。打星号的是你以后最常改的。")
 
@@ -199,12 +237,21 @@ def fig2():
         ("    vite.config.js", "★ 构建配置：端口、代理、Cesium 资源拷贝", BLUE_F, BLUE_F, 1),
         ("    index.html", "页面骨架，只有一个空的 #app", BLUE_F, BLUE_F, 1),
         ("    src/App.vue", "★ 总指挥：所有状态都放这里", BLUE_F, BLUE_F, 1),
-        ("    src/components/", "★ 界面组件（地球 / 列表 / 播放条 / 曲线）", BLUE_F, BLUE_F, 2),
-        ("    src/lib/", "★ 纯计算代码（有测试保护，改起来最安全）", BLUE_F, BLUE_F, 2),
+        ("    src/components/", "★ 界面组件：地球 / 列表 / 播放条 / 曲线 / 五档分析面板 / 数据管理", BLUE_F, BLUE_F, 2),
+        ("    src/lib/", "★ 8 个纯计算模块（有测试保护，改起来最安全）", BLUE_F, BLUE_F, 2),
+        ("        playback / chart", "算倍速、时间范围、刻度、坐标映射（前两档）", BLUE_F, BLUE_F, 3),
+        ("        hotspot / density", "算热点配色与大小、格子档位与色阶", BLUE_F, BLUE_F, 3),
+        ("        similarity / region", "算重合度配色与筛选、三种画法转 GeoJSON", BLUE_F, BLUE_F, 3),
+        ("        basemap / dataEdit", "拼天地图瓦片 URL、拼管理界面文案", BLUE_F, BLUE_F, 3),
         ("    scripts/", "回归检查脚本（node 直接跑）", BLUE_F, BLUE_F, 2),
         ("scripts/db/", "★ 数据库建表 / 灌数据 / 查看结果的 SQL", ORANGE, ORANGE_F, 0),
+        ("    04-demo-data.sql", "M4 演示数据集：14 条合成轨迹 / 4,592 个点", ORANGE_F, ORANGE_F, 1),
+        ("scripts/demo/", "演示数据集生成脚本（固定种子，两次生成一致）", ORANGE_F, ORANGE_F, 0),
+        ("scripts/acceptance/", "验收脚本：浏览器 check-*.py / 接口 verify-*-api.py / 桩 *.mjs", ORANGE_F, ORANGE_F, 0),
         ("scripts/tools/", "辅助工具（比如把 Markdown 转成 Word）", ORANGE_F, ORANGE_F, 0),
         ("docs/", "设计文档与实施计划（写代码之前先写这里）", PURPLE, PURPLE_F, 0),
+        ("    images/", "README 里用的图（如 arch-overview.png）", PURPLE_F, PURPLE_F, 1),
+        ("    learning/figs/", "学习笔记里的手画图 + 画图脚本 make_figs.py", PURPLE_F, PURPLE_F, 1),
         ("_session_context.md", "会话记忆：每次开工先读它，收工更新它", PURPLE_F, PURPLE_F, 0),
     ]
     y = 150
@@ -213,7 +260,11 @@ def fig2():
         g.d.rounded_rectangle([x, y, 1310, y + 42], radius=8, fill=fill,
                               outline=border, width=2)
         g.text(x + 18, y + 11, name, size=19, bold=True, color=INK, mono=True)
-        g.text(660, y + 12, desc, size=18, color=(0x4E, 0x59, 0x69))
+        g.text(700, y + 12, desc, size=18, color=(0x4E, 0x59, 0x69))
+        # 自检：名字列不许压到说明列（实测像素宽度，不靠估）
+        nx = x + 18 + g.d.textlength(name, font=f(19, True, True))
+        if nx > 690:
+            print("  [!] 图2 名字列过宽 x=" + str(int(nx)) + " : " + name)
         y += 49
     g.save("fig2-tree.png")
 
@@ -314,96 +365,165 @@ def fig4():
 
 # --------------------------------------------------------- 图 5 前端组件树
 def fig5():
-    g = Fig(820)
-    g.title("图 5 · 前端组件树与数据流向",
-            "数据从上往下流（props），事件从下往上跑（emit）。App.vue 是唯一的状态中心。")
+    g = Fig(1330)
+    g.title("图 5 · 前端组件树与数据流向（M4）",
+            "props 往下传、emit 往上报、defineExpose 供父组件主动调用。11 个组件 + 8 个纯计算模块，状态只有一份。")
 
-    g.box(500, 150, 400, 110, "App.vue",
-          ("状态中心：选中了哪条轨迹、播到第几秒、循环开不开",),
-          border=RED, fill=RED_F, ts=26, ss=16)
+    g.box(300, 150, 800, 110, "App.vue",
+          ("唯一的状态中心：选中哪条轨迹、播到第几秒、循环开不开、面板在哪一档、底图开关",
+           "外加两个视图开关：panelView = analysis（分析） | manage（数据管理）"),
+          border=RED, fill=RED_F, ts=26, ss=17)
 
-    kids = [
-        (60, "TrackList.vue", ("轨迹列表", "emit: select")),
-        (380, "CesiumGlobe.vue", ("地球 + 轨迹 + 移动点", "defineExpose: play/pause/seekTo")),
-        (700, "TrackPlayer.vue", ("播放条", "emit: toggle/seek/loop")),
-        (1020, "SpeedChart.vue", ("速度/海拔曲线", "emit: seek")),
-    ]
-    # 树的画法：App.vue 下来一根竖线，接一条横线（总线），再从总线各自往下分叉
-    BUS_Y = 320
+    BUS_Y = 300
     g.d.line([700, 260, 700, BUS_Y], fill=BLUE, width=3)
-    g.d.line([210, BUS_Y, 1170, BUS_Y], fill=BLUE, width=3)
-    for x, name, subs in kids:
-        cx = x + 150
-        g.arrow(cx, BUS_Y, cx, 396, "", color=BLUE, width=3)
-        g.box(x, 400, 300, 130, name, subs, border=BLUE, fill=BLUE_F, ts=21, ss=16)
-        g.arrow(cx + 90, 396, cx + 90, BUS_Y + 6, "", color=GRAY, width=2, dashed=True)
+    g.d.line([178, BUS_Y, 1222, BUS_Y], fill=BLUE, width=3)
+    g.arrow(703, 274, 697, 296, "", color=BLUE, width=3)
+    g.text(200, 278, "props 往下传：数据", size=17, color=BLUE)
+    g.text(200, 307, "emit 往上报：事件（虚线）", size=17, color=GRAY)
 
-    g.text(636, BUS_Y - 26, "props 往下传（数据）→", size=17, color=BLUE, anchor="ra")
-    g.text(760, BUS_Y - 26, "← 虚线：emit 往上报（事件）", size=17, color=GRAY)
+    # 管理视图那条线走最右侧空白通道（x=1360 在所有元素右边），不穿面板、不压 props/emit 文字
+    g.d.line([172, 264, 172, 272], fill=ORANGE, width=3)
+    g.d.line([172, 272, 1360, 272], fill=ORANGE, width=3)
+    g.d.line([1360, 272, 1360, 764], fill=ORANGE, width=3)
+    g.d.line([1360, 764, 360, 764], fill=ORANGE, width=3)
+    g.arrow(360, 764, 360, 776, "", color=ORANGE, width=3)
 
-    g.box(60, 600, 610, 170, "lib/ · 纯计算，没有界面", (
-        "playback.js —— 算倍速（总秒数 ÷ 60）、算时间范围、判断能不能播",
-        "chart.js —— 算刻度、算坐标映射、算游标处的精确值",
-        "特点：不 import Vue、不 import Cesium，所以能用 node 直接跑断言"), border=PURPLE, fill=PURPLE_F, ts=23, ss=17, align="left")
+    # 第 2 行：当前这条轨迹的画布与控制器
+    row2 = [
+        (60, "CesiumGlobe.vue", ("地球 + 轨迹 + 移动点 + 分析图层",
+                                 "emit: time-change · expose: play/pause/seekTo",
+                                 "basemap.js 供它叠 / 撤在线底图")),
+        (780, "TrackPlayer.vue", ("底部播放条",
+                                  "emit: toggle / seek / toggle-loop")),
+    ]
+    for x, name, subs in row2:
+        cx = x + 280
+        g.arrow(cx, BUS_Y, cx, 376, "", color=BLUE, width=3)
+        g.box(x, 380, 560, 140, name, subs, border=BLUE, fill=BLUE_F, ts=21, ss=16)
+        g.arrow(cx + 200, 376, cx + 200, BUS_Y + 6, "", color=GRAY, width=2, dashed=True)
 
-    g.box(730, 600, 610, 170, "为什么状态只放 App.vue？", (
-        "如果每个组件各存一份「播到第几秒」，就会出现",
-        "播放条显示在播、地球却停着这种不一致。",
-        "所以约定：状态只放父组件，子组件负责显示 + 上报意图。"), border=GREEN, fill=GREEN_F, ts=23, ss=17, align="left")
+    # 第 3 行：五档分析面板（互斥 —— 五者都会往地球上画画，同时画会糊在一起）
+    g.text(60, 555, "分析面板 · 五档互斥（analysis）：",
+           size=17, bold=True, color=BLUE)
+    panels = [
+        ("StayPointList.vue", ("停留点识别结果", "emit: focus")),
+        ("HotspotList.vue", ("跨轨迹聚类", "emit: focus / sort")),
+        ("DensityLegend.vue", ("图例 + 时段 / 口径", "emit: metric / hour")),
+        ("SimilarityList.vue", ("和主线重合度排序", "emit: focus / filter")),
+        ("RegionDrawer.vue +", ("WithinStats.vue · 三种画法", "emit: select")),
+    ]
+    for i, (name, subs) in enumerate(panels):
+        px = 60 + i * (236 + 25)
+        g.arrow(px + 118, BUS_Y, px + 118, 586, "", color=BLUE, width=3)
+        g.box(px, 590, 236, 150, name, subs, border=BLUE, fill=BLUE_F, ts=17, ss=15)
+        g.arrow(px + 118, 586, px + 118, BUS_Y + 6, "", color=GRAY, width=2, dashed=True)
+
+    # 第 4 行：数据管理视图（和五档分析并列，不是它里面的一档）
+    g.box(60, 780, 620, 170, "DataManager.vue · 数据管理视图", (
+        "表格 + 行内改名 + 删除确认（删前先导出回收站）",
+        "同名上传三选一：替换 / 新增 / 取消 → ConfirmDialog.vue",
+        "lib/dataEdit.js 只管拼文案：点数 / 长度 / 冲突提示",
+        "对应 App.vue 的 panelView = manage（不是分析里的第六档）",
+    ), border=ORANGE, fill=ORANGE_F, ts=22, ss=16, align="left")
+
+    # 第 5 行：纯计算层（不碰界面、不碰浏览器）—— 8 个模块分两列写，免得图太长
+    g.box(60, 980, 1280, 150, "lib/ · 8 个纯计算模块（没有界面，不 import Vue / Cesium）", (),
+          border=PURPLE, fill=PURPLE_F, ts=22, align="left")
+    for i, s in enumerate([
+        "playback.js —— 倍速、时间范围、能不能播",
+        "chart.js —— 刻度、坐标映射、游标值",
+        "hotspot.js —— 热点配色、圈大小、排序",
+        "density.js —— 格子档位、对数色阶、图例",
+    ]):
+        g.text(84, 1034 + i * 24, s, size=16, color=(0x4E, 0x59, 0x69))
+    for i, s in enumerate([
+        "similarity.js —— 重合度配色、条数筛选",
+        "region.js —— 三种画法转 GeoJSON、截断",
+        "basemap.js —— 天地图瓦片 URL 模板",
+        "dataEdit.js —— 点数 / 长度 / 冲突文案",
+    ]):
+        g.text(700, 1034 + i * 24, s, size=16, color=(0x4E, 0x59, 0x69))
+
+    g.box(60, 1160, 620, 130, "为什么状态只放 App.vue？", (
+        "各存一份「播到第几秒」，就会出现",
+        "播放条在播、地球却停着这种不一致。",
+        "所以：状态只放父组件，子组件负责",
+        "显示 + 上报意图。",
+    ), border=GREEN, fill=GREEN_F, ts=20, ss=16, align="left")
+    g.box(720, 1160, 620, 130, "lib/ 为什么要单独一层？", (
+        "里面只有纯函数：不 import Vue、",
+        "也不 import Cesium，所以能用 node",
+        "秒级跑断言 —— 逻辑正确性和「画得好",
+        "不好看」彻底分开。",
+    ), border=GREEN, fill=GREEN_F, ts=20, ss=16, align="left")
     g.save("fig5-frontend.png")
 
 
 # --------------------------------------------------------- 图 6 数据库表
 def fig6():
-    g = Fig(980)
+    g = Fig(1030)
     g.title("图 6 · 数据库三张表的关系",
-            "一对多：一条轨迹有很多点、很多次停留。删掉轨迹，它的点和停留会自动跟着删。")
+            "一对多：一条轨迹有很多点。删掉轨迹，它的点会自动跟着删。虚线那张表目前还没被用上。")
+
+    def fields(rows, x, y, fw=110, step=29, size=16):
+        # 字段名与说明分两列画：只用一个空格分隔时不同字宽会叠在一起，所以各自定位
+        for i, (k, v) in enumerate(rows):
+            kw = g.d.textlength(k, font=f(size, mono=True))
+            vw = g.d.textlength(v, font=f(size))
+            if kw > fw - 8:
+                print("  [!] 图6 字段名列过窄 " + k + " 宽 " + str(int(kw)))
+            if x + fw + vw > 1330:
+                print("  [!] 图6 说明列超框 " + k + " 到 x=" + str(int(x + fw + vw)))
+            g.text(x, y + i * step, k, size=size, color=INK, mono=True)
+            g.text(x + fw, y + i * step, v, size=size, color=(0x4E, 0x59, 0x69))
 
     # 左列：track   右列：track_point / stay_point
     g.box(60, 160, 420, 340, "track（一条轨迹 = 一次出行）", (),
           border=ORANGE, fill=ORANGE_F, ts=21, align="left")
-    for i, s in enumerate(["id            主键",
-                            "name          轨迹名字",
-                            "source        来源 geolife/gpx/csv/sample",
-                            "external_id   原始数据集里的编号（判重用）",
-                            "start_time / end_time  起止时刻",
-                            "distance_m    总距离（派生）",
-                            "duration_s    总时长（派生）",
-                            "point_count   点数（派生）",
-                            "geom          轨迹线 LineString"]):
-        g.text(82, 220 + i * 29, s, size=16, color=(0x4E, 0x59, 0x69))
+    fields([("id", "主键"),
+            ("name", "轨迹名字"),
+            ("source", "来源 geolife/gpx/csv/sample"),
+            ("external_id", "原始编号（判重用）"),
+            ("start_time", "起始时刻"),
+            ("end_time", "结束时刻"),
+            ("distance_m", "总距离（派生）"),
+            ("duration_s", "总时长（派生）"),
+            ("point_count", "点数（派生）"),
+            ("geom", "轨迹线 LineString")], 82, 218, fw=142)
 
     g.box(600, 160, 740, 340, "track_point（一个 GPS 点 = 原始真相）", (),
           border=ORANGE, fill=ORANGE_F, ts=21, align="left")
-    for i, s in enumerate(["id            主键",
-                            "track_id      → track.id（外键）",
-                            "seq           这个点在轨迹里的顺序",
-                            "recorded_at   这一点的时刻",
-                            "elevation_m   海拔（米）",
-                            "speed_mps     速度（由坐标算出来再回填）",
-                            "geom          一个点 Point"]):
-        g.text(622, 220 + i * 29, s, size=16, color=(0x4E, 0x59, 0x69))
+    fields([("id", "主键"),
+            ("track_id", "→ track.id（外键）"),
+            ("seq", "这个点在轨迹里的顺序"),
+            ("recorded_at", "这一点的时刻"),
+            ("elevation_m", "海拔（米）"),
+            ("speed_mps", "速度（由坐标算出来再回填）"),
+            ("geom", "一个点 Point")], 690, 218, fw=170)
 
-    g.box(600, 580, 740, 200, "stay_point（一次停留 · M2 才用）", (),
+    g.box(600, 580, 740, 240, "stay_point（表建好了，应用至今没用上）", (),
           border=GRAY, fill=(0xF7, 0xF8, 0xFA), ts=21, align="left", dash=True)
-    for i, s in enumerate(["track_id      → track.id（外键）",
-                            "start_time / end_time   停留的起止",
-                            "duration_s    停了多久",
-                            "radius_m      活动半径",
-                            "geom          停留中心点"]):
-        g.text(622, 638 + i * 29, s, size=16, color=(0x4E, 0x59, 0x69))
+    fields([("track_id", "→ track.id（外键）"),
+            ("start_time / end_time", "停留的起止"),
+            ("duration_s", "停了多久"),
+            ("radius_m", "活动半径"),
+            ("geom", "停留中心点")], 690, 644, fw=310)
+    # 这两行必须落在虚线框下边框（y=820，线宽 3 占 818~821）之外，否则会被框线穿字
+    g.text(690, 850, "注意：停留点至今是「按需现算 + 缓存」，", size=15, color=RED)
+    g.text(690, 874, "这张表里一行都没写过。", size=15, color=RED)
 
     g.arrow(484, 300, 596, 300, "1 条轨迹 → 121 个点", color=ORANGE, label_dy=-18)
-    # 用折线连到 stay_point；左侧 y=504~680 这段是空的，走这里不压任何文字
-    g.d.line([270, 504, 270, 680], fill=GRAY, width=2)
-    g.arrow(270, 680, 596, 680, "1 条轨迹 → 多次停留", color=GRAY, label_dy=-18, dashed=True)
+    # 用折线连到 stay_point；左侧 y=504~690 这段是空的，走这里不压任何文字
+    g.d.line([270, 504, 270, 690], fill=GRAY, width=2)
+    g.arrow(270, 690, 596, 690, "预留：将来才写停留", color=GRAY, label_dy=-18, dashed=True)
 
-    g.text(60, 830, "派生数据是什么意思：", size=20, bold=True, color=INK)
-    for i, s in enumerate(["distance_m / duration_s / point_count / geom（线）这些都能由 track_point 算出来，",
-                            "存一份只是为了让列表页不用现算。"]):
-        g.text(60, 872 + i * 30, s, size=17, color=(0x4E, 0x59, 0x69))
-    g.text(1000, 838, "真相只有一个：track_point 表。", size=19, bold=True, color=RED)
-    g.text(1000, 872, "别的都是它的推论。", size=19, bold=True, color=RED)
+    g.text(60, 880, "派生数据是什么意思：", size=20, bold=True, color=INK)
+    for i, s in enumerate(["distance_m / duration_s / point_count / geom（线）这些都能由",
+                            "track_point 算出来，存一份只是为了让列表页不用现算。"]):
+        g.text(60, 922 + i * 30, s, size=17, color=(0x4E, 0x59, 0x69))
+    g.text(1060, 888, "真相只有一个：track_point 表。", size=19, bold=True, color=RED)
+    g.text(1060, 922, "别的都是它的推论。", size=19, bold=True, color=RED)
+    g.text(1060, 956, "stay_point 也是——需要时现算。", size=17, color=(0x4E, 0x59, 0x69))
     g.save("fig6-db.png")
 
 
