@@ -723,12 +723,34 @@ function onQueryBuffer() {
  *    这正是"开关不拖性能"的可验证证据（浏览器验收里数网络请求条数）。
  * 关掉时把图层描述置成空数组 —— 地球那边会撤掉图层连贴图一起销毁。
  */
+/** 取后端配置（只取一次并缓存）；失败也不阻塞免 key 的高德样式 */
+async function resolveBasemapConfig() {
+  if (basemapConfig.value) return { config: basemapConfig.value, error: '' }
+  try {
+    const res = await fetch('/api/map/tianditu')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    basemapConfig.value = await res.json()
+    return { config: basemapConfig.value, error: '' }
+  } catch (e) {
+    // 后端不可用时也把免 key 的样式放行（高德两套不需要配置）
+    return { config: { enabled: false }, error: e.message }
+  }
+}
+
 /** 按当前样式把图层描述算出来（切换样式时复用缓存的配置，不再请求后端） */
 function applyBasemapStyle() {
   basemapLayers.value = layerDescriptors(basemapConfig.value, basemapStyle.value)
+  // 选中了「天地图·xxx」但没配 key ⇒ 描述为空：给出提示并把开关收回关闭态，
+  // 免得按钮亮着、地图却还是离线图（"以为开着其实没开"这种状态最难查）
+  if (basemapLayers.value.length === 0) {
+    basemapHint.value = missingTokenHint()
+    basemapOn.value = false
+  } else {
+    basemapHint.value = ''
+  }
 }
 
-/** 切换样式（街道 / 影像）：开着的时候立刻换图层，关着的时候只记住选择 */
+/** 切换样式：开着的时候立刻换图层，关着的时候只记住选择 */
 function onStyleChange(key) {
   basemapStyle.value = key
   if (basemapOn.value) applyBasemapStyle()
@@ -744,19 +766,14 @@ async function toggleBasemap() {
   }
   basemapBusy.value = true
   try {
-    const res = await fetch('/api/map/tianditu')
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    basemapConfig.value = await res.json()
-    const layers = layerDescriptors(basemapConfig.value, basemapStyle.value)
-    if (layers.length === 0) {           // 没配 key：给提示、不开图层（不发注定 403 的瓦片）
-      basemapHint.value = missingTokenHint()
+    const { config, error } = await resolveBasemapConfig()
+    basemapLayers.value = layerDescriptors(config, basemapStyle.value)
+    if (basemapLayers.value.length === 0) {   // 天地图样式没 key：给提示、不开图层
+      basemapHint.value = error ? `天地图配置获取失败：${error}` : missingTokenHint()
       return
     }
-    basemapLayers.value = layers
     basemapOn.value = true
     basemapHint.value = ''
-  } catch (e) {
-    basemapHint.value = `天地图配置获取失败：${e.message}`
   } finally {
     basemapBusy.value = false
   }

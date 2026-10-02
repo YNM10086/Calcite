@@ -1,8 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
-  Cartesian2,
-  Cartesian3,
+  Cartesian2,  Cartesian3,
   Cartographic,
   ClockRange,
   ClockStep,
@@ -20,12 +19,17 @@ import {
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   TileMapServiceImageryProvider,
+  // 在线底图（高德）：Web Mercator 的 {z}/{x}/{y} 瓦片用这个 provider
+  UrlTemplateImageryProvider,
   VERSION,
   Viewer,
   // 在线底图（天地图）：WMTS 图层的 provider 与经纬度剖分方案
   WebMapTileServiceImageryProvider,
+  WebMercatorTilingScheme,
   buildModuleUrl,
 } from 'cesium'
+// 在线底图的纯计算（URL 模板 / GCJ-02 补偿矩形）—— 见 lib/basemap.js，那里能用 node 断言
+import { compensatedWorldRectangle } from '../lib/basemap.js'
 import { computeMultiplier, timeRange } from '../lib/playback.js'
 // 热点的「大小 / 颜色」判断全在这个纯函数模块里，组件只负责画
 import { hotspotColor, hotspotPixelSize } from '../lib/hotspot.js'
@@ -882,26 +886,48 @@ function applyOnlineBasemap(layers) {
   const v = viewer.value
   if (!v || v.isDestroyed()) return
   clearOnlineBasemap()
+  // 高德是 GCJ-02（火星坐标）：按**当前相机中心**算偏移量，把影像矩形反向推回去，
+  // 这样我们的 WGS84 轨迹才压得在真实街道上（近似——偏移量随地点缓变，见 lib 注释）
+  let refPoint = null
+  const carto = Cartographic.fromCartesian(v.camera.positionWC)
+  if (carto) {
+    refPoint = { lon: CesiumMath.toDegrees(carto.longitude), lat: CesiumMath.toDegrees(carto.latitude) }
+  }
   for (const spec of layers || []) {
-    const provider = new WebMapTileServiceImageryProvider({
-      url: spec.url,                    // 模板含 {s} / {TileMatrix} / {TileRow} / {TileCol}
-      layer: spec.layer,                // 天地图的 LAYER：vec（街道矢量）/ cva（注记）
-      style: 'default',
-      format: 'tiles',                  // 与 URL 里的 FORMAT=tiles 对齐
-      // 矩阵集 w = 经纬度，与 lib/basemap.js 的 TILE_MATRIX_SET 一致；
-      // ⚠️⚠️ 天地图 `_w` 的 0 级是 **1×1**，而 GeographicTilingScheme 默认是 **2×1**
-      //    —— 不显式覆盖就会把列号算大一倍，请求到越界瓦片，天地图返回
-      //    「此级别下，该区域无影像」占位图（页面看起来"变了"，所以只看截图抓不到）。
-      tileMatrixSetID: 'w',
-      tilingScheme: new GeographicTilingScheme({
-        numberOfLevelZeroTilesX: 1,
-        numberOfLevelZeroTilesY: 1,
-      }),
-      maximumLevel: spec.maximumLevel,
-      subdomains: spec.subdomains,      // t0~t7
-      // 底图没有可拾取要素：关掉能省掉每次点击的 GetFeatureInfo 请求（这个开关默认是 true）
-      enablePickFeatures: false,
-    })
+    let provider
+    if (spec.kind === 'xyz') {
+      const rect = refPoint ? compensatedWorldRectangle(refPoint.lon, refPoint.lat) : spec.rectangle
+      provider = new UrlTemplateImageryProvider({
+        url: spec.url,                   // 含 {s} / {x} / {y} / {z}
+        // 高德是 Web Mercator 瓦片，必须配 WebMercatorTilingScheme
+        tilingScheme: new WebMercatorTilingScheme(),
+        maximumLevel: spec.maximumLevel,
+        subdomains: spec.subdomains,
+        // ⚠️ 补偿的关键：声明影像覆盖的世界矩形（往反方向挪 delta）⇒ 整张影像被推回 WGS84
+        rectangle: Rectangle.fromDegrees(rect[0], rect[1], rect[2], rect[3]),
+        credit: '高德地图',
+      })
+    } else {
+      provider = new WebMapTileServiceImageryProvider({
+        url: spec.url,                    // 模板含 {s} / {TileMatrix} / {TileRow} / {TileCol}
+        layer: spec.layer,                // 天地图的 LAYER：vec / cva / img / cia
+        style: 'default',
+        format: 'tiles',                  // 与 URL 里的 FORMAT=tiles 对齐
+        // 矩阵集 w = 经纬度，与 lib/basemap.js 的 TILE_MATRIX_SET 一致；
+        // ⚠️⚠️ 天地图 `_w` 的 0 级是 **1×1**，而 GeographicTilingScheme 默认是 **2×1**
+        //    —— 不显式覆盖就会把列号算大一倍，请求到越界瓦片，天地图返回
+        //    「此级别下，该区域无影像」占位图（页面看起来"变了"，所以只看截图抓不到）。
+        tileMatrixSetID: 'w',
+        tilingScheme: new GeographicTilingScheme({
+          numberOfLevelZeroTilesX: 1,
+          numberOfLevelZeroTilesY: 1,
+        }),
+        maximumLevel: spec.maximumLevel,
+        subdomains: spec.subdomains,      // t0~t7
+        // 底图没有可拾取要素：关掉能省掉每次点击的 GetFeatureInfo 请求（这个开关默认是 true）
+        enablePickFeatures: false,
+      })
+    }
     onlineLayers.push(v.imageryLayers.addImageryProvider(provider))
   }
 }
