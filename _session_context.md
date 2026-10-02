@@ -581,6 +581,18 @@ PowerShell 只负责启动和查错，不显示图形。
 - **顺带**：结构地图 docx 已刷新到 M4（`docs/learning/2026-09-10-calcite-structure-map.md` 521→630 行），
   并修了 4 张与正文不一致的图（fig1/fig2/fig5/fig6）
 
+- 🔚 **2026-09-27 用户拍板（收尾，别再回头改）**：
+  - **天地图整条删掉**（那把 key 没开通矢量底图服务、公开影像又只到 12 级）——
+    已删 `MapController` / `MapProperties` / `MapConfig` / `MapConfigTest`、`application.yml` 里的 `calcite.map.*`、
+    `scripts/acceptance/probe-tianditu.py`；`application-local.yml.example` 那段也清了。
+    **后端配置接口因此整个消失**：在线底图现在是**纯前端计算、零配置、免 key**（只剩高德两套样式）。
+    （用户本地 `application-local.yml` 里那行 `tianditu-token` 已无人读，可自行删掉。）
+  - **高德的 GCJ-02 偏差「先暂存」**：用户原话"偏差好大，但已经开始摸到边际效应了，这个问题先暂存吧"
+    ⇒ **不要再投入优化补偿**，只把它作为**已知限制**写在 README / DEPLOY / 结构地图里
+    （补偿后仍有百米级残差；根因是 GCJ-02 vs WGS84，单一常数推不平）。
+  - 删完后的回归：后端 **162**（回到 M4 基线）、前端 node **169**（8 套件，basemap 12）、
+    浏览器 **139**（9 个脚本，`check-basemap.py` **16** 项全过）、生产构建 1507 modules。
+
 ### ▶ 下次接着做（2026-09-27 M4 收工时的状态）
 - ✅ **M2 全部完成**（四个阶段：停留点识别 → 停留热点 → 网格密度 → 轨迹相似度）；
   前端**四档**「停留点 / 热点 / 密度 / 相似」可用

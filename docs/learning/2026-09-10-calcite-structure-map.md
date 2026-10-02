@@ -130,39 +130,42 @@
 ⑥ 同一时间，App.vue 的 onMounted 发起两个请求：
      fetch('/api/health')  → 底部状态条显示「后端已连接」
      fetch('/api/tracks')  → 左侧列表显示轨迹
-⑦ 地球右上角还有一个「底图」开关，默认关 —— 关着的时候一条天地图请求都不会发；
-   打开它才会去 fetch('/api/map/tianditu')，把天地图叠到离线地球上面
+⑦ 地球右上角还有一个「底图」开关，默认关 —— 关着的时候一条瓦片请求都不会发；
+   打开它才会把高德在线底图叠到离线地球上面（两套样式：街道图 / 高清影像，免 key、
+   不需要后端配置，图层描述是前端纯计算出来的）
 ```
 
 **第 ④ 步解释了一个常见困惑**：`index.html` 里为什么几乎是空的？因为**页面是 JS 现场生成的**，不是写死在 HTML 里的。这也是为什么「查看网页源代码」看不到内容——那是 `index.html` 的原文，而你看到的画面是 Vue 后来画上去的。
 
 **第 ⑤ 步解释了一个小坑**：Cesium 的很多文件（Web Worker、地球贴图）**不能被打包器处理**，必须原样拷贝出来。这就是 `vite.config.js` 里 `viteStaticCopy` 存在的原因。少了它，地球会变成一片黑。
 
-### 4.1 底图：默认离线，需要时才叠一层在线底图（2026-09-27 新增，现有四套样式）
+### 4.1 底图：默认离线，需要时才叠一层在线底图（2026-09-27 新增，现有高德两套样式）
 
-上面第 ⑤ 步取的那张贴图是 **Cesium 自带的离线 NaturalEarthII**——不需要 token、不需要联网，打开就有画面。这是**默认**，也是断网或 key 失效时的兜底。
+上面第 ⑤ 步取的那张贴图是 **Cesium 自带的离线 NaturalEarthII**——不需要 token、不需要联网，打开就有画面。这是**默认**，也是断网或在线瓦片取不到时的兜底。
 
 2026-09-27 在地球右上角加了一个「底图」开关，**默认关**：
 
 | 开关状态 | 发生什么 |
 | --- | --- |
-| 关（默认） | 什么都不做——**一条天地图请求都不会发**，也不会多出图层占内存 |
-| 打开 | 先向后端要配置（`GET /api/map/tianditu`），拿到 key 与参数后，在离线地球**上面叠**两个在线图层：`vec`（街道矢量）+ `cva`（注记） |
+| 关（默认） | 什么都不做——**一条瓦片请求都不会发**，也不会多出图层占内存 |
+| 打开 | 直接用前端纯计算得到的图层描述，在离线地球**上面叠**一层高德在线底图（街道图 = 建筑轮廓 + 中文路名；高清影像 = 卫星图） |
 | 再关掉 | 把刚叠上去的图层**连贴图一起撤掉销毁**，地球回到只有离线底图的样子 |
 
 几个「为什么」：
 
-- **为什么是「叠加」而不是「换掉」**：离线底图永远留在最底下。没网、key 失效、瓦片还没到时，用户看到的是一张粗但可用的世界地图，而不是**一片空白的地球**。
+- **为什么是「叠加」而不是「换掉」**：离线底图永远留在最底下。没网、在线瓦片还没到时，用户看到的是一张粗但可用的世界地图，而不是**一片空白的地球**。
 - **为什么要有这个开关**：离线底图缩到校园尺度就是一片绿色，演示时讲"这条轨迹绕过哪栋楼"讲不下去。
-  **2026-09-27 起共有四套在线样式**：高德·街道图（默认，免 key，有建筑轮廓与中文路名）、高德·高清影像
-  （免 key，z18 能看清单栋建筑）、天地图·街道图（要 key 且需开通矢量底图服务，**坐标无偏移**）、
-  天地图·卫星影像（要 key，公开影像**只到 12 级**）。
+  **2026-09-27 起就是高德两套样式**：高德·街道图（默认，免 key，有建筑轮廓与中文路名）、
+  高德·高清影像（免 key，z18 能看清单栋建筑）。
   ⚠️ 高德是 **GCJ-02 火星坐标**，直接用会让 WGS84 轨迹偏 300~600 米 ⇒ 本项目在影像 `rectangle`
   上做**反向补偿**（`lib/basemap.js` 的 `gcj02Offset`），并用一条真实 GeoLife 轨迹压在高德街道图上目视验收过。
-- **为什么 key 放在后端**：它在 `backend/src/main/resources/application-local.yml` 的 `calcite.map.tianditu-token`（这个文件在 `.gitignore` 里）。**不写进 `application.yml`**（那个文件要入库），也不进前端构建产物——前端若用 `VITE_*` 变量，key 会被编进最终 JS，谁都能按 F12 看到；改成运行时向接口要，key 就只留在你本机。
-- **为什么默认关**：关着的时候后端那个接口一次都不会被访问，所以**没有 key 也照样能完整跑这个项目**。
-
-申请 key、控制台配授权域名、常见报错，见 `docs/DEPLOY.md` 第 11 节。
+  这条偏移已被判定为**已知限制、暂不再投入**：补偿只是近似，剩余误差仍有百米级，根因是**高德用 GCJ-02 火星坐标、
+  而我们的轨迹是 WGS84**，两套坐标系本来就对不上。
+- **天地图那条的结局**：曾经也接过（`GET /api/map/tianditu` + `calcite.map.*`），现已**整条移除**——
+  key 没开通矢量底图服务（任何层级都返回 `200` + 空白/占位瓦片），公开影像又只到 12 级。
+  所以现在没有 key、没有后端配置，只剩高德那两套样式。
+- **为什么默认关**：关着的时候一条瓦片请求都不会发，前端也就**不需要任何后端配置**——
+  没有 key 照样能完整跑这个项目。
 
 ---
 
@@ -463,7 +466,7 @@ docs/
 | **M2 · 改轨迹相似度** | `backend/.../service/SimilarityService.java`（查询）+ `backend/.../service/SimilarityMath.java`（算法）+ `backend/.../service/SimilarityCache.java`（缓存）；参数 `calcite.similarity.*`；前端 `frontend/src/lib/similarity.js` |
 | **M3 · 改空间范围查询（圈选）** | `backend/.../service/WithinService.java` + `backend/.../service/RegionGeometry.java`（几何校验）+ `backend/.../web/AnalysisController.java` 的 `POST /api/analysis/within` + `backend/.../config/WithinProperties.java`（`calcite.within.*`）；前端 `frontend/src/lib/region.js` + `components/RegionDrawer.vue` + `components/WithinStats.vue` |
 | **数据管理 · 改增删改查** | `backend/.../service/ImportService.java`（新增 / 替换）+ `backend/.../service/TrackEditService.java`（改名 / 删除）+ `backend/.../web/ImportController.java` + `backend/.../web/TrackController.java`；参数 `calcite.data.*`；界面 `frontend/src/components/DataManager.vue` |
-| **在线底图（2026-09-27 新增）· 改底图开关/样式** | `backend/.../web/MapController.java` 的 `GET /api/map/tianditu` + `backend/.../config/MapProperties.java`（`calcite.map.*`）；前端 `frontend/src/lib/basemap.js`（四套样式的 URL、剖分、GCJ-02 补偿）+ `components/CesiumGlobe.vue` 的 `applyOnlineBasemap` + `App.vue` 的 `toggleBasemap` |
+| **在线底图（2026-09-27 新增）· 改底图开关/样式** | 前端 `frontend/src/lib/basemap.js`（高德两套样式的 URL + GCJ-02 补偿）+ `components/CesiumGlobe.vue` 的 `applyOnlineBasemap`（叠/撤图层）+ `App.vue` 的 `toggleBasemap` / `onStyleChange`；**不需要任何后端配置** |
 | **跑 / 加验收脚本** | `scripts/acceptance/`：浏览器 `check-*.py`、接口对拍 `verify-*-api.py`、桩测试 `*-stub.mjs` |
 
 > 上面每一条都是同一套动作的产物——第 12.7 节把这条规律总结了一遍。
@@ -567,7 +570,7 @@ M3 之前落地的是**增删改查**：能改名、能删除、能替换、能�
 顺手把脚手架归了位：原先堆在 `.tmp/` 的 42 个脚本搬进 `scripts/acceptance/`
 （浏览器 `check-*.py` / 接口对拍 `verify-*-api.py` / 桩测试 `*-stub.mjs`），以后加验收脚本就往这一个目录放。
 
-回归基线（全绿，见 `README.md`）：后端 `mvn test` **166 项**（M4 时的 162 + 在线底图那 4 项）；前端 node **177 项（8 套件）**；浏览器 **138 项（9 个脚本，含 `check-basemap.py` 15 项）**。
+回归基线（全绿，见 `README.md`）：后端 `mvn test` **162 项**；前端 node **169 项（8 套件）**；浏览器 **139 项（9 个脚本，含 `check-basemap.py` 16 项）**。
 
 ### 12.6 在线底图（2026-09-27 增强）
 
@@ -575,16 +578,16 @@ M3 之前落地的是**增删改查**：能改名、能删除、能替换、能�
 
 | 做的东西 | 实际放在哪 |
 | --- | --- |
-| 配置接口 | `backend/.../web/MapController.java` 的 `GET /api/map/tianditu` |
-| key 与参数 | `backend/.../config/MapProperties.java`（`calcite.map.*`；key 在 `application-local.yml`，见第 4.1 节） |
-| 拼瓦片 URL | `frontend/src/lib/basemap.js`（纯计算，能用 node 直接断言；四套样式的 URL + 1×1 剖分 + GCJ-02 补偿都在这里） |
-| 叠 / 撤图层 | `frontend/src/components/CesiumGlobe.vue` 的 `applyOnlineBasemap`（关掉时连贴图一起销毁；按 `kind` 分 WMTS / XYZ 两种 provider） |
+| 拼瓦片 URL | `frontend/src/lib/basemap.js`（纯计算，能用 node 直接断言；高德两套样式的 URL + 1×1 剖分 + GCJ-02 补偿都在这里） |
+| 叠 / 撤图层 | `frontend/src/components/CesiumGlobe.vue` 的 `applyOnlineBasemap`（关掉时连贴图一起销毁；按 `kind` 选 provider，现在只剩高德 `{z}/{x}/{y}` 那一种 `xyz`） |
 | 开关与样式 | `frontend/src/App.vue` 的 `toggleBasemap` / `onStyleChange`（默认关；关着时一条瓦片请求都不发） |
 
 浏览器验收在 `scripts/acceptance/check-basemap.py`——它数的是「**关着时对瓦片服务的请求数 = 0**」，不是凭感觉说「没请求」；
-而且**不只看状态码**：天地图权限不足时会返回 `200 + 全白/占位图`，所以它把瓦片取回来按「最常见颜色占比」判定
-（实测：天地图空白 100%、占位 98.2%；高德市区真图 <70%、乡野真图 96.4%），并要求**先飞到市中心**再验
+而且**不只看状态码**：权限不足时瓦片服务会返回 `200 + 全白/占位图`，所以它把瓦片取回来按「最常见颜色占比」判定
+（实测：空白瓦片 100% 单色、占位图 98.2%；高德市区真图 <70%、乡野真图 96.4%），并要求**先飞到市中心**再验
 ——这两条判据是连续被"假绿"骗过之后才定下来的，细节见 `_session_context.md` 的踩坑记录。
+
+天地图那条已移除（key 没开通矢量底图服务、公开影像只到 12 级），所以现在只剩高德两套样式。
 
 ### 12.7 一个规律
 

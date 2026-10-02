@@ -1,19 +1,26 @@
 # -*- coding: utf-8 -*-
-"""在线底图开关的浏览器验收（四套样式：高德街道 / 高德影像 / 天地图街道 / 天地图影像）。
+"""在线底图开关的浏览器验收（高德两套样式：街道图 / 高清影像）。
 
 要证明的事：
   ① 开关存在、**默认关**，文案是「离线底图」
   ② **关闭状态下对瓦片服务的请求数 = 0**（"不拖性能"的硬证据）
-  ③ 打开默认样式（免 key 的**高德街道图**）→ 影像图层 1→2、请求打到 autonavi、**瓦片真有内容**
-  ④ 切到**高德高清影像** → 请求打到 webst、瓦片真有内容
-  ⑤ 切到**天地图·街道图**（要 key）→ 请求打到 tianditu；瓦片若为占位图则**如实跳过并说明原因**
-  ⑥ 再关掉：图层回 1，且不再产生新的请求
+  ③ 打开（默认的**高德街道图**）→ 影像图层 1→2、请求打到 autonavi、**瓦片真有内容**
+  ④ 切到**高德高清影像** → 请求打到 webst、瓦片真有内容、画面像素确实变了
+  ⑤ 再关掉：图层回 1，且不再产生新的请求
+另外还会留两张**对齐检查图**（供人眼判断 GCJ-02 补偿对不对）：
+  `.tmp/basemap-align-tiananmen.png`（相机对准天安门的 WGS84 坐标）
+  `.tmp/basemap-align-track.png`（一条真实 GeoLife 轨迹压在街道图上——真轨迹跟着路网走，
+  压不压得准一眼可判；合成演示轨迹是随机游走，判不了）
 
-⚠️ 两条判据是这版的关键（都栽过）：
-  1. **HTTP 200 ≠ 有内容**：天地图权限不足 / 该层级无影像时返回 200 + 全白或占位图。
-  2. **不能只数颜色**：高德**矢量街道图**只有 250 来种颜色（纯色填充 + 抗锯齿），
-     用"颜色 ≥2000"当判据会把它误判成占位图。所以改成**位置指纹**：
-     同一图层取多张不同位置的瓦片，**内容全都一样 ⇒ 必是占位图**（真图不可能逐字节相同）。
+⚠️ 判据为什么是「最常见颜色占比」而不是颜色种数或状态码（都是踩过才知道的）：
+  · `HTTP 200 ≠ 有内容`：底图服务在权限不足/该层级无数据时会返回 200 + 全白或占位图；
+  · 也不能数颜色种数：高德**矢量街道图**只有 250 来种颜色（纯色填充 + 抗锯齿），
+    真图会被误判成占位；
+  · 也不能只看"不同位置内容是否相同"：不同层级的空白图彼此也不同，会把空白判成有内容；
+  · 实测：空白图单色占比 100%、占位图 98.2%、高德乡野真图 96.4%、高德市区真图 <70%
+    ⇒ 阈值取 0.995（只抓"近乎纯色"的空白）。
+  · 还必须先把相机**飞到市中心**：默认 12000 公里视角那个层级没有瓦片数据，
+    而列表第一条是合成轨迹（在福建乡野），瓦片本身就近乎纯色。
 
 跑法（需提权；后端 8080 + 前端 5173 都要在跑）：
     & "E:\\python\\python_address\\python.exe" scripts\\acceptance\\check-basemap.py
@@ -22,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+from collections import Counter
 from urllib.request import Request, urlopen
 
 from PIL import Image
@@ -31,17 +39,12 @@ URL = "http://localhost:5173"
 API = "http://127.0.0.1:8080"
 VIEWPORT = {"width": 1600, "height": 900}
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".tmp")
+TILE_HOSTS = ("autonavi.com",)
+TIANANMEN = {"lon": 116.3975, "lat": 39.9087}
 
 ok = 0
 fail = 0
 skipped = []
-
-# 样式 → (下拉值, 期望的图层数=1 离线 + n, 请求域名关键词)
-STYLES = {
-    "amap-street": ("amap-street", 2, "autonavi"),
-    "amap-image": ("amap-image", 2, "autonavi"),
-    "tdt-street": ("tdt-street", 3, "tianditu"),
-}
 
 
 def check(name, cond, extra=""):
@@ -89,14 +92,7 @@ LAYERS_JS = r"""
 }
 """
 
-
-def layers(page):
-    r = page.evaluate(LAYERS_JS)
-    return r.get("n"), r.get("why")
-
-
 # 把相机对准一个已知的 WGS84 坐标：走地球组件暴露的 focusOn(lon, lat, radiusM)
-# （验收里用天安门，因为它的 WGS84 坐标是确定的 —— 这样才验得出 GCJ-02 补偿对不对）
 FOCUS_JS = r"""
 (args) => {
   try {
@@ -124,6 +120,11 @@ FOCUS_JS = r"""
 """
 
 
+def layers(page):
+    r = page.evaluate(LAYERS_JS)
+    return r.get("n"), r.get("why")
+
+
 def fetch_bytes(url, timeout=25):
     try:
         with urlopen(Request(url, headers={"User-Agent": "Mozilla/5.0 (calcite-acceptance)",
@@ -134,36 +135,20 @@ def fetch_bytes(url, timeout=25):
 
 
 def dominant_ratio(body):
-    """最常见颜色占全图的比例 —— 这是本脚本最可靠的判据。
-
-    实测（2026-09-27）：
-      · 天地图空白瓦片：103 B、**100%** 同一个颜色 (245,244,238)
-      · 天地图「此级别下无影像」占位图：4769 B、248 色但**最常见颜色占 98.2%**
-      · 高德街道图（矢量，只有 250 来色）/ 高德影像 / 天地图真影像：通常 **< 70%**
-     ⇒ 占比 > 90% 一律判为空白/占位；不能只看颜色种数（矢量图颜色本来就少），
-        也不能只看"不同位置内容是否相同"（不同层级的空白图彼此也不同，会假绿）。
-    """
-    with open(os.path.join(OUT, "_dominant.bin"), "wb") as f:
+    """最常见颜色占全图的比例 + 颜色种数（判据的核心，见文件头说明）"""
+    p = os.path.join(OUT, "_dominant.bin")
+    with open(p, "wb") as f:
         f.write(body)
-    im = Image.open(os.path.join(OUT, "_dominant.bin")).convert("RGB")
+    im = Image.open(p).convert("RGB")
     raw = im.tobytes()
     px = list(zip(raw[0::3], raw[1::3], raw[2::3]))
-    from collections import Counter
     top = Counter(px).most_common(1)[0][1]
     return top / len(px), len(set(px))
 
 
-def fingerprint_verdict(urls, max_dominant=0.90):
-    """多张瓦片的综合判断：既看"不同位置内容是否不同"，也看"是否近乎纯色"。
-
-    ⚠️ 阈值按**服务**分开给，因为两者的"假内容"形态不一样（都是实测出来的）：
-      · 天地图：空白 100% 单色、占位图 98.2% ⇒ `max_dominant=0.90`
-      · 高德：不发占位图；但**乡野瓦片**本来就有 96.4% 是同一块底色（实测福建）
-        ⇒ 门限放宽到 0.995（只抓"完全均匀"的那种空白）
-
-    返回 (结论, 说明)。只有两条都过才算有内容。
-    """
-    hashes, worst_ratio, colors_seen, bodies = set(), 0.0, [], 0
+def fingerprint_verdict(urls, max_dominant=0.995):
+    """多张瓦片的综合判断：既看"是否近乎纯色"，也看"不同位置内容是否相同"。"""
+    hashes, worst, colors_seen, bodies = set(), 0.0, [], 0
     for u in urls[:4]:
         b = fetch_bytes(u)
         if not b:
@@ -171,13 +156,13 @@ def fingerprint_verdict(urls, max_dominant=0.90):
         bodies += 1
         hashes.add(hashlib.sha256(b).hexdigest()[:10])
         ratio, colors = dominant_ratio(b)
-        worst_ratio = max(worst_ratio, ratio)
+        worst = max(worst, ratio)
         colors_seen.append(colors)
     if bodies == 0:
         return "取不到", "瓦片请求都取不回来"
     detail = (f"{bodies} 张：{len(hashes)} 种内容 / 颜色数 {colors_seen} / "
-              f"最高单色占比 {worst_ratio:.1%}（阈值 {max_dominant:.1%}）")
-    if worst_ratio > max_dominant:
+              f"最高单色占比 {worst:.1%}（阈值 {max_dominant:.1%}）")
+    if worst > max_dominant:
         return "空白/占位图", detail
     if len(hashes) == 1:
         return "占位图（不同位置内容完全相同）", detail
@@ -190,14 +175,11 @@ def shot_stats(path):
     return round(sum(raw) / len(raw), 2), len(set(zip(raw[0::3], raw[1::3], raw[2::3])))
 
 
-def distinct_urls(urls, keyword, want=4):
-    """挑出同一图层、但位置不同的几条 URL（去掉 tk 等参数只比 tile 坐标）"""
+def distinct_urls(urls, want=4):
+    """挑出位置不同的几条瓦片 URL（按 x/y/z 去重）"""
     seen, picked = set(), []
     for u in urls:
-        if keyword not in u:
-            continue
-        m = re.search(r"TILEMATRIX=(\d+)&TILEROW=(\d+)&TILECOL=(\d+)", u) or \
-            re.search(r"[?&]z=(\d+)&x=(\d+)&y=(\d+)", u)
+        m = re.search(r"[?&]z=(\d+)&x=(\d+)&y=(\d+)", u)
         key = m.groups() if m else u
         if key in seen:
             continue
@@ -209,30 +191,21 @@ def distinct_urls(urls, keyword, want=4):
 
 
 def main():
-    try:
-        with urlopen(API + "/api/map/tianditu", timeout=10) as r:
-            cfg = json.loads(r.read().decode())
-        has_key = bool(cfg.get("enabled"))
-        print(f"后端 /api/map/tianditu -> enabled={has_key}")
-    except Exception as e:                                     # noqa: BLE001
-        print(f"!! 取不到配置接口（{type(e).__name__}: {e}）—— 后端在跑吗")
-        return 1
-
     urls, statuses = [], []
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome", headless=True, args=["--no-sandbox"])
         page = browser.new_page(viewport=VIEWPORT)
         page.on("request", lambda r: urls.append(r.url)
-                if ("tianditu.gov.cn" in r.url or "autonavi.com" in r.url) else None)
+                if any(h in r.url for h in TILE_HOSTS) else None)
         page.on("response", lambda r: statuses.append(r.status)
-                if ("tianditu.gov.cn" in r.url or "autonavi.com" in r.url) else None)
+                if any(h in r.url for h in TILE_HOSTS) else None)
         page.goto(URL, wait_until="load")
         for _ in range(40):
             if page.locator(".track-list .item").count() > 0:
                 break
             page.wait_for_timeout(500)
 
-        print("\n=== ① 开关存在且默认关 ===")
+        print("=== ① 开关存在且默认关 ===")
         toggle = page.locator('[data-testid="basemap-toggle"]')
         check("开关存在", toggle.count() == 1, f"实际 {toggle.count()} 个")
         check("默认文案是「离线底图」", "离线" in (toggle.inner_text() or ""), repr(toggle.inner_text()))
@@ -246,26 +219,24 @@ def main():
         page.screenshot(path=os.path.join(OUT, "basemap-off.png"))
         off_stats = shot_stats(os.path.join(OUT, "basemap-off.png"))
 
-        print("\n=== 飞到天安门（市中心；默认 12000 公里视角没有瓦片数据，乡野瓦片也不足以验证街道图）===")
-        page.evaluate(FOCUS_JS, {"lon": 116.3975, "lat": 39.9087, "radius": 700})
+        print("\n=== 飞到天安门（市中心）===")
+        print(f"   focusOn 调用：{page.evaluate(FOCUS_JS, {**TIANANMEN, 'radius': 700})}")
         page.wait_for_timeout(4000)
 
-        print("\n=== ③ 打开（默认样式：高德·街道图，免 key）===")
+        print("\n=== ③ 打开（默认样式：高德·街道图）===")
         toggle.click()
         page.wait_for_timeout(3500)
-        hint = page.locator('[data-testid="basemap-hint"]')
-        hint_text = hint.inner_text() if hint.count() > 0 else ""
         n_on, why_on = layers(page)
         check("影像图层数 = 2（离线底图 + 高德街道图）", n_on == 2, f"实际 {n_on}（{why_on}）")
-        check("向高德发了瓦片请求", any("autonavi.com" in u for u in urls), f"实际 {len(urls)} 条")
+        check("向高德发了瓦片请求", len(urls) > 0, f"实际 {len(urls)} 条")
         check("URL 走 {z}/{x}/{y} 模板（参数顺序不固定，别写死顺序）",
               any(all(k in u for k in ("x=", "y=", "z=")) and re.search(r"[?&]z=\d+", u) for u in urls),
               str(urls[:2]))
-        picked = distinct_urls(urls, "autonavi.com")
+        check("瓦片服务返回了 200", 200 in statuses, f"实际状态码 {sorted(set(statuses))[:5]}")
+        picked = distinct_urls(urls)
         if picked:
-            verdict, detail = fingerprint_verdict(picked, max_dominant=0.995)
-            check("⭐ 高德街道图拿到**真有内容**的瓦片（不同位置内容不同）",
-                  verdict == "有内容", f"{verdict}：{detail}")
+            verdict, detail = fingerprint_verdict(picked)
+            check("⭐ 高德街道图拿到**真有内容**的瓦片", verdict == "有内容", f"{verdict}：{detail}")
         else:
             check("抓到高德瓦片 URL", False, "一条都没抓到")
 
@@ -275,12 +246,12 @@ def main():
         before = len(urls)
         style.select_option("amap-image")
         page.wait_for_timeout(3500)
-        check("切换后请求的是高德影像（webst）",
+        check("切换后请求的是影像服务（webst）",
               any("webst" in u for u in urls[before:]) or any("webst" in u for u in urls),
               f"新增 {len(urls) - before} 条")
-        picked_img = distinct_urls([u for u in urls if "webst" in u], "autonavi.com")
+        picked_img = distinct_urls([u for u in urls if "webst" in u])
         if picked_img:
-            verdict, detail = fingerprint_verdict(picked_img, max_dominant=0.995)
+            verdict, detail = fingerprint_verdict(picked_img)
             check("⭐ 高德高清影像拿到真有内容的瓦片", verdict == "有内容", f"{verdict}：{detail}")
         else:
             skip("高德高清影像瓦片内容", "没抓到 webst 瓦片")
@@ -289,25 +260,23 @@ def main():
         print(f"       截图指纹：关 {off_stats} → 开 {on_stats}")
         check("画面确实变了", on_stats != off_stats, f"{off_stats} vs {on_stats}")
 
-        # 对齐检查：切回高德街道图（带地名，肉眼一眼能判断补偿对不对），相机对准天安门 WGS84 坐标。
-        # ⚠️ 必须在底图**开着**的时候拍 —— 关掉之后拍到的只是离线图，验不出补偿。
+        # 对齐检查图（必须在底图**开着**的时候拍）：切回街道图，相机对准天安门 WGS84 坐标。
+        # 命中的话画面正中就是天安门一带；GCJ-02 补偿不对会整体偏 500 米左右。
         style.select_option("amap-street")
         page.wait_for_timeout(2500)
-        page.evaluate(FOCUS_JS, {"lon": 116.3975, "lat": 39.9087, "radius": 500})
+        page.evaluate(FOCUS_JS, {**TIANANMEN, "radius": 500})
         page.wait_for_timeout(4500)
         page.screenshot(path=os.path.join(OUT, "basemap-align-tiananmen.png"))
-        print(f"       对齐检查图（高德街道图 + 相机对准天安门）：{os.path.join(OUT, 'basemap-align-tiananmen.png')}")
+        print(f"       对齐检查图（天安门）：{os.path.join(OUT, 'basemap-align-tiananmen.png')}")
 
-        # ⭐ 偏移补偿的**真正**验收：让一条**真实**轨迹压在街道上。
-        # 真轨迹是跟着路网走的，所以"轨迹压不压在街上"一眼就能判断 GCJ-02 补偿对不对；
-        # 合成演示轨迹（资料一/资料二）是随机游走，判不了。
+        # ⭐ 补偿的**真正**验收：让一条**真实**轨迹压在街道上（真轨迹跟着路网走，一眼可判）
         try:
             with urlopen(API + "/api/tracks?source=geolife&limit=1", timeout=10) as r:
                 tracks = json.loads(r.read().decode())
             items = tracks.get("items") if isinstance(tracks, dict) else tracks
             tid = items[0].get("id") if items else None
             if tid:
-                picked = page.evaluate("""(id) => {
+                picked_ok = page.evaluate("""(id) => {
                   const app = document.querySelector('#app');
                   const inst = app && app.__vue_app__ && app.__vue_app__._instance;
                   if (!inst || !inst.setupState || typeof inst.setupState.selectTrack !== 'function') return false;
@@ -316,39 +285,14 @@ def main():
                 }""", tid)
                 page.wait_for_timeout(6000)
                 page.screenshot(path=os.path.join(OUT, "basemap-align-track.png"))
-                print(f"       对齐检查图（真实轨迹 id={tid} 压在高德街道图上）："
-                      f"{os.path.join(OUT, 'basemap-align-track.png')}（selectTrack={picked}）")
+                print(f"       对齐检查图（真实轨迹 id={tid}）："
+                      f"{os.path.join(OUT, 'basemap-align-track.png')}（selectTrack={picked_ok}）")
             else:
                 skip("真实轨迹对齐检查", "接口没返回 geolife 轨迹")
         except Exception as e:                                 # noqa: BLE001
             skip("真实轨迹对齐检查", f"取轨迹失败：{type(e).__name__}: {e}")
 
-        print("\n=== ⑤ 切到「天地图·街道图」（要 key）===")
-        style.select_option("tdt-street")
-        page.wait_for_timeout(3500)
-        if not has_key:
-            hint_text = hint.inner_text() if hint.count() > 0 else ""
-            check("没配 key 时给出提示、且开关收回关闭态",
-                  len(hint_text) > 0 and toggle.get_attribute("aria-pressed") == "false",
-                  f"提示={hint_text[:60]!r} pressed={toggle.get_attribute('aria-pressed')}")
-            skip("天地图街道图瓦片内容", "本机未配 tianditu-token")
-        else:
-            picked_tdt = distinct_urls([u for u in urls if "tianditu.gov.cn" in u], "tianditu.gov.cn")
-            if picked_tdt:
-                verdict, detail = fingerprint_verdict(picked_tdt)
-                if verdict == "有内容":
-                    check("⭐ 天地图街道图拿到真有内容的瓦片", True, detail)
-                else:
-                    skip("天地图街道图瓦片内容",
-                         f"实测 {verdict}（{detail}）—— 这把 key 很可能**没开通矢量底图**服务；"
-                         "天地图权限不足时返回 200 + 空白/占位图，不是代码问题")
-            else:
-                skip("天地图街道图瓦片内容", "没抓到 tianditu 瓦片请求")
-
-        print("\n=== ⑥ 关掉 ===")
-        if toggle.get_attribute("aria-pressed") == "false":
-            toggle.click()                       # 上一步可能已收回关闭态，先打开再关
-            page.wait_for_timeout(2500)
+        print("\n=== ⑤ 关掉 ===")
         toggle.click()
         page.wait_for_timeout(1500)
         n_back, why_back = layers(page)

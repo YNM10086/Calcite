@@ -192,7 +192,7 @@ def fig1():
           ("App.vue 是唯一的状态中心；11 个组件只是代表（地球 / 列表 / 播放条 / 曲线 / 五档分析面板 / 数据管理）",
            "CesiumGlobe 画地球与轨迹 · TrackList 画轨迹列表 · TrackPlayer 画播放条 · SpeedChart 画曲线",
            "lib/ 里是 8 个纯模块：playback / chart / hotspot / density / similarity / region / basemap / dataEdit",
-           "在线底图：lib/basemap.js 拼天地图瓦片 URL；地球右上角是「底图」开关，默认关（关着零请求）"),
+           "在线底图：lib/basemap.js 拼高德瓦片 URL；地球右上角是「底图」开关，默认关（关着零请求）"),
           border=BLUE, fill=BLUE_F, align="left", ss=16)
     # 后端
     g.box(150, 570, 1100, 160, "后端 · Spring Boot（端口 8080）",
@@ -242,7 +242,7 @@ def fig2():
         ("        playback / chart", "算倍速、时间范围、刻度、坐标映射（前两档）", BLUE_F, BLUE_F, 3),
         ("        hotspot / density", "算热点配色与大小、格子档位与色阶", BLUE_F, BLUE_F, 3),
         ("        similarity / region", "算重合度配色与筛选、三种画法转 GeoJSON", BLUE_F, BLUE_F, 3),
-        ("        basemap / dataEdit", "拼天地图瓦片 URL、拼管理界面文案", BLUE_F, BLUE_F, 3),
+        ("        basemap / dataEdit", "拼高德瓦片 URL、拼管理界面文案", BLUE_F, BLUE_F, 3),
         ("    scripts/", "回归检查脚本（node 直接跑）", BLUE_F, BLUE_F, 2),
         ("scripts/db/", "★ 数据库建表 / 灌数据 / 查看结果的 SQL", ORANGE, ORANGE_F, 0),
         ("    04-demo-data.sql", "M4 演示数据集：14 条合成轨迹 / 4,592 个点", ORANGE_F, ORANGE_F, 1),
@@ -439,7 +439,7 @@ def fig5():
     for i, s in enumerate([
         "similarity.js —— 重合度配色、条数筛选",
         "region.js —— 三种画法转 GeoJSON、截断",
-        "basemap.js —— 天地图瓦片 URL 模板",
+        "basemap.js —— 高德瓦片 URL 模板 + GCJ-02 修正",
         "dataEdit.js —— 点数 / 长度 / 冲突文案",
     ]):
         g.text(700, 1034 + i * 24, s, size=16, color=(0x4E, 0x59, 0x69))

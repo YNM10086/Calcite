@@ -6,7 +6,6 @@ import {
   ClockRange,
   ClockStep,
   Color,
-  GeographicTilingScheme,
   HeightReference,
   ImageryLayer,
   JulianDate,
@@ -23,8 +22,6 @@ import {
   UrlTemplateImageryProvider,
   VERSION,
   Viewer,
-  // 在线底图（天地图）：WMTS 图层的 provider 与经纬度剖分方案
-  WebMapTileServiceImageryProvider,
   WebMercatorTilingScheme,
   buildModuleUrl,
 } from 'cesium'
@@ -78,9 +75,9 @@ const props = defineProps({
   // 只认这个 prop、自己不切状态：ESC / 切档 / 取消三条退出路径都由 App 收口，
   // 否则"地球以为还在画、App 以为已经结束"这种状态分叉迟早出现
   drawingMode: { type: String, default: 'idle' },
-  // 在线底图（天地图）图层描述数组。**空数组 = 不画**（默认就是空 —— 关闭状态下零瓦片请求）。
-  // 元素形状：{ layer, name, url, maximumLevel, subdomains }，由 App 从 /api/map/tianditu 装配。
-  // ⚠️ URL 模板由 lib/basemap.js 拼（纯函数、可断言），组件这里只负责"给数组就画、空数组就撤"
+  // 在线底图（高德）图层描述数组。**空数组 = 不画**（默认就是空 —— 关闭状态下零瓦片请求）。
+  // 元素形状：{ key, kind: 'xyz', layer, name, url, maximumLevel, subdomains, rectangle }，
+  // 由 App 用 lib/basemap.js 的 layerDescriptors() **纯计算**得到（不联网、不需要配置）
   basemapLayers: { type: Array, default: () => [] },
 })
 
@@ -862,13 +859,13 @@ watch(() => props.basemapLayers, (layers) => {
   if (ready.value) applyOnlineBasemap(layers)
 })
 
-/* ============ 在线底图（天地图，可选）============
+/* ============ 在线底图（高德，可选）============
  *
  * 为什么是「叠加层」而不是「换掉底图」：离线 NaturalEarthII 永远留在最底下 ——
- * 没网、key 失效、瓦片还没到时，用户看到的是一张粗但可用的世界地图，而不是**空白地球**。
+ * 没网、瓦片还没到时，用户看到的是一张粗但可用的世界地图，而不是**空白地球**。
  *
- * 为什么用「描述数组」而不是在组件里拼 URL：拼 URL 是纯逻辑，放在 lib/basemap.js 里
- * 能用 node 断言（拼错的表现只是"地图看起来没变"，在浏览器里极难定位）。
+ * 为什么用「描述数组」而不是在组件里拼 URL：拼 URL 与 GCJ-02 补偿都是纯逻辑，
+ * 放在 lib/basemap.js 里能用 node 断言（拼错的表现只是"地图看起来没变"，在浏览器里极难定位）。
  */
 let onlineLayers = []          // 当前挂着的在线图层（自己记账才能精确撤掉，且不影响别的图层）
 
@@ -894,40 +891,17 @@ function applyOnlineBasemap(layers) {
     refPoint = { lon: CesiumMath.toDegrees(carto.longitude), lat: CesiumMath.toDegrees(carto.latitude) }
   }
   for (const spec of layers || []) {
-    let provider
-    if (spec.kind === 'xyz') {
-      const rect = refPoint ? compensatedWorldRectangle(refPoint.lon, refPoint.lat) : spec.rectangle
-      provider = new UrlTemplateImageryProvider({
-        url: spec.url,                   // 含 {s} / {x} / {y} / {z}
-        // 高德是 Web Mercator 瓦片，必须配 WebMercatorTilingScheme
-        tilingScheme: new WebMercatorTilingScheme(),
-        maximumLevel: spec.maximumLevel,
-        subdomains: spec.subdomains,
-        // ⚠️ 补偿的关键：声明影像覆盖的世界矩形（往反方向挪 delta）⇒ 整张影像被推回 WGS84
-        rectangle: Rectangle.fromDegrees(rect[0], rect[1], rect[2], rect[3]),
-        credit: '高德地图',
-      })
-    } else {
-      provider = new WebMapTileServiceImageryProvider({
-        url: spec.url,                    // 模板含 {s} / {TileMatrix} / {TileRow} / {TileCol}
-        layer: spec.layer,                // 天地图的 LAYER：vec / cva / img / cia
-        style: 'default',
-        format: 'tiles',                  // 与 URL 里的 FORMAT=tiles 对齐
-        // 矩阵集 w = 经纬度，与 lib/basemap.js 的 TILE_MATRIX_SET 一致；
-        // ⚠️⚠️ 天地图 `_w` 的 0 级是 **1×1**，而 GeographicTilingScheme 默认是 **2×1**
-        //    —— 不显式覆盖就会把列号算大一倍，请求到越界瓦片，天地图返回
-        //    「此级别下，该区域无影像」占位图（页面看起来"变了"，所以只看截图抓不到）。
-        tileMatrixSetID: 'w',
-        tilingScheme: new GeographicTilingScheme({
-          numberOfLevelZeroTilesX: 1,
-          numberOfLevelZeroTilesY: 1,
-        }),
-        maximumLevel: spec.maximumLevel,
-        subdomains: spec.subdomains,      // t0~t7
-        // 底图没有可拾取要素：关掉能省掉每次点击的 GetFeatureInfo 请求（这个开关默认是 true）
-        enablePickFeatures: false,
-      })
-    }
+    const rect = refPoint ? compensatedWorldRectangle(refPoint.lon, refPoint.lat) : spec.rectangle
+    const provider = new UrlTemplateImageryProvider({
+      url: spec.url,                   // 含 {s} / {x} / {y} / {z}
+      // 高德是 Web Mercator 瓦片，必须配 WebMercatorTilingScheme
+      tilingScheme: new WebMercatorTilingScheme(),
+      maximumLevel: spec.maximumLevel,
+      subdomains: spec.subdomains,
+      // ⚠️ 补偿的关键：声明影像覆盖的世界矩形（往反方向挪 delta）⇒ 整张影像被推回 WGS84
+      rectangle: Rectangle.fromDegrees(rect[0], rect[1], rect[2], rect[3]),
+      credit: '高德地图',
+    })
     onlineLayers.push(v.imageryLayers.addImageryProvider(provider))
   }
 }
