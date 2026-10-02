@@ -1174,6 +1174,66 @@ python scripts/acceptance/verify-density-api.py
 
 ---
 
+## 11. 可选：开启天地图在线底图（演示用）
+
+**默认是关的**：不配 key、不打开开关时，地球用的是 Cesium 自带的离线世界地图
+（不需要 token、不需要联网）。要演示"看得见建筑轮廓与路名"时，再按下面三步开。
+
+### 11.1 把 key 填进本地配置（**不要**填进 `application.yml`）
+
+```powershell
+# PowerShell —— 仓库根目录
+Copy-Item backend\src\main\resources\application-local.yml.example `
+          backend\src\main\resources\application-local.yml -Force   # 若还没这个文件
+# 然后编辑 application-local.yml，加（或改）这一行：
+#   calcite:
+#     map:
+#       tianditu-token: 你的key
+```
+
+`application-local.yml` **已在 `.gitignore` 里**（和数据库密码同一套路），不会被提交；
+`application.yml` 里的同名项保持空字符串即可。
+
+> ⚠️ 别把 key 写进 `frontend/.env.local`：Vite 的 `VITE_*` 是**构建期**注入，会把 key 打进前端产物（F12 可见）。
+> 本项目走的是"运行时向后端要"——key 既不进仓库、也不进构建产物。
+
+### 11.2 在天地图控制台确认授权域名
+
+天地图的 key 可以绑定"授权域名"。本地演示要在控制台把 `localhost` 加进去，
+否则瓦片会返回 403，而页面上只表现为"地图没变"，很难查。
+
+### 11.3 重启后端 → 打开开关
+
+```powershell
+mvn -f backend/pom.xml spring-boot:run          # 改完配置必须重启（配置只在启动时读一次）
+# 打开 http://localhost:5173 ，点地球**右上角**的「🗺 离线底图」按钮
+```
+
+打开后右上角会变成「🗺 天地图（街道）」，地球叠加天地图的 `vec`（街道矢量，高层级含建筑轮廓）
+与 `cva`（路名 / 地名注记）两层；再点一下即撤销图层（连贴图一起销毁）。
+
+### 11.4 这一节的设计取舍（为什么这么做）
+
+| 取舍 | 说明 |
+|---|---|
+| **默认关** | 每次打开页面都是关的，不记 localStorage —— "不拖性能"这条不依赖任何"记得关掉"的纪律 |
+| **只在打开时取配置** | 关闭状态下 `GET /api/map/tianditu` **一次都不会被访问**（浏览器验收里数请求数证实） |
+| **叠加而不是替换** | 离线底图永远留在最底层：没网、key 失效、瓦片没到时看到的是粗但可用的地图，而不是空白地球 |
+| **关掉就销毁图层** | `imageryLayers.remove(layer, true)` —— 关闭后不再有瓦片请求，也不占显存 |
+| ⚠️ **token 会到达浏览器** | 瓦片 URL 必须在前端拼，所以 token 必然下发到客户端。**别把带 key 的这个后端暴露到公网**；它只适合本机演示 |
+
+### 11.5 自查（两条命令）
+
+```powershell
+# ① 纯逻辑：URL 模板 / 图层顺序 / 缺 key 行为（不需要服务）
+cd frontend; npm run check:basemap
+
+# ② 浏览器验收：默认关 + 关闭时零请求 + 打开后图层 1→3→1（需要 8080 + 5173 在跑）
+& "E:\python\python_address\python.exe" scripts\acceptance\check-basemap.py
+```
+
+---
+
 ## 附录 · 实测记录（2026-09-27）
 
 > 环境：Windows 11 · PostgreSQL 18.3（装在**非默认目录** `E:\PostgreSQL`）· PostGIS 3.6 · JDK 25.0.2 ·

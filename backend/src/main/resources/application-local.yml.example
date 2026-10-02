@@ -3,3 +3,11 @@
 spring:
   datasource:
     password: 在这里填你的本地 PostgreSQL 密码
+
+# 可选：天地图在线底图（默认关闭）。要用就把 key 填在下面，前端把右上角开关打开时才生效。
+# ⚠️ 这个文件（application-local.yml）已在 .gitignore 里，不会被提交；
+#    上面 application.yml 里的 calcite.map.tianditu-token 保持空即可，这里会覆盖它。
+# 不用天地图就把下面三行整段删掉。
+calcite:
+  map:
+    tianditu-token: 在这里填你的天地图 key

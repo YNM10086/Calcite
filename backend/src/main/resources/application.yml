@@ -122,3 +122,12 @@ calcite:
     # items 默认返回条数（统计不受它影响，永远全量）
     default-limit: 50
     max-limit: 500
+
+  # 在线底图（天地图）—— 可选、默认关，只为演示时"看得见建筑"服务
+  # ⚠️ key 不要写在这里（本文件要入库）——写进 application-local.yml（已在 .gitignore）
+  map:
+    tianditu-token: ""
+    # 最大层级：街道矢量图要 18 级才看得到建筑轮廓（低于 16 级基本只有路网）
+    tianditu-max-level: 18
+    # 瓦片子域 t0~t7：多子域让浏览器能并发取瓦片
+    subdomains: ["0", "1", "2", "3", "4", "5", "6", "7"]

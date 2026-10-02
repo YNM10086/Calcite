@@ -7,6 +7,7 @@ import {
   ClockRange,
   ClockStep,
   Color,
+  GeographicTilingScheme,
   HeightReference,
   ImageryLayer,
   JulianDate,
@@ -21,6 +22,8 @@ import {
   TileMapServiceImageryProvider,
   VERSION,
   Viewer,
+  // 在线底图（天地图）：WMTS 图层的 provider 与经纬度剖分方案
+  WebMapTileServiceImageryProvider,
   buildModuleUrl,
 } from 'cesium'
 import { computeMultiplier, timeRange } from '../lib/playback.js'
@@ -71,6 +74,10 @@ const props = defineProps({
   // 只认这个 prop、自己不切状态：ESC / 切档 / 取消三条退出路径都由 App 收口，
   // 否则"地球以为还在画、App 以为已经结束"这种状态分叉迟早出现
   drawingMode: { type: String, default: 'idle' },
+  // 在线底图（天地图）图层描述数组。**空数组 = 不画**（默认就是空 —— 关闭状态下零瓦片请求）。
+  // 元素形状：{ layer, name, url, maximumLevel, subdomains }，由 App 从 /api/map/tianditu 装配。
+  // ⚠️ URL 模板由 lib/basemap.js 拼（纯函数、可断言），组件这里只负责"给数组就画、空数组就撤"
+  basemapLayers: { type: Array, default: () => [] },
 })
 
 // 往外报当前时刻（毫秒时间戳），App 用它更新播放条；
@@ -846,6 +853,54 @@ watch(() => props.withinTracks, () => {
   if (ready.value) drawWithinTracks(props.withinTracks)
 })
 
+// 在线底图：开关打开后 App 把图层描述传进来，关掉时传空数组（= 全部撤掉）
+watch(() => props.basemapLayers, (layers) => {
+  if (ready.value) applyOnlineBasemap(layers)
+})
+
+/* ============ 在线底图（天地图，可选）============
+ *
+ * 为什么是「叠加层」而不是「换掉底图」：离线 NaturalEarthII 永远留在最底下 ——
+ * 没网、key 失效、瓦片还没到时，用户看到的是一张粗但可用的世界地图，而不是**空白地球**。
+ *
+ * 为什么用「描述数组」而不是在组件里拼 URL：拼 URL 是纯逻辑，放在 lib/basemap.js 里
+ * 能用 node 断言（拼错的表现只是"地图看起来没变"，在浏览器里极难定位）。
+ */
+let onlineLayers = []          // 当前挂着的在线图层（自己记账才能精确撤掉，且不影响别的图层）
+
+/** 撤掉全部在线图层。viewer 未就绪或已销毁时静默返回（幂等，重复调用安全） */
+function clearOnlineBasemap() {
+  const v = viewer.value
+  if (v && !v.isDestroyed()) {
+    for (const layer of onlineLayers) v.imageryLayers.remove(layer, true)  // true = 连贴图一起销毁
+  }
+  onlineLayers = []
+}
+
+/** 按描述数组重建在线图层；空数组 = 全部撤掉（这就是"关掉后零负担"的实现） */
+function applyOnlineBasemap(layers) {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  clearOnlineBasemap()
+  for (const spec of layers || []) {
+    const provider = new WebMapTileServiceImageryProvider({
+      url: spec.url,                    // 模板含 {s} / {TileMatrix} / {TileRow} / {TileCol}
+      layer: spec.layer,                // 天地图的 LAYER：vec（街道矢量）/ cva（注记）
+      style: 'default',
+      format: 'tiles',                  // 与 URL 里的 FORMAT=tiles 对齐
+      // 矩阵集 w = 经纬度，与 lib/basemap.js 的 TILE_MATRIX_SET 必须一致；
+      // ⚠️ 矩阵集与 tilingScheme 不匹配时瓦片会整体错位（地图看着"有图但不对"）
+      tileMatrixSetID: 'w',
+      tilingScheme: new GeographicTilingScheme(),
+      maximumLevel: spec.maximumLevel,
+      subdomains: spec.subdomains,      // t0~t7
+      // 底图没有可拾取要素：关掉能省掉每次点击的 GetFeatureInfo 请求（这个开关默认是 true）
+      enablePickFeatures: false,
+    })
+    onlineLayers.push(v.imageryLayers.addImageryProvider(provider))
+  }
+}
+
 onMounted(() => {
   // 1) 底图：Cesium 自带的离线世界地图 NaturalEarthII
   //    不需要联网、不需要任何 access token，打开就有画面
@@ -904,6 +959,8 @@ onMounted(() => {
   // 圈选的两个图层同理：区域与命中结果都可能在挂载前就已经拿到了
   drawRegion(props.region)
   drawWithinTracks(props.withinTracks)
+  // 在线底图同理：开关可能在挂载前就被打开过（传空数组时只做一次"撤掉"，幂等）
+  applyOnlineBasemap(props.basemapLayers)
   /*
    * ⚠️ 绘制模式也要在这里补调一次（与上面几个 prop 同一个理由）。
    * 漏了它的后果：`drawingMode` 若在 viewer 就绪前就已经不是 'idle'

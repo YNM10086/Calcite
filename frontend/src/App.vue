@@ -16,6 +16,7 @@ import { sortHotspots } from './lib/hotspot.js'
 import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
 import { filterMatches } from './lib/similarity.js'
 import { polygonGeometry, pointGeometry, rectGeometry, visibleItems } from './lib/region.js'
+import { basemapLabel, layerDescriptors, missingTokenHint } from './lib/basemap.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -505,6 +506,13 @@ async function focusSimilar(trackId) {
 /* ============ 空间范围查询（第五档「圈选」）============ */
 
 const drawingMode = ref('idle')          // idle | rect | polygon | buffer
+
+/* 在线底图（天地图）：**默认关** —— 每次打开都是关的，
+   这样"开关不拖性能"这条硬要求不依赖任何"记得关掉"的纪律。 */
+const basemapOn = ref(false)
+const basemapBusy = ref(false)
+const basemapLayers = ref([])            // 空数组 = 地球那边一层在线底图都不画
+const basemapHint = ref('')              // 缺 key / 取配置失败时给用户看的一句提示
 const bufferM = ref(500)
 const bufferCenter = ref(null)            // 缓冲区中心（地图上点出来的），给"改半径重查"用
 const withinBusy = ref(false)
@@ -706,6 +714,39 @@ function onQueryBuffer() {
   queryWithin(pointGeometry(bufferCenter.value.lon, bufferCenter.value.lat), { bufferM: bufferM.value })
 }
 
+/* ============ 在线底图（天地图）开关 ============
+ *
+ * ⚠️ 配置**只在"打开"那一刻**才去后端要：默认关 ⇒ `/api/map/tianditu` 一次都不会被访问。
+ *    这正是"开关不拖性能"的可验证证据（浏览器验收里数网络请求条数）。
+ * 关掉时把图层描述置成空数组 —— 地球那边会撤掉图层连贴图一起销毁。
+ */
+async function toggleBasemap() {
+  if (basemapBusy.value) return
+  if (basemapOn.value) {                 // 关：立刻撤层，不留任何残留
+    basemapOn.value = false
+    basemapLayers.value = []
+    basemapHint.value = ''
+    return
+  }
+  basemapBusy.value = true
+  try {
+    const res = await fetch('/api/map/tianditu')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const layers = layerDescriptors(await res.json())
+    if (layers.length === 0) {           // 没配 key：给提示、不开图层（不发注定 403 的瓦片）
+      basemapHint.value = missingTokenHint()
+      return
+    }
+    basemapLayers.value = layers
+    basemapOn.value = true
+    basemapHint.value = ''
+  } catch (e) {
+    basemapHint.value = `天地图配置获取失败：${e.message}`
+  } finally {
+    basemapBusy.value = false
+  }
+}
+
 /**
  * 半径输入框回写。
  *
@@ -865,12 +906,30 @@ async function selectTrack(id) {
       :region="viewMode === 'within' ? withinRegion : null"
       :within-tracks="viewMode === 'within' ? withinTracksForGlobe : []"
       :drawing-mode="viewMode === 'within' ? drawingMode : 'idle'"
+      :basemap-layers="basemapLayers"
       @time-change="onTimeChange"
       @camera-move-end="onCameraMoveEnd"
       @draw-rect="onDrawRect"
       @draw-polygon="onDrawPolygon"
       @draw-buffer="onDrawBuffer"
     />
+
+    <!-- 底图开关：放地球右上角。**默认关** —— 不开就不发任何天地图请求。
+         演示时随手一点就能换成"看得见建筑轮廓与路名"的街道图。 -->
+    <div class="basemap-switch">
+      <button
+        data-testid="basemap-toggle"
+        class="basemap-btn"
+        :class="{ on: basemapOn }"
+        :disabled="basemapBusy"
+        :aria-pressed="basemapOn ? 'true' : 'false'"
+        :title="basemapOn
+          ? '切回离线底图（关掉后不再请求天地图）'
+          : '切到天地图在线底图：看得见建筑轮廓与路名（需要网络 + 已配置 key）'"
+        @click="toggleBasemap"
+      >🗺 {{ basemapLabel(basemapOn) }}</button>
+      <p v-if="basemapHint" class="basemap-hint" data-testid="basemap-hint">{{ basemapHint }}</p>
+    </div>
 
     <!-- 左上角浮层：标题 + 后端连通性 + 轨迹列表 -->
     <aside class="panel">
@@ -1107,6 +1166,46 @@ async function selectTrack(id) {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+}
+
+/* 在线底图开关：地球右上角，与左上角的 .panel 分居两侧，互不遮挡 */
+.basemap-switch {
+  position: absolute;
+  top: var(--gap);
+  right: var(--gap);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.basemap-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #cfe3f5;
+  background: rgba(10, 16, 26, 0.78);
+  border: 1px solid rgba(127, 209, 255, 0.28);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.basemap-btn:hover:not(:disabled) { border-color: rgba(127, 209, 255, 0.6); }
+.basemap-btn:disabled { opacity: 0.6; cursor: progress; }
+/* 打开时明确"亮着"：演示时一眼看出当前用的是哪张底图 */
+.basemap-btn.on { color: #0a101a; background: #7fd1ff; border-color: #7fd1ff; }
+
+.basemap-hint {
+  max-width: 260px;
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+  color: #ffd166;
+  background: rgba(10, 16, 26, 0.9);
+  border: 1px solid rgba(255, 209, 102, 0.35);
+  border-radius: 8px;
 }
 
 .panel {
