@@ -1201,6 +1201,7 @@ python scripts/acceptance/verify-density-api.py
      `Rectangle.intersection(options.rectangle, tilingScheme.rectangle)` ⇒ 超出世界边界的部分**被裁掉**
      （实测 `west` 恒等于 -180、`east` 保留偏移），"平移"退化成"以世界西/南边缘为锚点的缩放"：
      北京只恢复约七成、**残余 ~150 米**。
+  ⇒ **但这条最终没采用**（见下面第 3 点）：**已解决（2026-09-27）**：最终没走「挪影像」，改成**显示期坐标转换** —— 底图是火星坐标时把画在地球上的几何整体 **+delta**、用户画出来的坐标 **−delta** 转回真实 WGS84 再查库（`lib/basemap.js` 的 `wgs84ToGcj02` 等，`App.vue` 一处接上）。**按点取 delta ⇒ 精确**、与城市无关。实测（验收脚本读**地球实际画出来的坐标**）：底图开着位移 **+523 米东 / +146 米北**，关掉后 **0.0 米**。
   2. 改去挪**剖分方案**的墨卡托米制边界（更"正统"）：**经度方向走不通** —— 世界西边界本来就是 -180，
      任何向西平移都会越过 ±180，Cesium 归一化后矩形退化（实测构造出的 `provider.rectangle.west` 变成 +179.99），
      图层入地球时 `Rectangle.intersection` 返回 `undefined` ⇒ 抛 `DeveloperError`、渲染直接停住。
