@@ -16,7 +16,11 @@ import { sortHotspots } from './lib/hotspot.js'
 import { pickCellSize, legendMax, HOUR_PRESETS } from './lib/density.js'
 import { filterMatches } from './lib/similarity.js'
 import { polygonGeometry, pointGeometry, rectGeometry, visibleItems } from './lib/region.js'
-import { basemapLabel, DEFAULT_STYLE, layerDescriptors, styleOptions } from './lib/basemap.js'
+import {
+  basemapLabel, DEFAULT_STYLE, gcj02ToWgs84, isGcj02Style, layerDescriptors,
+  shiftBbox, shiftGeoJson, shiftHotspotList, shiftPointList, shiftTrackList,
+  styleOptions, wgs84ToGcj02,
+} from './lib/basemap.js'
 
 /* ============ 后端连通性 ============ */
 const health = ref(null)
@@ -181,7 +185,8 @@ async function loadStays(id) {
 
 /** 点停留点列表里的一条 → 地球飞过去 */
 function focusStay(s) {
-  globe.value?.focusOn(s.lon, s.lat, s.radiusM)
+  const p = displayPt(s.lon, s.lat)
+  globe.value?.focusOn(p.lon, p.lat, s.radiusM)
 }
 
 /* ============ 热点（跨轨迹）============ */
@@ -234,7 +239,7 @@ async function switchMode(mode) {
     const insetLeft = panelEl
       ? panelEl.getBoundingClientRect().right / window.innerWidth
       : 0
-    globe.value?.fitBounds(sortedHotspots.value, insetLeft)
+    globe.value?.fitBounds(globeHotspots.value, insetLeft)
     return
   }
 
@@ -279,7 +284,8 @@ async function loadHotspots() {
 
 /** 点热点列表里的一条 → 地球飞过去 */
 function focusHotspot(h) {
-  globe.value?.focusOn(h.centerLon, h.centerLat, Math.max(h.radiusM, 200))
+  const p = displayPt(h.centerLon, h.centerLat)
+  globe.value?.focusOn(p.lon, p.lat, Math.max(h.radiusM, 200))
 }
 
 /* ============ 网格密度（跨轨迹）============ */
@@ -307,7 +313,9 @@ let densitySeq = 0
  * 这样拖动地图时地面上的网格是纹丝不动的。
  */
 async function loadDensity() {
-  const box = globe.value?.getViewBbox()
+  // ⚠️ 相机给的是**真实 WGS84** 包围盒，而格子是按"显示坐标"画的（火星底图下已 +delta），
+  //    所以查库前要把这个盒子按 −delta 挪回去，否则网格会整体偏出去。
+  const box = shiftBbox(globe.value?.getViewBbox(), gcj02Display.value, false)
   if (!box) return // 视角看太空/含极点 → 跳过这次
   const width = box.east - box.west
   const cell = pickCellSize(width, 80)
@@ -500,7 +508,8 @@ async function focusSimilar(trackId) {
   if (!target.points || target.points.length === 0) return
   // 用轨迹中点（而不是起点）当目标：飞过去之后两边都能看在眼里
   const mid = target.points[Math.floor(target.points.length / 2)]
-  globe.value?.focusOn(mid.lon, mid.lat, 500)
+  const p = displayPt(mid.lon, mid.lat)
+  globe.value?.focusOn(p.lon, p.lat, 500)
 }
 
 /* ============ 空间范围查询（第五档「圈选」）============ */
@@ -514,6 +523,31 @@ const basemapOn = ref(false)
 const basemapLayers = ref([])            // 空数组 = 地球那边一层在线底图都不画
 const basemapStyle = ref(DEFAULT_STYLE)  // amap-street（建筑轮廓 + 路名）/ amap-image（高清影像）
 const styleChoices = styleOptions()
+
+/*
+ * ============ 显示期坐标转换（GCJ-02）============
+ *
+ * 高德瓦片是按 GCJ-02（火星坐标）切的，而我们的数据是 WGS84。**不去动影像，改动物何**：
+ * 凡是"要画在地球上"的几何都 +delta，用户在地图上画出来的坐标再 −delta 转回 WGS84 去查库。
+ * 两边于是落在同一个坐标系里 ⇒ 精确重合，且与所在地无关（不像"挪影像"那样只能恢复七成）。
+ * 详见 frontend/src/lib/basemap.js 与 docs/DEPLOY.md 第 11 节。
+ */
+const gcj02Display = computed(() => basemapOn.value && isGcj02Style(basemapStyle.value))
+
+/** 真实 WGS84 → 显示坐标（给相机目标用：真实位置要飞到它"被画出来"的地方） */
+function displayPt(lon, lat) {
+  return gcj02Display.value ? wgs84ToGcj02(lon, lat) : { lon, lat }
+}
+
+// 每个都要过：漏一条，那一层就会单独偏出去几百米
+const globePoints = computed(() => shiftPointList(trackPoints.value, gcj02Display.value))
+const globeStays = computed(() => shiftPointList(stays.value, gcj02Display.value))
+const globeHotspots = computed(() => shiftHotspotList(sortedHotspots.value, gcj02Display.value))
+const globeDensityCells = computed(() => shiftPointList(densityCells.value, gcj02Display.value))
+const globeSimilarBaseline = computed(() => shiftPointList(similarityBaselinePoints.value, gcj02Display.value))
+const globeSimilarTracks = computed(() => shiftTrackList(similarityTracks.value, gcj02Display.value))
+const globeWithinTracks = computed(() => shiftTrackList(withinTracksForGlobe.value, gcj02Display.value))
+const globeRegion = computed(() => shiftGeoJson(withinRegion.value, gcj02Display.value))
 const bufferM = ref(500)
 const bufferCenter = ref(null)            // 缓冲区中心（地图上点出来的），给"改半径重查"用
 const withinBusy = ref(false)
@@ -693,20 +727,27 @@ function startDraw(mode) { drawingMode.value = mode }
 
 function onDrawRect(r) {
   drawingMode.value = 'idle'
-  queryWithin(rectGeometry({ lon: r.west, lat: r.south }, { lon: r.east, lat: r.north }))
+  // 画出来的是**显示坐标**（火星底图下已 +delta）⇒ 查库前转回真实 WGS84
+  const sw = gcj02Display.value ? gcj02ToWgs84(r.west, r.south) : { lon: r.west, lat: r.south }
+  const ne = gcj02Display.value ? gcj02ToWgs84(r.east, r.north) : { lon: r.east, lat: r.north }
+  queryWithin(rectGeometry({ lon: sw.lon, lat: sw.lat }, { lon: ne.lon, lat: ne.lat }))
 }
 
 function onDrawPolygon(points) {
   drawingMode.value = 'idle'
-  const g = polygonGeometry(points)
+  // 同上：显示坐标 → 真实 WGS84
+  const truePoints = gcj02Display.value ? points.map((p) => gcj02ToWgs84(p.lon, p.lat)) : points
+  const g = polygonGeometry(truePoints)
   if (!g) { withinError.value = '至少点 3 个点才能围成一个区域'; return }
   queryWithin(g)
 }
 
 function onDrawBuffer(center) {
-  bufferCenter.value = center
+  // bufferCenter 存**真实 WGS84**：面板上的「查询」按钮会直接拿它再去查一次库
+  bufferCenter.value = gcj02Display.value ? gcj02ToWgs84(center.lon, center.lat) : center
   drawingMode.value = 'idle'
-  queryWithin(pointGeometry(center.lon, center.lat), { bufferM: bufferM.value })
+  const c = bufferCenter.value
+  queryWithin(pointGeometry(c.lon, c.lat), { bufferM: bufferM.value })
 }
 
 /** 改完半径想用同一个中心重查（面板上的「查询」按钮） */
@@ -884,18 +925,18 @@ async function selectTrack(id) {
     <!-- 三维地球占满整个视口 -->
     <CesiumGlobe
       ref="globe"
-      :points="trackPoints"
+      :points="globePoints"
       :loop="loop"
-      :stay-points="viewMode === 'stay' ? stays : []"
-      :hotspots="viewMode === 'hotspot' ? sortedHotspots : []"
-      :density-cells="viewMode === 'density' ? densityCells : []"
+      :stay-points="viewMode === 'stay' ? globeStays : []"
+      :hotspots="viewMode === 'hotspot' ? globeHotspots : []"
+      :density-cells="viewMode === 'density' ? globeDensityCells : []"
       :density-max="densityMax"
       :density-cell-size="densityCellSize"
-      :similar-baseline="viewMode === 'similar' && similarityBaselinePoints.length
-        ? { points: similarityBaselinePoints } : null"
-      :similar-tracks="viewMode === 'similar' ? similarityTracks : []"
-      :region="viewMode === 'within' ? withinRegion : null"
-      :within-tracks="viewMode === 'within' ? withinTracksForGlobe : []"
+      :similar-baseline="viewMode === 'similar' && globeSimilarBaseline.length
+        ? { points: globeSimilarBaseline } : null"
+      :similar-tracks="viewMode === 'similar' ? globeSimilarTracks : []"
+      :region="viewMode === 'within' ? globeRegion : null"
+      :within-tracks="viewMode === 'within' ? globeWithinTracks : []"
       :drawing-mode="viewMode === 'within' ? drawingMode : 'idle'"
       :basemap-layers="basemapLayers"
       @time-change="onTimeChange"

@@ -1,13 +1,14 @@
 // frontend/scripts/check-basemap.mjs
 //
-// 在线底图（高德）的**纯逻辑**回归：URL 拼装、GCJ-02 补偿、样式与图层描述。
-// 这些都不碰浏览器、不碰网络 —— 拼接规则错了会直接表现为"瓦片 404/占位图"，
-// 而那种错在页面上只表现为"地图没变"，非常难查；所以把它钉在纯函数这一层。
+// 在线底图（高德）的**纯逻辑**回归：URL 拼装、显示期坐标转换、样式与图层描述。
+// 这些都不碰浏览器、不碰网络 —— 拼接/换算错了的表现只是"地图看起来没变"或"轨迹整体偏几百米"，
+// 在浏览器里极难定位；所以把它钉在纯函数这一层。
 import assert from 'node:assert/strict'
 import {
   AMAP_SUBDOMAINS, BASEMAP_STYLES, DEFAULT_MAX_LEVEL, DEFAULT_STYLE,
-  amapImageUrl, amapStreetUrl, basemapLabel, compensatedWorldRectangle,
-  gcj02Offset, layerDescriptors, shouldRecomputeOffset, styleOptions,
+  amapImageUrl, amapStreetUrl, basemapLabel, gcj02Offset, gcj02ToWgs84, isGcj02Style,
+  layerDescriptors, shiftBbox, shiftGeoJson, shiftHotspotList, shiftPointList,
+  shiftTrackList, styleOptions, wgs84ToGcj02,
 } from '../src/lib/basemap.js'
 
 let ok = 0
@@ -58,48 +59,75 @@ t('北京一带的偏移量在合理量级（约 0.002~0.008 度，两轴都为�
   assert.ok(Math.abs(dLat) * 111000 > 100, '偏移应达到百米量级')
 })
 
-t('补偿矩形 = 世界矩形往反方向挪 delta（纬度取 Web Mercator 的 ±85.05）', () => {
-  const [w, s, e, n] = compensatedWorldRectangle(116.397, 39.909)
-  const { dLon, dLat } = gcj02Offset(116.397, 39.909)
-  assert.ok(Math.abs(w - (-180 - dLon)) < 1e-12, '西边要往西挪 dLon')
-  assert.ok(Math.abs(e - (180 - dLon)) < 1e-12)
-  assert.ok(Math.abs(s - (-85.05112878 - dLat)) < 1e-9)
-  assert.ok(Math.abs(n - (85.05112878 - dLat)) < 1e-9)
-  assert.ok(e > w && n > s, '矩形必须有效')
+// ------------------------------------------------- 显示期坐标转换（真正对齐的做法）
+t('⭐ wgs84ToGcj02：北京一带 +delta ≈ 555 米（东 533 / 北 156）', () => {
+  const g = wgs84ToGcj02(116.397, 39.909)
+  assert.ok(Math.abs(g.lon - (116.397 + 0.006244)) < 1e-5, `lon=${g.lon}`)
+  assert.ok(Math.abs(g.lat - (39.909 + 0.001403)) < 1e-5, `lat=${g.lat}`)
+  const mEast = (g.lon - 116.397) * 111320 * Math.cos((39.909 * Math.PI) / 180)
+  const mNorth = (g.lat - 39.909) * 111320
+  assert.ok(mEast > 450 && mEast < 600, `东向 ${mEast.toFixed(0)} 米`)
+  assert.ok(mNorth > 100 && mNorth < 220, `北向 ${mNorth.toFixed(0)} 米`)
 })
 
-// --------------------------------------- 补偿"能不能随地点重算"（跨城正确性的前提）
-t('偏移随地点变化（北京 ≠ 上海，这正是要实时重算的原因）', () => {
-  const bj = compensatedWorldRectangle(116.397, 39.909)
-  const sh = compensatedWorldRectangle(121.4737, 31.2304)
-  assert.ok(Math.abs(bj[0] - sh[0]) > 0.001, `两地 west 差 ${Math.abs(bj[0] - sh[0]).toFixed(6)}°，应上百米`)
-  assert.ok(Math.abs(bj[3] - sh[3]) > 0.001, `两地 north 差 ${Math.abs(bj[3] - sh[3]).toFixed(6)}°，应上百米`)
+t('中国范围外不转换（纽约原样返回）', () => {
+  const ny = wgs84ToGcj02(-74.0, 40.7)
+  assert.ok(Math.abs(ny.lon + 74.0) < 1e-12 && Math.abs(ny.lat - 40.7) < 1e-12)
 })
 
-// ------------------------------------------------- 补偿该不该重算（相机停稳后）
-t('参考点完全相同（或只挪了几十米）时不重算', () => {
-  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.397, lat: 39.909 }), false)
-  // 0.0002 度 ≈ 22 米，落在默认阈值 0.0005 度（≈50 米）以内 ⇒ 不值得重建
-  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.3972, lat: 39.9091 }), false)
+t('gcj02ToWgs84 是它的近似逆：往返误差 < 5 米', () => {
+  const a = { lon: 116.397, lat: 39.909 }
+  const g = wgs84ToGcj02(a.lon, a.lat)
+  const back = gcj02ToWgs84(g.lon, g.lat)
+  const m = Math.hypot((back.lon - a.lon) * 85400, (back.lat - a.lat) * 111320)
+  assert.ok(m < 5, `往返误差 ${m.toFixed(2)} 米`)
 })
 
-t('挪过阈值（北京的补偿量不能拿去上海用）时重算', () => {
-  // 北京 → 上海人民广场：两轴都远超阈值
-  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 121.4737, lat: 31.2304 }), true)
-  // 只有经度越过阈值也该重算（不要求两轴同时越线）
-  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.398, lat: 39.909 }), true)
+t('shiftPointList：平移 lon/lat、其余字段保留；关掉时原样返回且不改原数据', () => {
+  const pts = [{ seq: 1, lon: 116.397, lat: 39.909, speedMps: 3.2 }]
+  const on = shiftPointList(pts, true)
+  assert.equal(on[0].seq, 1)
+  assert.equal(on[0].speedMps, 3.2)
+  assert.ok(on[0].lon > 116.397 && on[0].lat > 39.909)
+  assert.equal(shiftPointList(pts, false), pts, '关掉时应原样返回（省一次拷贝）')
+  assert.equal(pts[0].lon, 116.397, '原始数据不能被就地改动')
 })
 
-t('任一侧缺失（null/undefined）都判为"要重算"，而不是抛异常', () => {
-  assert.equal(shouldRecomputeOffset(null, { lon: 116.397, lat: 39.909 }), true)
-  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, null), true)
-  assert.equal(shouldRecomputeOffset(undefined, undefined), true)
+t('⭐ shiftHotspotList：热点字段是 centerLon/centerLat（套 shiftPointList 会漏掉）', () => {
+  const hs = [{ centerLon: 116.397, centerLat: 39.909, radiusM: 200, visits: 3 }]
+  const on = shiftHotspotList(hs, true)
+  assert.ok(on[0].centerLon > 116.397 && on[0].centerLat > 39.909, 'centerLon/Lat 应被平移')
+  assert.equal(on[0].radiusM, 200)
+  assert.equal(hs[0].centerLon, 116.397, '原数组不能被改')
 })
 
-t('反向移动（往回飞）越过阈值同样重算', () => {
-  assert.equal(shouldRecomputeOffset({ lon: 121.4737, lat: 31.2304 }, { lon: 116.397, lat: 39.909 }), true)
-  // 反向但只挪了 20 米 ⇒ 仍然不重算（阈值看的是绝对差值，不看方向）
-  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.3968, lat: 39.909 }), false)
+t('shiftTrackList：嵌套的 points[] 一并平移（相似档 / 圈选档）', () => {
+  const ts = [{ trackId: 7, similarity: 0.8, points: [{ lon: 116.4, lat: 39.9 }] }]
+  const on = shiftTrackList(ts, true)
+  assert.ok(on[0].points[0].lon > 116.4 && on[0].points[0].lat > 39.9)
+  assert.equal(on[0].similarity, 0.8)
+  assert.equal(ts[0].points[0].lon, 116.4, '原数据不能被改')
+})
+
+t('shiftGeoJson：Polygon / MultiPolygon 的 [lon,lat] 二元组都要平移', () => {
+  const poly = { type: 'Polygon', coordinates: [[[116.3, 39.9], [116.4, 39.9], [116.4, 40.0], [116.3, 39.9]]] }
+  assert.ok(shiftGeoJson(poly, true).coordinates[0][0][0] > 116.3)
+  assert.equal(poly.coordinates[0][0][0], 116.3, '原对象不能被改')
+  const multi = { type: 'MultiPolygon', coordinates: [[[[116.3, 39.9], [116.4, 39.9], [116.4, 40.0]]]] }
+  assert.ok(shiftGeoJson(multi, true).coordinates[0][0][0][0] > 116.3)
+})
+
+t('shiftBbox：查库的视野包围盒按 −delta 挪回真实 WGS84', () => {
+  const box = { west: 116.3, south: 39.8, east: 116.5, north: 40.0 }
+  const t1 = shiftBbox(box, true, false)
+  assert.ok(t1.west < box.west && t1.south < box.south, '−delta：往西/南挪')
+  assert.ok(Math.abs((t1.east - t1.west) - (box.east - box.west)) < 1e-9, '宽度不变')
+})
+
+t('isGcj02Style：只有高德两套样式需要转换', () => {
+  assert.equal(isGcj02Style('amap-street'), true)
+  assert.equal(isGcj02Style('amap-image'), true)
+  assert.equal(isGcj02Style('不存在的样式'), false)
 })
 
 // ---------------------------------------------------------------- 样式
@@ -127,14 +155,11 @@ t('影像样式：URL 是影像图', () => {
   assert.match(layers[0].url, /style=6/)
 })
 
-t('每种样式都带补偿矩形，且随参考点变化（北京与纽约不同）', () => {
-  const beijing = layerDescriptors('amap-image', { lon: 116.397, lat: 39.909 })[0]
-  const newYork = layerDescriptors('amap-image', { lon: -74.0, lat: 40.7 })[0]
-  assert.equal(beijing.rectangle.length, 4)
-  assert.notDeepEqual(beijing.rectangle, newYork.rectangle,
-    '中国范围内要补偿、范围外不补偿，两者矩形必须不同')
-  assert.deepEqual(newYork.rectangle, [-180, -85.05112878, 180, 85.05112878],
-    '范围外应等于未偏移的世界矩形')
+t('图层描述里**不再有**补偿矩形（坐标对齐交给显示期转换）', () => {
+  const layers = layerDescriptors('amap-image')
+  assert.equal(layers[0].rectangle, undefined, '描述里不该再有补偿矩形')
+  assert.equal(layers[0].kind, 'xyz')
+  assert.equal(layers[0].maximumLevel, 18)
 })
 
 t('样式键写错时退回默认样式（不抛异常）', () => {

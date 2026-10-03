@@ -29,6 +29,7 @@
 """
 import hashlib
 import json
+import math
 import os
 import re
 from collections import Counter
@@ -129,49 +130,48 @@ def layers(page):
     return r.get("n"), r.get("why")
 
 
-# 读**在线底图 provider 的补偿矩形**（弧度 → 度）。
-# 这是"实时重算"最硬的功能证据：跨城后若矩形没变，说明补偿量还是旧城市的。
-# 比"数网络请求"可靠 —— 瓦片可能命中浏览器 HTTP 缓存，请求数不涨也属正常。
-RECT_JS = r"""
-() => {
-  try {
-    const app = document.querySelector('#app');
-    const root = app && app.__vue_app__ && app.__vue_app__._instance;
-    if (!root) return null;
-    const seen = new Set(); const stack = [root]; let inst = null;
-    while (stack.length) {
-      const i = stack.pop();
-      if (!i || seen.has(i)) continue;
-      seen.add(i);
-      if (i.setupState && typeof i.setupState.setDrawingMode === 'function') { inst = i; break; }
-      const sub = i.subTree;
-      if (sub) {
-        if (sub.component) stack.push(sub.component);
-        const c = sub.children;
-        if (Array.isArray(c)) { for (const x of c) if (x && x.component) stack.push(x.component); }
-        else if (c && c.component) stack.push(c.component);
-      }
-    }
-    if (!inst) return null;
-    let v = inst.setupState && inst.setupState.viewer;
-    if (v && v.value) v = v.value;
-    if (!v || !v.imageryLayers || v.imageryLayers.length < 2) return null;
-    const provider = v.imageryLayers.get(v.imageryLayers.length - 1).imageryProvider;
-    const r = provider && provider.rectangle;
-    if (!r) return null;
-    const deg = (x) => x * 180 / Math.PI;
-    return { west: deg(r.west), east: deg(r.east), south: deg(r.south), north: deg(r.north) };
-  } catch (e) { return null; }
+# 读"地球实际画出来的"轨迹折线首点坐标（与接口原始坐标一比，就能看出显示期转换有没有生效）
+DRAWN_JS = r"""
+async () => {
+  const cesiumUrl = performance.getEntriesByType('resource').map(e => e.name)
+    .find(n => n.includes('/deps/cesium.js'));
+  if (!cesiumUrl) return { why: 'no cesium dep' };
+  const C = await import(/* @vite-ignore */ cesiumUrl);
+  const app = document.querySelector('#app');
+  const root = app && app.__vue_app__ && app.__vue_app__._instance;
+  const seen = new Set(); const stack = [root]; let globe = null;
+  while (stack.length) {
+    const i = stack.pop(); if (!i || seen.has(i)) continue; seen.add(i);
+    if (i.setupState && typeof i.setupState.setDrawingMode === 'function') { globe = i; break; }
+    const sub = i.subTree;
+    if (sub) { if (sub.component) stack.push(sub.component);
+      const c = sub.children;
+      if (Array.isArray(c)) { for (const x of c) if (x && x.component) stack.push(x.component); }
+      else if (c && c.component) stack.push(c.component); }
+  }
+  let v = globe && globe.setupState && globe.setupState.viewer;
+  if (v && v.value) v = v.value;
+  if (!v) return { why: 'no viewer' };
+  let best = null, bestN = 0;
+  for (const e of v.entities.values) {
+    const pl = e.polyline;
+    if (!pl || !pl.positions) continue;
+    const arr = pl.positions.getValue ? pl.positions.getValue(C.JulianDate.now()) : pl.positions;
+    if (Array.isArray(arr) && arr.length > bestN) { best = arr; bestN = arr.length; }
+  }
+  if (!best || best.length === 0) return { why: 'no polyline' };
+  const c0 = C.Cartographic.fromCartesian(best[0]);
+  return { n: bestN, lon: C.Math.toDegrees(c0.longitude), lat: C.Math.toDegrees(c0.latitude) };
 }
 """
 
 
-def offset_rect(page):
-    """打印并返回当前在线图层的补偿矩形（度）；读不到返回 None"""
-    r = page.evaluate(RECT_JS)
-    if r:
-        print(f"       补偿矩形 west={r['west']:.6f}° east={r['east']:.6f}° "
-              f"south={r['south']:.6f}° north={r['north']:.6f}°")
+def drawn_first_point(page):
+    r = page.evaluate(DRAWN_JS)
+    if r and "lon" in r:
+        print(f"       画出来的轨迹首点：lon={r['lon']:.6f} lat={r['lat']:.6f}（{r['n']} 个点）")
+    else:
+        print(f"       读画出来的轨迹首点失败：{r}")
     return r
 
 
@@ -318,31 +318,14 @@ def main():
         page.wait_for_timeout(4500)
         page.screenshot(path=os.path.join(OUT, "basemap-align-tiananmen.png"))
         print(f"       对齐检查图（天安门）：{os.path.join(OUT, 'basemap-align-tiananmen.png')}")
-        print("       —— 记下此刻的补偿矩形（北京）")
-        rect_bj = offset_rect(page)
-
-        # 再拍一张上海的：验证**实时重算**生效 —— 补偿量只算一次的话，
-        # 从天安门飞到上海后影像还带着北京的 delta，这里会明显偏 200~300 米。
+        # —— 上海那张图照旧拍（跨城重算已不需要，但图能确认换个城市也正常）——
         page.evaluate(FOCUS_JS, {**SHANGHAI, "radius": 500})
         page.wait_for_timeout(4000)
         page.screenshot(path=os.path.join(OUT, "basemap-align-shanghai.png"))
         print(f"       上海对齐检查图：{os.path.join(OUT, 'basemap-align-shanghai.png')}")
-        print("       —— 记下此刻的补偿矩形（上海）")
-        rect_sh = offset_rect(page)
-        if rect_bj and rect_sh:
-            # ⚠️ 判据用 east 而不是 west：Cesium 会把 rectangle 裁到世界边界内，
-            #    **west 恒等于 -180**（裁剪的痕迹），只有 east 还带着偏移。
-            moved = abs(rect_sh["east"] - rect_bj["east"])
-            clamped = abs(rect_bj["west"] + 180) < 1e-9
-            check(f"⭐ 跨城后补偿确实随相机重算（Δeast={moved:.6f}° ≈ {moved * 95000:.0f} 米）",
-                  moved > 0.0005,
-                  f"北京 east={rect_bj['east']:.6f}° vs 上海 east={rect_sh['east']:.6f}°")
-            print(f"       （west 恒为 -180 = Cesium 裁剪的痕迹；{clamped}）"
-                  f"—— 残余约百米，属已知限制，见 docs/DEPLOY.md 第 11.1 节")
-        else:
-            skip("跨城补偿重算", f"读不到 provider.rectangle（北京 {rect_bj} / 上海 {rect_sh}）")
 
-        # ⭐ 补偿的**真正**验收：让一条**真实**轨迹压在街道上（真轨迹跟着路网走，一眼可判）
+        raw_first = None      # 供关掉底图后的 A/B 用
+        # ⭐ 真实轨迹压在街道上（真轨迹跟着路网走，一眼可判）
         try:
             with urlopen(API + "/api/tracks?source=geolife&limit=1", timeout=10) as r:
                 tracks = json.loads(r.read().decode())
@@ -360,6 +343,19 @@ def main():
                 page.screenshot(path=os.path.join(OUT, "basemap-align-track.png"))
                 print(f"       对齐检查图（真实轨迹 id={tid}）："
                       f"{os.path.join(OUT, 'basemap-align-track.png')}（selectTrack={picked_ok}）")
+                # ⭐ 显示期坐标转换的硬证据：画出来的首点应比接口原始 WGS84 坐标**大 delta**
+                #   （北京 ≈ +533 米东 / +156 米北）。底图关掉后应回到 0，所以还要做一次 A/B。
+                with urlopen(API + f"/api/tracks/{tid}", timeout=15) as r2:
+                    det = json.loads(r2.read().decode())
+                raw_first = (det.get("points") or [{}])[0]
+                drawn_on = drawn_first_point(page)
+                if "lon" in drawn_on and raw_first.get("lon") is not None:
+                    d_lon = (drawn_on["lon"] - raw_first["lon"]) * 111320 * math.cos(math.radians(raw_first["lat"]))
+                    d_lat = (drawn_on["lat"] - raw_first["lat"]) * 111320
+                    check(f"⭐ 底图开着时几何按 +delta 画出来（东 {d_lon:.0f} 米 / 北 {d_lat:.0f} 米，期望 ≈ 533 / 156）",
+                          400 < d_lon < 650 and 100 < d_lat < 220, f"实际 东 {d_lon:.0f} / 北 {d_lat:.0f}")
+                else:
+                    skip("显示期坐标转换（底图开着）", f"读不到坐标（drawn={drawn_on}, raw={raw_first}）")
             else:
                 skip("真实轨迹对齐检查", "接口没返回 geolife 轨迹")
         except Exception as e:                                 # noqa: BLE001
@@ -370,6 +366,16 @@ def main():
         page.wait_for_timeout(1500)
         n_back, why_back = layers(page)
         check("影像图层数回到 1", n_back == 1, f"实际 {n_back}（{why_back}）")
+        # A/B：底图关掉后，同一份数据应**按真实 WGS84** 画（位移回到 ~0）
+        page.wait_for_timeout(1500)
+        drawn_off = drawn_first_point(page)
+        if "lon" in drawn_off and raw_first:
+            d2_lon = (drawn_off["lon"] - raw_first["lon"]) * 111320 * math.cos(math.radians(raw_first["lat"]))
+            d2_lat = (drawn_off["lat"] - raw_first["lat"]) * 111320
+            check(f"⭐ 底图关掉后位移回到 ~0（东 {d2_lon:.1f} 米 / 北 {d2_lat:.1f} 米）",
+                  abs(d2_lon) < 15 and abs(d2_lat) < 15, f"实际 东 {d2_lon:.1f} / 北 {d2_lat:.1f}")
+        else:
+            skip("显示期坐标转换（底图关掉）", f"读不到坐标（drawn={drawn_off}, raw={raw_first}）")
         frozen = len(urls)
         page.wait_for_timeout(2500)
         check("关掉后不再产生新的瓦片请求", len(urls) == frozen, f"{frozen} → {len(urls)}")
