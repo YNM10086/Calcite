@@ -9,6 +9,8 @@
   ⑤ 再关掉：图层回 1，且不再产生新的请求
 另外还会留两张**对齐检查图**（供人眼判断 GCJ-02 补偿对不对）：
   `.tmp/basemap-align-tiananmen.png`（相机对准天安门的 WGS84 坐标）
+  `.tmp/basemap-align-shanghai.png`（相机再飞到上海人民广场 —— 验证**补偿量会随相机实时重算**：
+  飞跨城后若仍沿用北京的 delta，这张会明显偏 200~300 米）
   `.tmp/basemap-align-track.png`（一条真实 GeoLife 轨迹压在街道图上——真轨迹跟着路网走，
   压不压得准一眼可判；合成演示轨迹是随机游走，判不了）
 
@@ -41,6 +43,8 @@ VIEWPORT = {"width": 1600, "height": 900}
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".tmp")
 TILE_HOSTS = ("autonavi.com",)
 TIANANMEN = {"lon": 116.3975, "lat": 39.9087}
+# 上海人民广场（WGS84）—— 跨城复测 GCJ-02 补偿：偏移量只算一次的话这里会偏 200~300 米
+SHANGHAI = {"lon": 121.4737, "lat": 31.2304}
 
 ok = 0
 fail = 0
@@ -123,6 +127,52 @@ FOCUS_JS = r"""
 def layers(page):
     r = page.evaluate(LAYERS_JS)
     return r.get("n"), r.get("why")
+
+
+# 读**在线底图 provider 的补偿矩形**（弧度 → 度）。
+# 这是"实时重算"最硬的功能证据：跨城后若矩形没变，说明补偿量还是旧城市的。
+# 比"数网络请求"可靠 —— 瓦片可能命中浏览器 HTTP 缓存，请求数不涨也属正常。
+RECT_JS = r"""
+() => {
+  try {
+    const app = document.querySelector('#app');
+    const root = app && app.__vue_app__ && app.__vue_app__._instance;
+    if (!root) return null;
+    const seen = new Set(); const stack = [root]; let inst = null;
+    while (stack.length) {
+      const i = stack.pop();
+      if (!i || seen.has(i)) continue;
+      seen.add(i);
+      if (i.setupState && typeof i.setupState.setDrawingMode === 'function') { inst = i; break; }
+      const sub = i.subTree;
+      if (sub) {
+        if (sub.component) stack.push(sub.component);
+        const c = sub.children;
+        if (Array.isArray(c)) { for (const x of c) if (x && x.component) stack.push(x.component); }
+        else if (c && c.component) stack.push(c.component);
+      }
+    }
+    if (!inst) return null;
+    let v = inst.setupState && inst.setupState.viewer;
+    if (v && v.value) v = v.value;
+    if (!v || !v.imageryLayers || v.imageryLayers.length < 2) return null;
+    const provider = v.imageryLayers.get(v.imageryLayers.length - 1).imageryProvider;
+    const r = provider && provider.rectangle;
+    if (!r) return null;
+    const deg = (x) => x * 180 / Math.PI;
+    return { west: deg(r.west), east: deg(r.east), south: deg(r.south), north: deg(r.north) };
+  } catch (e) { return null; }
+}
+"""
+
+
+def offset_rect(page):
+    """打印并返回当前在线图层的补偿矩形（度）；读不到返回 None"""
+    r = page.evaluate(RECT_JS)
+    if r:
+        print(f"       补偿矩形 west={r['west']:.6f}° east={r['east']:.6f}° "
+              f"south={r['south']:.6f}° north={r['north']:.6f}°")
+    return r
 
 
 def fetch_bytes(url, timeout=25):
@@ -268,6 +318,29 @@ def main():
         page.wait_for_timeout(4500)
         page.screenshot(path=os.path.join(OUT, "basemap-align-tiananmen.png"))
         print(f"       对齐检查图（天安门）：{os.path.join(OUT, 'basemap-align-tiananmen.png')}")
+        print("       —— 记下此刻的补偿矩形（北京）")
+        rect_bj = offset_rect(page)
+
+        # 再拍一张上海的：验证**实时重算**生效 —— 补偿量只算一次的话，
+        # 从天安门飞到上海后影像还带着北京的 delta，这里会明显偏 200~300 米。
+        page.evaluate(FOCUS_JS, {**SHANGHAI, "radius": 500})
+        page.wait_for_timeout(4000)
+        page.screenshot(path=os.path.join(OUT, "basemap-align-shanghai.png"))
+        print(f"       上海对齐检查图：{os.path.join(OUT, 'basemap-align-shanghai.png')}")
+        print("       —— 记下此刻的补偿矩形（上海）")
+        rect_sh = offset_rect(page)
+        if rect_bj and rect_sh:
+            # ⚠️ 判据用 east 而不是 west：Cesium 会把 rectangle 裁到世界边界内，
+            #    **west 恒等于 -180**（裁剪的痕迹），只有 east 还带着偏移。
+            moved = abs(rect_sh["east"] - rect_bj["east"])
+            clamped = abs(rect_bj["west"] + 180) < 1e-9
+            check(f"⭐ 跨城后补偿确实随相机重算（Δeast={moved:.6f}° ≈ {moved * 95000:.0f} 米）",
+                  moved > 0.0005,
+                  f"北京 east={rect_bj['east']:.6f}° vs 上海 east={rect_sh['east']:.6f}°")
+            print(f"       （west 恒为 -180 = Cesium 裁剪的痕迹；{clamped}）"
+                  f"—— 残余约百米，属已知限制，见 docs/DEPLOY.md 第 11.1 节")
+        else:
+            skip("跨城补偿重算", f"读不到 provider.rectangle（北京 {rect_bj} / 上海 {rect_sh}）")
 
         # ⭐ 补偿的**真正**验收：让一条**真实**轨迹压在街道上（真轨迹跟着路网走，一眼可判）
         try:

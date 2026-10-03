@@ -1196,7 +1196,18 @@ python scripts/acceptance/verify-density-api.py
 - **2026-09-27 决定：暂存这个问题**（边际收益已经很低）。要看当前对齐效果，跑验收脚本留的两张图：
   `.tmp/basemap-align-tiananmen.png`（相机对准天安门 WGS84 坐标）与
   `.tmp/basemap-align-track.png`（真实 GeoLife 轨迹压在街道图上——真轨迹跟着路网走，一眼可判）。
-- 要彻底消除偏移，只能换回**无偏移坐标系**的底图（天地图 CGCS2000≈WGS84 / OSM）。
+- **补偿为什么只能"部分生效"**（两条路都实测过，2026-09-27）：
+  1. 把世界矩形反向挪 delta 交给 `provider.rectangle`（当前做法）：Cesium 构造时做
+     `Rectangle.intersection(options.rectangle, tilingScheme.rectangle)` ⇒ 超出世界边界的部分**被裁掉**
+     （实测 `west` 恒等于 -180、`east` 保留偏移），"平移"退化成"以世界西/南边缘为锚点的缩放"：
+     北京只恢复约七成、**残余 ~150 米**。
+  2. 改去挪**剖分方案**的墨卡托米制边界（更"正统"）：**经度方向走不通** —— 世界西边界本来就是 -180，
+     任何向西平移都会越过 ±180，Cesium 归一化后矩形退化（实测构造出的 `provider.rectangle.west` 变成 +179.99），
+     图层入地球时 `Rectangle.intersection` 返回 `undefined` ⇒ 抛 `DeveloperError`、渲染直接停住。
+     （`UrlTemplateImageryProvider` 不传 `rectangle` 时它就是 `undefined`，同样会炸——必须显式传。）
+- **要彻底消除偏移，只能做"显示期坐标转换"**（把 WGS84 几何转成 GCJ-02 再画，或反过来）；
+  代价是轨迹/停留点/热点/密度格/圈选区域都要转，圈选交互还得反向转回来查库 —— 另一件较大的事，**暂存**。
+  另一条路是换回**无偏移坐标系**的底图（天地图 CGCS2000≈WGS84 / OSM）。
   天地图**曾经接过**，但用户那把 key 没开通「矢量底图」服务（任何层级都返回 200 + 空白/占位瓦片），
   公开影像又只到 12 级，**2026-09-27 已整体移除**（含后端配置接口）；相关教训保留在
   `_session_context.md`（`_w` 矩阵集 0 级是 1×1、HTTP 200 ≠ 有内容）。

@@ -87,11 +87,51 @@ export function gcj02Offset(lon, lat) {
 
 /**
  * 补偿后的"世界矩形"（度）：`[west, south, east, north]`。
- * 高德图层用它当 `rectangle`，把整张影像从 GCJ-02 推回 WGS84。
+ * 组件把它交给 `UrlTemplateImageryProvider.rectangle`，把高德的 GCJ-02 影像往 WGS84 推。
+ *
+ * ⚠️ 实测（2026-09-27）**两条路都试过，都只能"部分生效"**，这里是目前可用的那条：
+ *
+ * 1. 交这个矩形给 provider：Cesium 构造时做
+ *    `this._rectangle = Rectangle.intersection(options.rectangle, tilingScheme.rectangle)`
+ *    ⇒ 超出世界边界的部分**被裁掉**（实测 `west` 恒等于 -180、`east` 保留了偏移），
+ *    于是"平移"退化成"以世界西/南边缘为锚点的缩放"：**北京只恢复约七成，残余 ~150 米**。
+ *
+ * 2. 改去挪**剖分方案**的墨卡托米制边界（看起来更"正统"）：**经度方向走不通** ——
+ *    世界的西边界本来就是 -180，任何向西的平移都会越过 ±180，Cesium 对经度做归一化后
+ *    矩形会退化/回绕（实测构造出的 `provider.rectangle.west` 变成 +179.99，
+ *    接着图层入地球时 `Rectangle.intersection` 返回 undefined ⇒ 抛 DeveloperError、渲染停住）。
+ *
+ * ⇒ **要彻底消除偏移，只能改"显示期坐标转换"**（把 WGS84 几何转成 GCJ-02 再画，或反过来），
+ *    那是另一件较大的事（轨迹/停留点/热点/密度格/圈选区域都要转，圈选交互还要反向转回来查库）。
+ *    本项目当前**接受这 ~150 米**（用户 2026-09-27 决定：暂存、不再投入）。
  */
 export function compensatedWorldRectangle(lon, lat) {
   const { dLon, dLat } = gcj02Offset(lon, lat)
   return [-180 - dLon, -MERCATOR_MAX_LAT - dLat, 180 - dLon, MERCATOR_MAX_LAT - dLat]
+}
+
+/**
+ * 相机停稳后**要不要重算** GCJ-02 补偿：`prev`（上次用的参考点）离 `next`（当前相机中心）
+ * 够远就返回 true。
+ *
+ * 为什么需要它：偏移量是**按地点缓变**的，用北京那次的补偿量去看上海的轨迹会差 200~300 米。
+ * 而 Cesium 的 `UrlTemplateImageryProvider.rectangle` 是**只读**属性（见组件里的重建逻辑），
+ * 重建代价不小 —— 相机每停一次都重建会让瓦片反复重下、画面闪，所以必须留一个"够远才动"的阈值。
+ *
+ * 纯函数、零依赖 ⇒ 阈值判断也能在 node 里断言（见 scripts/check-basemap.mjs）。
+ *
+ * @param {{lon: number, lat: number}|null|undefined} prev 上次用于补偿的参考点
+ * @param {{lon: number, lat: number}|null|undefined} next 当前相机中心
+ * @param {number} [minDeg=0.0005] 阈值（度），0.0005 ≈ 50 米
+ * @returns {boolean} true = 该重算了
+ */
+export function shouldRecomputeOffset(prev, next, minDeg = 0.0005) {
+  // 任一侧缺失/不是有限数 ⇒ 没有可比的基准，按"要重算"处理（宁可多算一次，也别带着旧偏移量跑）
+  if (!prev || !next) return true
+  if (!Number.isFinite(prev.lon) || !Number.isFinite(prev.lat)) return true
+  if (!Number.isFinite(next.lon) || !Number.isFinite(next.lat)) return true
+  // 经度或纬度**任一**越过阈值就重算 —— 反向移动（往回飞）同样是越过阈值，天然被这一条覆盖
+  return Math.abs(next.lon - prev.lon) > minDeg || Math.abs(next.lat - prev.lat) > minDeg
 }
 
 // ------------------------------------------------------------------ 样式定义

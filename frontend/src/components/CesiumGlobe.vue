@@ -25,8 +25,8 @@ import {
   WebMercatorTilingScheme,
   buildModuleUrl,
 } from 'cesium'
-// 在线底图的纯计算（URL 模板 / GCJ-02 补偿矩形）—— 见 lib/basemap.js，那里能用 node 断言
-import { compensatedWorldRectangle } from '../lib/basemap.js'
+// 在线底图的纯计算（URL 模板 / GCJ-02 补偿矩形 / 重算阈值）—— 见 lib/basemap.js，那里能用 node 断言
+import { compensatedWorldRectangle, shouldRecomputeOffset } from '../lib/basemap.js'
 import { computeMultiplier, timeRange } from '../lib/playback.js'
 // 热点的「大小 / 颜色」判断全在这个纯函数模块里，组件只负责画
 import { hotspotColor, hotspotPixelSize } from '../lib/hotspot.js'
@@ -869,6 +869,21 @@ watch(() => props.basemapLayers, (layers) => {
  */
 let onlineLayers = []          // 当前挂着的在线图层（自己记账才能精确撤掉，且不影响别的图层）
 
+// 上一次**用于算 GCJ-02 补偿**的参考点（一般是当时的相机中心）。
+// ⚠️ 刻意用普通变量、**不放进响应式**：它只在相机停稳时被读写一次，
+//    做成 ref 只会白白多触发一轮渲染（而它并不影响任何界面元素）。
+let lastOffsetRef = null
+
+/** 相机中心（度）。取不到（viewer 未就绪/已销毁，或中心不在球面上）返回 null */
+function cameraCenterLonLat(v) {
+  const carto = Cartographic.fromCartesian(v.camera.positionWC)
+  if (!carto) return null
+  return {
+    lon: CesiumMath.toDegrees(carto.longitude),
+    lat: CesiumMath.toDegrees(carto.latitude),
+  }
+}
+
 /** 撤掉全部在线图层。viewer 未就绪或已销毁时静默返回（幂等，重复调用安全） */
 function clearOnlineBasemap() {
   const v = viewer.value
@@ -876,6 +891,9 @@ function clearOnlineBasemap() {
     for (const layer of onlineLayers) v.imageryLayers.remove(layer, true)  // true = 连贴图一起销毁
   }
   onlineLayers = []
+  // 基准点一起作废：图层都没了，"上次用于补偿的位置"就不该留着，
+  // 否则下次打开底图会被误判成"离上次才 20 米、不用重算"
+  lastOffsetRef = null
 }
 
 /** 按描述数组重建在线图层；空数组 = 全部撤掉（这就是"关掉后零负担"的实现） */
@@ -883,27 +901,56 @@ function applyOnlineBasemap(layers) {
   const v = viewer.value
   if (!v || v.isDestroyed()) return
   clearOnlineBasemap()
-  // 高德是 GCJ-02（火星坐标）：按**当前相机中心**算偏移量，把影像矩形反向推回去，
+  // 高德是 GCJ-02（火星坐标）：按**当前相机中心**算偏移量，把影像反向推回去，
   // 这样我们的 WGS84 轨迹才压得在真实街道上（近似——偏移量随地点缓变，见 lib 注释）
-  let refPoint = null
-  const carto = Cartographic.fromCartesian(v.camera.positionWC)
-  if (carto) {
-    refPoint = { lon: CesiumMath.toDegrees(carto.longitude), lat: CesiumMath.toDegrees(carto.latitude) }
-  }
+  const refPoint = cameraCenterLonLat(v) ?? { lon: 116.397, lat: 39.909 }
+  // 补偿：把世界矩形反向挪 delta 交给 provider.rectangle。
+  // ⚠️ 为什么不用"挪剖分方案"那条更正统的路：经度方向走不通 —— 世界西边界就是 -180，
+  //    任何向西平移都会越过 ±180，Cesium 归一化后矩形退化（实测 west 变成 +179.99），
+  //    图层入地球时直接抛 DeveloperError、渲染停住。详见 lib/basemap.js 的注释。
+  //    代价是这里的矩形会被 Cesium 裁到世界边界内 ⇒ 只恢复约七成、残余约 150 米（已知限制）。
+  const rect = compensatedWorldRectangle(refPoint.lon, refPoint.lat)
   for (const spec of layers || []) {
-    const rect = refPoint ? compensatedWorldRectangle(refPoint.lon, refPoint.lat) : spec.rectangle
     const provider = new UrlTemplateImageryProvider({
       url: spec.url,                   // 含 {s} / {x} / {y} / {z}
       // 高德是 Web Mercator 瓦片，必须配 WebMercatorTilingScheme
       tilingScheme: new WebMercatorTilingScheme(),
+      // ⚠️ 必须显式传 rectangle：Cesium 的 UrlTemplateImageryProvider.rectangle
+      //    在不传时是 undefined，图层入地球后 `Rectangle.intersection(瓦片, undefined)` 会抛错。
+      rectangle: Rectangle.fromDegrees(rect[0], rect[1], rect[2], rect[3]),
       maximumLevel: spec.maximumLevel,
       subdomains: spec.subdomains,
-      // ⚠️ 补偿的关键：声明影像覆盖的世界矩形（往反方向挪 delta）⇒ 整张影像被推回 WGS84
-      rectangle: Rectangle.fromDegrees(rect[0], rect[1], rect[2], rect[3]),
       credit: '高德地图',
     })
     onlineLayers.push(v.imageryLayers.addImageryProvider(provider))
   }
+  // 记下这次用的基准点：相机停稳后拿它和新中心比，超过阈值才重建（见 refreshBasemapOffset）
+  if ((layers || []).length > 0) lastOffsetRef = refPoint
+}
+
+/**
+ * 相机停稳后按需重算 GCJ-02 补偿（用户"飞到另一个城市"时才会真的发生）。
+ *
+ * ⚠️ 为什么只能**重建**、不能就地改：
+ *    `UrlTemplateImageryProvider.rectangle` 是**只读**属性（构造参数，没有 setter），
+ *    所以拿不到 setter 用；唯一的办法是 `imageryLayers.remove(layer, true)` 之后再 add ——
+ *    记账与销毁仍然统一走上面的 onlineLayers / clearOnlineBasemap()，重建前后图层数量不变。
+ *
+ * ⚠️ 为什么设**阈值**（默认 0.0005 度 ≈ 50 米，见 shouldRecomputeOffset）：
+ *    相机每停一次都重建 ⇒ 瓦片反复重下、画面闪，比"偏移差几十米"难受得多；
+ *    而 GCJ-02 偏移是按地点**缓变**的，同城内 50 米以内的移动压根不值得动。
+ *
+ * ⚠️ 底图**关着**时（props.basemapLayers 为空）绝不重建 —— 否则就是凭空往空地球上加图层，
+ *    直接破坏"关闭状态下零瓦片请求"这条既有约束。
+ */
+function refreshBasemapOffset() {
+  const v = viewer.value
+  if (!v || v.isDestroyed()) return
+  if (!props.basemapLayers || props.basemapLayers.length === 0) return
+  const refPoint = cameraCenterLonLat(v)
+  if (!refPoint) return
+  if (!shouldRecomputeOffset(lastOffsetRef, refPoint)) return
+  applyOnlineBasemap(props.basemapLayers)
 }
 
 onMounted(() => {
@@ -950,7 +997,12 @@ onMounted(() => {
   // Cesium 的相机事件不是 Vue 事件，必须自己转出来 ——
   // App.vue 靠它决定"相机停稳了，该按新视野重新查密度了"。
   // 漏了这步，密度图就只会在切档时加载一次、缩放时永远不更新。
-  cameraMoveEndHandler = () => emit('camera-move-end')
+  // 同一个回调顺带做 GCJ-02 补偿的按需重算 —— **复用**它，不另注册 moveEnd，
+  // 否则两个处理器都在相机的停稳时刻跑，行为会互相难懂。
+  cameraMoveEndHandler = () => {
+    emit('camera-move-end')
+    refreshBasemapOffset()
+  }
   v.camera.moveEnd.addEventListener(cameraMoveEndHandler)
 
   // 万一父组件在挂载前就已经有点了，补画一次

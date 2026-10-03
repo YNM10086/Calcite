@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import {
   AMAP_SUBDOMAINS, BASEMAP_STYLES, DEFAULT_MAX_LEVEL, DEFAULT_STYLE,
   amapImageUrl, amapStreetUrl, basemapLabel, compensatedWorldRectangle,
-  gcj02Offset, layerDescriptors, styleOptions,
+  gcj02Offset, layerDescriptors, shouldRecomputeOffset, styleOptions,
 } from '../src/lib/basemap.js'
 
 let ok = 0
@@ -66,6 +66,40 @@ t('补偿矩形 = 世界矩形往反方向挪 delta（纬度取 Web Mercator 的
   assert.ok(Math.abs(s - (-85.05112878 - dLat)) < 1e-9)
   assert.ok(Math.abs(n - (85.05112878 - dLat)) < 1e-9)
   assert.ok(e > w && n > s, '矩形必须有效')
+})
+
+// --------------------------------------- 补偿"能不能随地点重算"（跨城正确性的前提）
+t('偏移随地点变化（北京 ≠ 上海，这正是要实时重算的原因）', () => {
+  const bj = compensatedWorldRectangle(116.397, 39.909)
+  const sh = compensatedWorldRectangle(121.4737, 31.2304)
+  assert.ok(Math.abs(bj[0] - sh[0]) > 0.001, `两地 west 差 ${Math.abs(bj[0] - sh[0]).toFixed(6)}°，应上百米`)
+  assert.ok(Math.abs(bj[3] - sh[3]) > 0.001, `两地 north 差 ${Math.abs(bj[3] - sh[3]).toFixed(6)}°，应上百米`)
+})
+
+// ------------------------------------------------- 补偿该不该重算（相机停稳后）
+t('参考点完全相同（或只挪了几十米）时不重算', () => {
+  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.397, lat: 39.909 }), false)
+  // 0.0002 度 ≈ 22 米，落在默认阈值 0.0005 度（≈50 米）以内 ⇒ 不值得重建
+  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.3972, lat: 39.9091 }), false)
+})
+
+t('挪过阈值（北京的补偿量不能拿去上海用）时重算', () => {
+  // 北京 → 上海人民广场：两轴都远超阈值
+  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 121.4737, lat: 31.2304 }), true)
+  // 只有经度越过阈值也该重算（不要求两轴同时越线）
+  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.398, lat: 39.909 }), true)
+})
+
+t('任一侧缺失（null/undefined）都判为"要重算"，而不是抛异常', () => {
+  assert.equal(shouldRecomputeOffset(null, { lon: 116.397, lat: 39.909 }), true)
+  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, null), true)
+  assert.equal(shouldRecomputeOffset(undefined, undefined), true)
+})
+
+t('反向移动（往回飞）越过阈值同样重算', () => {
+  assert.equal(shouldRecomputeOffset({ lon: 121.4737, lat: 31.2304 }, { lon: 116.397, lat: 39.909 }), true)
+  // 反向但只挪了 20 米 ⇒ 仍然不重算（阈值看的是绝对差值，不看方向）
+  assert.equal(shouldRecomputeOffset({ lon: 116.397, lat: 39.909 }, { lon: 116.3968, lat: 39.909 }), false)
 })
 
 // ---------------------------------------------------------------- 样式
