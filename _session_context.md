@@ -835,10 +835,22 @@ PowerShell 只负责启动和查错，不显示图形。
    另：用环境变量 `CALCITE_MAP_TIANDITU_TOKEN=xxx` 覆盖配置，可在**不碰用户本地配置文件**的前提下验接线
    （本轮就是这么用假 token 验出"图层 1→3→1"的）。
 
-> 📌 **环境故障记录（本轮遇到）**：**DSH 沙箱给工作区授权会失败** ——
+> 📌 **环境故障记录（2026-09-27）**：**DSH 沙箱给工作区授权会失败** ——
 > `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<工作区>)`，此后**每条 pwsh 命令**（连 `node`/`npm`）都起不来。
-> 处置：① `sandbox_permissions: danger-full-access` 提权重试同一条命令（有效）；② 按 AGENTS.md 让
-> `good_assistant` 代跑（它不受沙箱限制）；③ **重启 DSH 可恢复**。
+>
+> ✅ **真因已查明并已修好（不是火绒！我先前那个推测是错的）**：
+> 工作区目录的 DACL 里，当前账户只通过 `Authenticated Users` 拿到 **`Modify`**，而
+> **Modify 不含 `WRITE_DAC`（更改权限）**；沙箱**每条命令**都要改一次目录 DACL（grantWrite）⇒ 拒绝访问。
+> **修法（一次性；普通用户即可，因为自己是目录属主）**：
+> ```powershell
+> icacls "E:\JAVA_IDEA_package\JAVA_Project\Calcite" /grant "*<你的账户SID>:(OI)(CI)F"
+> ```
+> 加完**立刻生效、无需重启 DSH**（已实测：写文件/删文件都正常）。
+> ⚠️ `icacls` **不能用名字解析 `S-1-4-...` 这类 AppContainer SID**（报 "No mapping between account names
+> and security IDs"）；要补那种 SID 得用 `Set-Acl` + SDDL。目录里那条
+> `S-1-4-654659375-931457087:(W,D,DC)` 就是沙箱自己加的身份。
+> 应急处置（万一又坏）：① `sandbox_permissions: danger-full-access` 提权重试同一条命令（有效）；
+> ② 按 AGENTS.md 让 `good_assistant` 代跑（它不受沙箱限制）。
 
 ## 工作流
 - 技术栈：SpringBoot3 + Vue3 + Cesium + PostgreSQL/PostGIS
