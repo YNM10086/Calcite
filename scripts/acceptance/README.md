@@ -83,7 +83,7 @@ node scripts/acceptance/check-runtime-task9.mjs
 `verify-demo-data.py`（Task 4 演示数据断言）、`check-doc-links.py`（Task 1 文档链接检查）、
 `check-basemap.py`（在线底图开关：默认关 + 关闭态零瓦片请求 + 图层 1→2→1 + **瓦片真有内容**，
 需后端 8080 + 前端 5173 + 提权；判据是「最常见颜色占比」而不是状态码或颜色种数，
-另留两张 GCJ-02 对齐检查图到 `.tmp/basemap-align-*.png`，预期 **16** 项）——
+另留两张 GCJ-02 对齐检查图到 `.tmp/basemap-align-*.png`，预期 **18** 项（含「底图开着 +delta ／ 关掉归零」的位移 A/B 断言））——
 它们是 M4 收尾**新写**的，不在上面 22 个「从 `.tmp/` 搬来」之列。
 
 ## 3. 历史文档里的旧路径 `scripts/acceptance/` ←→ `.tmp/xxx`
